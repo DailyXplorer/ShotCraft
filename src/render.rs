@@ -2,7 +2,7 @@ use crate::model::*;
 use ab_glyph::{Font, FontVec, OutlineCurve, ScaleFont};
 use std::sync::Arc;
 use tiny_skia::{
-    BlendMode, Color, FillRule, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap, Rect, Stroke, StrokeDash, Transform,
+    BlendMode, Color, FillRule, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap, PixmapPaint, Rect, Stroke, StrokeDash, Transform,
 };
 
 pub struct Fonts {
@@ -574,6 +574,19 @@ fn polyline(pb: &mut PathBuilder, pts: &[P]) {
 
 fn draw_arrow(pm: &mut Pixmap, a: P, b: P, seed: u64, st: &Style) {
     let Some(geometry) = arrow_geometry(a, b, seed, st) else { return };
+    let [red, green, blue, alpha] = st.color;
+    if alpha == 255 {
+        paint_arrow(pm, geometry, st);
+        return;
+    }
+    // Shaft and head overlap, so a translucent arrow is painted opaque and faded once.
+    let Some(mut layer) = Pixmap::new(pm.width(), pm.height()) else { return };
+    paint_arrow(&mut layer, geometry, &Style { color: [red, green, blue, 255], ..*st });
+    let fade = PixmapPaint { opacity: alpha as f32 / 255.0, ..Default::default() };
+    pm.draw_pixmap(0, 0, layer.as_ref(), &fade, Transform::identity(), None);
+}
+
+fn paint_arrow(pm: &mut Pixmap, geometry: ArrowGeometry, st: &Style) {
     let tf = Transform::identity();
     let pt = paint(st.color, 1.0);
     match geometry {
@@ -628,6 +641,15 @@ pub fn seg_dist(q: P, a: P, b: P) -> f32 {
     q.dist(p(a.x + dx * t, a.y + dy * t))
 }
 
+/// Within a stroke of width `w` with square ends, which also covers round ends and miter joins.
+fn on_stroke(q: P, s: P, e: P, w: f32, tol: f32) -> bool {
+    let len = s.dist(e).max(1e-6);
+    let (ux, uy) = ((e.x - s.x) / len, (e.y - s.y) / len);
+    let (dx, dy) = (q.x - s.x, q.y - s.y);
+    let reach = w / 2.0 + tol;
+    (dx * uy - dy * ux).abs() <= reach && (-reach..=len + reach).contains(&(dx * ux + dy * uy))
+}
+
 fn inside(polygon: &[P], q: P) -> bool {
     let edges = polygon.iter().zip(polygon.iter().cycle().skip(1));
     edges.filter(|(s, e)| (s.y > q.y) != (e.y > q.y) && q.x < s.x + (q.y - s.y) / (e.y - s.y) * (e.x - s.x)).count() % 2 == 1
@@ -644,8 +666,8 @@ pub fn arrow_hit(a: P, b: P, seed: u64, st: &Style, q: P, tol: f32) -> bool {
             inside(&outline, q) || outline.iter().zip(outline.iter().cycle().skip(1)).any(|(s, e)| seg_dist(q, *s, *e) <= edge + tol)
         }
         Some(ArrowGeometry::Lines { shaft, widths, heads, line }) => {
-            shaft.windows(2).zip(&widths).any(|(s, w)| seg_dist(q, s[0], s[1]) <= w + tol)
-                || heads.iter().flat_map(|h| h.windows(2)).any(|s| seg_dist(q, s[0], s[1]) <= line + tol)
+            shaft.windows(2).zip(&widths).any(|(s, w)| on_stroke(q, s[0], s[1], *w, tol))
+                || heads.iter().flat_map(|h| h.windows(2)).any(|s| on_stroke(q, s[0], s[1], line, tol))
         }
     }
 }
@@ -1737,6 +1759,26 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn clicks_beside_a_thick_arrow_reach_what_is_next_to_it() {
+        let st = Style { size: 7, scale: 2.0, arrow: ArrowStyle::Line, ..Style::default() };
+        let (a, b) = (p(100.0, 500.0), p(2100.0, 500.0));
+        let line = arrow_line(a.dist(b), &st);
+        assert!(arrow_hit(a, b, 7, &st, p(1000.0, 500.0 + line / 2.0 + 10.0), 12.0), "inside the tolerance");
+        assert!(!arrow_hit(a, b, 7, &st, p(1000.0, 570.0), 12.0), "past the line and the tolerance");
+    }
+
+    #[test]
+    fn translucent_arrows_stay_even_where_their_parts_overlap() {
+        let fonts = Fonts::load();
+        for style in ARROWS {
+            let st = Style { size: 4, arrow: style, color: [255, 0, 0, 128], ..Style::default() };
+            let pm = painted(&arrow(p(60.0, 200.0), p(460.0, 120.0), st), &fonts, 520, 320);
+            let most = pm.pixels().iter().map(|c| c.alpha()).max().unwrap();
+            assert!((127..=129).contains(&most), "{style:?}: alpha reaches {most}");
         }
     }
 
