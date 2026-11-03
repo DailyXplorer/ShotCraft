@@ -511,7 +511,7 @@ fn hand_arrow_shaft(a: P, b: P, line: f32, n: &[f32; 100]) -> Curve {
 /// What an arrow paints, shared by drawing, bounds and hit tests so they cannot disagree.
 enum ArrowGeometry {
     Solid { outline: [P; 7], edge: f32 },
-    /// One width per shaft point; heads run wing, tip, wing.
+    /// The width painted at each shaft point; heads run wing, tip, wing.
     Lines { shaft: Vec<P>, widths: Vec<f32>, heads: Vec<[P; 3]>, line: f32 },
 }
 
@@ -552,7 +552,8 @@ fn arrow_geometry(a: P, b: P, seed: u64, st: &Style) -> Option<ArrowGeometry> {
             let line = ((ARROW_WIDTHS[st.size as usize] * ARROW_HAND_GAIN + ARROW_HAND_BASE) * st.scale).min(len / ARROW_HAND_DIVISOR);
             let shaft = flatten(&[hand_arrow_shaft(a, b, line, &noise(seed))], BRUSH_SPACING * st.scale);
             let last = (shaft.len() - 1).max(1) as f32;
-            let widths = (0..shaft.len()).map(|i| line * (ARROW_HAND_STOP + (ARROW_HAND_END - ARROW_HAND_STOP) * i as f32 / last)).collect();
+            let taper = |i: usize| if st.dashed { line } else { line * (ARROW_HAND_STOP + (ARROW_HAND_END - ARROW_HAND_STOP) * i as f32 / last) };
+            let widths = (0..shaft.len()).map(taper).collect();
             ArrowGeometry::Lines { shaft, widths, heads: vec![arrow_head(b, ux, uy, branch, spread)], line }
         }
         ArrowStyle::Line | ArrowStyle::Double => {
@@ -576,18 +577,19 @@ fn draw_arrow(pm: &mut Pixmap, a: P, b: P, seed: u64, st: &Style) {
     let Some(geometry) = arrow_geometry(a, b, seed, st) else { return };
     let [red, green, blue, alpha] = st.color;
     if alpha == 255 {
-        paint_arrow(pm, geometry, st);
+        paint_arrow(pm, geometry, st, Transform::identity());
         return;
     }
     // Shaft and head overlap, so a translucent arrow is painted opaque and faded once.
-    let Some(mut layer) = Pixmap::new(pm.width(), pm.height()) else { return };
-    paint_arrow(&mut layer, geometry, &Style { color: [red, green, blue, 255], ..*st });
+    let area = arrow_area(&geometry, a, b).clamp_to(pm.width() as f32, pm.height() as f32);
+    let (x, y) = (area.x0.floor(), area.y0.floor());
+    let Some(mut layer) = Pixmap::new((area.x1.ceil() - x) as u32, (area.y1.ceil() - y) as u32) else { return };
+    paint_arrow(&mut layer, geometry, &Style { color: [red, green, blue, 255], ..*st }, Transform::from_translate(-x, -y));
     let fade = PixmapPaint { opacity: alpha as f32 / 255.0, ..Default::default() };
-    pm.draw_pixmap(0, 0, layer.as_ref(), &fade, Transform::identity(), None);
+    pm.draw_pixmap(x as i32, y as i32, layer.as_ref(), &fade, Transform::identity(), None);
 }
 
-fn paint_arrow(pm: &mut Pixmap, geometry: ArrowGeometry, st: &Style) {
-    let tf = Transform::identity();
+fn paint_arrow(pm: &mut Pixmap, geometry: ArrowGeometry, st: &Style, tf: Transform) {
     let pt = paint(st.color, 1.0);
     match geometry {
         ArrowGeometry::Solid { outline, edge } => {
@@ -625,12 +627,11 @@ fn paint_arrow(pm: &mut Pixmap, geometry: ArrowGeometry, st: &Style) {
     }
 }
 
-fn arrow_bounds(a: P, b: P, seed: u64, st: &Style) -> R {
+fn arrow_area(geometry: &ArrowGeometry, a: P, b: P) -> R {
     let around = |pts: &mut dyn Iterator<Item = &P>, margin: f32| pts.fold(R::from_points(a, b), |r, q| r.union(&R::from_points(*q, *q))).expand(margin);
-    match arrow_geometry(a, b, seed, st) {
-        None => R::from_points(a, b).expand(st.width() + 2.0),
-        Some(ArrowGeometry::Solid { outline, edge }) => around(&mut outline.iter(), edge + 2.0),
-        Some(ArrowGeometry::Lines { shaft, heads, line, .. }) => around(&mut shaft.iter().chain(heads.iter().flatten()), line + 2.0),
+    match geometry {
+        ArrowGeometry::Solid { outline, edge } => around(&mut outline.iter(), edge + 2.0),
+        ArrowGeometry::Lines { shaft, heads, line, .. } => around(&mut shaft.iter().chain(heads.iter().flatten()), line + 2.0),
     }
 }
 
@@ -655,15 +656,12 @@ fn inside(polygon: &[P], q: P) -> bool {
     edges.filter(|(s, e)| (s.y > q.y) != (e.y > q.y) && q.x < s.x + (q.y - s.y) / (e.y - s.y) * (e.x - s.x)).count() % 2 == 1
 }
 
-/// True on anything the arrow paints, and always within reach of the line from tail to tip.
+/// True on anything the arrow paints, within `tol`. An arrow too short to paint stays selectable.
 pub fn arrow_hit(a: P, b: P, seed: u64, st: &Style, q: P, tol: f32) -> bool {
-    if seg_dist(q, a, b) <= st.width() * 1.5 + tol {
-        return true;
-    }
     match arrow_geometry(a, b, seed, st) {
-        None => false,
+        None => seg_dist(q, a, b) <= st.width() + tol,
         Some(ArrowGeometry::Solid { outline, edge }) => {
-            inside(&outline, q) || outline.iter().zip(outline.iter().cycle().skip(1)).any(|(s, e)| seg_dist(q, *s, *e) <= edge + tol)
+            inside(&outline, q) || outline.iter().zip(outline.iter().cycle().skip(1)).any(|(s, e)| on_stroke(q, *s, *e, edge, tol))
         }
         Some(ArrowGeometry::Lines { shaft, widths, heads, line }) => {
             shaft.windows(2).zip(&widths).any(|(s, w)| on_stroke(q, s[0], s[1], *w, tol))
@@ -677,7 +675,10 @@ pub fn bounds(obj: &Obj, fonts: &Fonts) -> R {
     let st = &obj.style;
     let w = st.width();
     match &obj.kind {
-        Kind::Arrow { a, b, seed } => arrow_bounds(*a, *b, *seed, st),
+        Kind::Arrow { a, b, seed } => match arrow_geometry(*a, *b, *seed, st) {
+            Some(geometry) => arrow_area(&geometry, *a, *b),
+            None => R::from_points(*a, *b).expand(w + 2.0),
+        },
         Kind::Line { a, b } | Kind::Ruler { a, b } => R::from_points(*a, *b).expand(w * 2.0 + 24.0),
         Kind::Rect { r, .. } | Kind::Oval { r, .. } => r.expand(w * 2.0 + 4.0),
         Kind::Blur { r, .. } | Kind::Spotlight { r } => *r,
@@ -1743,9 +1744,9 @@ mod tests {
         let fonts = Fonts::load();
         for style in ARROWS {
             for size in 0..=SIZE_MAX {
-                for scale in [1.0, 2.0] {
+                for (scale, dashed) in [(1.0, false), (2.0, false), (1.0, true), (2.0, true)] {
                     for (a, b) in [(p(300.0, 300.0), p(330.0, 300.0)), (p(300.0, 500.0), p(900.0, 250.0)), (p(900.0, 300.0), p(300.0, 400.0))] {
-                        let st = Style { size, scale, arrow: style, ..Style::default() };
+                        let st = Style { size, scale, dashed, arrow: style, ..Style::default() };
                         let obj = arrow(a, b, st);
                         let area = bounds(&obj, &fonts);
                         for (x, y) in ink(&painted(&obj, &fonts, 1200, 800)) {
@@ -1768,7 +1769,7 @@ mod tests {
         let (a, b) = (p(100.0, 500.0), p(2100.0, 500.0));
         let line = arrow_line(a.dist(b), &st);
         assert!(arrow_hit(a, b, 7, &st, p(1000.0, 500.0 + line / 2.0 + 10.0), 12.0), "inside the tolerance");
-        assert!(!arrow_hit(a, b, 7, &st, p(1000.0, 570.0), 12.0), "past the line and the tolerance");
+        assert!(!arrow_hit(a, b, 7, &st, p(1000.0, 500.0 + line / 2.0 + 13.0), 12.0), "past the line and the tolerance");
     }
 
     #[test]
@@ -1779,18 +1780,37 @@ mod tests {
             let pm = painted(&arrow(p(60.0, 200.0), p(460.0, 120.0), st), &fonts, 520, 320);
             let most = pm.pixels().iter().map(|c| c.alpha()).max().unwrap();
             assert!((127..=129).contains(&most), "{style:?}: alpha reaches {most}");
+            let opaque = painted(&arrow(p(60.0, 200.0), p(460.0, 120.0), Style { color: [255, 0, 0, 255], ..st }), &fonts, 520, 320);
+            let (faded, full) = (ink(&pm), ink(&opaque));
+            let lookup: std::collections::HashSet<_> = full.iter().collect();
+            let shared = faded.iter().filter(|q| lookup.contains(q)).count();
+            assert!(shared as f32 > full.len() as f32 * 0.98, "{style:?}: the translucent arrow sits where the opaque one does");
+        }
+    }
+
+    #[test]
+    fn translucent_arrow_partly_off_the_picture_still_paints() {
+        let fonts = Fonts::load();
+        for style in ARROWS {
+            let st = Style { size: 4, arrow: style, color: [255, 0, 0, 128], ..Style::default() };
+            assert!(!ink(&painted(&arrow(p(-200.0, -80.0), p(160.0, 90.0), st), &fonts, 300, 200)).is_empty(), "{style:?}");
+            assert!(ink(&painted(&arrow(p(-900.0, -900.0), p(-600.0, -700.0), st), &fonts, 300, 200)).is_empty(), "{style:?}");
         }
     }
 
     #[test]
     fn long_hand_drawn_arrow_stays_inside_its_bounds() {
         let fonts = Fonts::load();
-        for seed in 0..20 {
-            let st = Style { size: 0, scale: 2.0, arrow: ArrowStyle::HandDrawn, ..Style::default() };
-            let obj = Obj { kind: Kind::Arrow { a: p(100.0, 500.0), b: p(6100.0, 500.0), seed }, style: st };
+        for (seed, (size, dashed)) in [(0, false), (7, false), (7, true)].into_iter().cycle().take(6).enumerate() {
+            let seed = seed as u64;
+            let st = Style { size, dashed, scale: 2.0, arrow: ArrowStyle::HandDrawn, ..Style::default() };
+            let (a, b) = (p(100.0, 500.0), p(6100.0, 500.0));
+            let obj = Obj { kind: Kind::Arrow { a, b, seed }, style: st };
             let area = bounds(&obj, &fonts);
-            for (x, y) in ink(&painted(&obj, &fonts, 6200, 1000)) {
-                assert!(area.contains(p(x as f32 + 0.5, y as f32 + 0.5)), "seed {seed}: {x},{y} outside {area:?}");
+            for (i, (x, y)) in ink(&painted(&obj, &fonts, 6200, 1000)).into_iter().enumerate() {
+                let q = p(x as f32 + 0.5, y as f32 + 0.5);
+                assert!(area.contains(q), "seed {seed}: {x},{y} outside {area:?}");
+                assert!(i % 97 != 0 || arrow_hit(a, b, seed, &st, q, 1.0), "seed {seed} size {size} dashed {dashed}: {x},{y} cannot be clicked");
             }
         }
     }
