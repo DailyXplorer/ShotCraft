@@ -1633,12 +1633,12 @@ impl App {
                             let size = o.style.text_size();
                             let last = text.split('\n').last().unwrap_or("");
                             let font = match o.style.font {
-                                FontKind::Sans => &self.fonts.sans,
+                                FontKind::Sans => self.fonts.text(&o.style),
                                 FontKind::Goofy => &self.fonts.goofy,
                             };
                             let (w, _) = render::measure(font, last, size);
                             let lines = text.split('\n').count().max(1) as f32 - 1.0;
-                            let top = p(at.x + w + 1.0, at.y + lines * size * 1.2);
+                            let top = p(at.x + w + 1.0, at.y + lines * o.style.text_line_height());
                             let a = self.ed.to_screen(top);
                             let bpt = self.ed.to_screen(top.add(0.0, size * 1.15));
                             painter.line_segment([a, bpt], Stroke::new(2.0, accent));

@@ -7,6 +7,8 @@ use tiny_skia::{
 
 pub struct Fonts {
     pub sans: FontVec,
+    pub regular: FontVec,
+    pub medium: FontVec,
     pub goofy: FontVec,
 }
 
@@ -21,7 +23,21 @@ impl Fonts {
         let goofy = load_font("/System/Library/Fonts/Supplemental/ChalkboardSE.ttc", 2)
             .or_else(|| load_font("/System/Library/Fonts/Supplemental/Comic Sans MS Bold.ttf", 0))
             .unwrap_or_else(dm);
-        Fonts { sans: dm(), goofy }
+        let face = |bytes: &[u8]| FontVec::try_from_vec(bytes.to_vec()).expect("bundled font");
+        Fonts {
+            sans: dm(),
+            regular: face(include_bytes!("../assets/fonts/DMSans-Regular.ttf")),
+            medium: face(include_bytes!("../assets/fonts/DMSans-Medium.ttf")),
+            goofy,
+        }
+    }
+    /// Annotation text: regular on light colours, medium on dark ones (0x100068230).
+    pub fn text(&self, st: &Style) -> &FontVec {
+        match st.font {
+            FontKind::Sans if luminance(st.color) > TEXT_LIGHT_ABOVE => &self.regular,
+            FontKind::Sans => &self.medium,
+            FontKind::Goofy => &self.goofy,
+        }
     }
     fn get(&self, k: FontKind) -> &FontVec {
         match k {
@@ -40,6 +56,10 @@ fn paint(c: Rgba, alpha: f32) -> Paint<'static> {
     p.set_color(color(c, alpha));
     p.anti_alias = true;
     p
+}
+
+pub fn luminance(c: Rgba) -> f32 {
+    (0.299 * c[0] as f32 + 0.587 * c[1] as f32 + 0.114 * c[2] as f32) / 255.0
 }
 
 pub fn is_light(c: Rgba) -> bool {
@@ -102,6 +122,30 @@ fn round_rect_path(r: &R, rad: f32) -> Option<Path> {
 
 fn oval_path(r: &R) -> Option<Path> {
     PathBuilder::from_oval(rect(r)?)
+}
+
+/// Unit-square coordinate of the plain oval, pulled towards the edge on the long axis (0x10008a8c4).
+fn oval_axis(f: f32, along: f32, across: f32) -> f32 {
+    if along <= across {
+        return f;
+    }
+    let k = across / along * OVAL_ASPECT_GAIN + OVAL_ASPECT_BASE;
+    if f < 0.5 {
+        f * k
+    } else {
+        1.0 - (1.0 - f) * k
+    }
+}
+
+fn plain_oval_curves(r: &R) -> [Curve; 8] {
+    let (w, h) = (r.w().max(1.0), r.h().max(1.0));
+    let at = |(x, y): (f32, f32)| p(r.x0 + oval_axis(x, w, h) * w, r.y0 + oval_axis(y, h, w) * h);
+    let mut c = at(OVAL_START);
+    OVAL_CURVES.map(|[b, c1, c2]| {
+        let curve = Curve { a: c, c1: at(c1), c2: at(c2), b: at(b) };
+        c = curve.b;
+        curve
+    })
 }
 
 fn stroke(width: f32, dashed: bool) -> Stroke {
@@ -357,7 +401,8 @@ pub fn draw_obj(pm: &mut Pixmap, obj: &Obj, fonts: &Fonts, scale_factor: f32) {
                 return;
             }
             let wobble = if hand { HAND_WOBBLE } else { 0.0 };
-            let path = if is_oval { oval_path(r) } else { curves_path(&outline_curves(r, wobble, base * CORNER_LINE_RATIO * scale, scale, &n)) };
+            let curves = if is_oval { plain_oval_curves(r) } else { outline_curves(r, wobble, base * CORNER_LINE_RATIO * scale, scale, &n) };
+            let path = curves_path(&curves);
             let Some(path) = path else { return };
             match st.fill {
                 Fill::Translucent => pm.fill_path(&path, &paint(st.color, FILL_TRANSLUCENT), FillRule::Winding, tf, None),
@@ -414,84 +459,109 @@ pub fn draw_obj(pm: &mut Pixmap, obj: &Obj, fonts: &Fonts, scale_factor: f32) {
     }
 }
 
+/// Line of the thin arrows: capped to a tenth of the length, then growing with it (0x1001af27c).
+fn arrow_line(len: f32, st: &Style) -> f32 {
+    let line = ARROW_WIDTHS[st.size as usize].min(len / ARROW_LINE_DIVISOR) * st.scale;
+    let grow = ((len / st.scale + ARROW_GROW_BASE) / ARROW_GROW_DIVISOR).sqrt();
+    line * grow.clamp(1.0, ARROW_GROW_MAX)
+}
+
+/// Branch length and half angle of the thin arrow head (0x10007ebbc).
+fn arrow_branch(len: f32, line: f32, scale: f32) -> (f32, f32) {
+    let branch = scale * ARROW_BRANCH_SCALE + line.sqrt() * ARROW_BRANCH_ROOT + line * ARROW_BRANCH_LINE;
+    (branch.min(len * ARROW_BRANCH_MAX), if len < ARROW_SHORT { ARROW_SPREAD_SHORT } else { ARROW_SPREAD })
+}
+
+/// Solid arrow stretch as (head, tail) factors (0x1001af27c).
+fn arrow_stretch(len: f32, unit: f32) -> (f32, f32) {
+    let mut tail = 1.0;
+    let mut head = 1.0;
+    if len > ARROW_LONG {
+        tail = (1.0 - (len - ARROW_LONG) / ARROW_LONG_RANGE).max(ARROW_LONG_MIN);
+        head = 1.0 / tail;
+    }
+    let span = unit * ARROW_SPAN;
+    let limit = if span >= ARROW_SPAN_LIMIT { span * 2.0 } else { ARROW_SHORT_LIMIT };
+    if len < limit {
+        head = len / limit;
+        tail = head;
+    }
+    (head, tail)
+}
+
 fn draw_arrow(pm: &mut Pixmap, a: P, b: P, st: &Style) {
-    let w = st.width();
     let len = a.dist(b);
     if len < 1.0 {
         return;
     }
     let (ux, uy) = ((b.x - a.x) / len, (b.y - a.y) / len);
     let (nx, ny) = (-uy, ux);
-    let head = (w * 3.2 + 8.0).min(len * 0.6);
-    let half = head * 0.55;
     let tf = Transform::identity();
     let pt = paint(st.color, 1.0);
-    let filled_head = |pm: &mut Pixmap, tip: P, dx: f32, dy: f32| {
-        let base = p(tip.x - dx * head, tip.y - dy * head);
-        let mut pb = PathBuilder::new();
-        pb.move_to(tip.x, tip.y);
-        pb.line_to(base.x - dy * half, base.y + dx * half);
-        pb.line_to(base.x + dy * half, base.y - dx * half);
-        pb.close();
-        if let Some(path) = pb.finish() {
-            pm.fill_path(&path, &paint(st.color, 1.0), FillRule::Winding, tf, None);
-        }
+    let line = arrow_line(len, st);
+    let (branch, spread) = arrow_branch(len, line, st.scale);
+    let thin = Stroke { width: line, line_cap: LineCap::Square, line_join: LineJoin::Miter, ..stroke(line, st.dashed) };
+    let add_head = |pb: &mut PathBuilder, tip: P, dx: f32, dy: f32| {
+        let (sin, cos) = spread.sin_cos();
+        let wing = |side: f32| p(tip.x - branch * (dx * cos - side * dy * sin), tip.y - branch * (dy * cos + side * dx * sin));
+        let (left, right) = (wing(1.0), wing(-1.0));
+        pb.move_to(left.x, left.y);
+        pb.line_to(tip.x, tip.y);
+        pb.line_to(right.x, right.y);
     };
     match st.arrow {
         ArrowStyle::Shape => {
-            let base = p(b.x - ux * head * 0.85, b.y - uy * head * 0.85);
-            let tail = w * 0.25;
-            let neck = w * 0.6;
+            let unit = ARROW_UNITS[st.size as usize];
+            let (head, tail) = arrow_stretch(len, unit);
+            let (head, tail) = (head * unit * st.scale, tail * unit * st.scale);
+            let back = p(b.x - ux * ARROW_HEAD_LENGTH * head, b.y - uy * ARROW_HEAD_LENGTH * head);
+            let across = |q: P, half: f32| p(q.x + nx * half, q.y + ny * half);
             let mut pb = PathBuilder::new();
-            pb.move_to(a.x + nx * tail, a.y + ny * tail);
-            pb.line_to(base.x + nx * neck, base.y + ny * neck);
-            pb.line_to(base.x + nx * half, base.y + ny * half);
-            pb.line_to(b.x, b.y);
-            pb.line_to(base.x - nx * half, base.y - ny * half);
-            pb.line_to(base.x - nx * neck, base.y - ny * neck);
-            pb.line_to(a.x - nx * tail, a.y - ny * tail);
+            let outline = [
+                across(a, ARROW_TAIL_HALF * tail),
+                across(back, ARROW_NECK_HALF * head),
+                across(back, ARROW_HEAD_HALF * head),
+                b,
+                across(back, -ARROW_HEAD_HALF * head),
+                across(back, -ARROW_NECK_HALF * head),
+                across(a, -ARROW_TAIL_HALF * tail),
+            ];
+            pb.move_to(outline[0].x, outline[0].y);
+            for q in &outline[1..] {
+                pb.line_to(q.x, q.y);
+            }
             pb.close();
             if let Some(path) = pb.finish() {
                 pm.fill_path(&path, &pt, FillRule::Winding, tf, None);
-                let s = Stroke { width: 1.0, line_join: LineJoin::Round, ..Default::default() };
+                let s = Stroke { width: st.scale, line_join: LineJoin::Round, ..Default::default() };
                 pm.stroke_path(&path, &pt, &s, tf, None);
             }
         }
-        ArrowStyle::HandDrawn | ArrowStyle::Line => {
+        ArrowStyle::HandDrawn => {
+            let line = ((ARROW_WIDTHS[st.size as usize] * ARROW_HAND_GAIN + ARROW_HAND_BASE) * st.scale).min(len / ARROW_HAND_DIVISOR);
+            let bend = len * 0.12;
+            let c = p((a.x + b.x) / 2.0 + nx * bend, (a.y + b.y) / 2.0 + ny * bend);
             let mut pb = PathBuilder::new();
-            if st.arrow == ArrowStyle::HandDrawn {
-                let bend = len * 0.12;
-                let c = p((a.x + b.x) / 2.0 + nx * bend, (a.y + b.y) / 2.0 + ny * bend);
-                pb.move_to(a.x, a.y);
-                pb.quad_to(c.x, c.y, b.x, b.y);
-                let (tx, ty) = (b.x - c.x, b.y - c.y);
-                let tl = (tx * tx + ty * ty).sqrt().max(1.0);
-                let (dx, dy) = (tx / tl, ty / tl);
-                for s in [1.0f32, -1.0] {
-                    pb.move_to(b.x, b.y);
-                    pb.line_to(b.x - dx * head + s * -dy * half, b.y - dy * head + s * dx * half);
-                }
-            } else {
-                pb.move_to(a.x, a.y);
-                pb.line_to(b.x, b.y);
-                for s in [1.0f32, -1.0] {
-                    pb.move_to(b.x, b.y);
-                    pb.line_to(b.x - ux * head + s * nx * half, b.y - uy * head + s * ny * half);
-                }
-            }
+            pb.move_to(a.x, a.y);
+            pb.quad_to(c.x, c.y, b.x, b.y);
+            let (tx, ty) = (b.x - c.x, b.y - c.y);
+            let tl = (tx * tx + ty * ty).sqrt().max(1.0);
+            add_head(&mut pb, b, tx / tl, ty / tl);
             if let Some(path) = pb.finish() {
-                pm.stroke_path(&path, &pt, &stroke(w, st.dashed), tf, None);
+                pm.stroke_path(&path, &pt, &stroke(line, st.dashed), tf, None);
             }
         }
-        ArrowStyle::Double => {
+        ArrowStyle::Line | ArrowStyle::Double => {
             let mut pb = PathBuilder::new();
-            pb.move_to(a.x + ux * head * 0.8, a.y + uy * head * 0.8);
-            pb.line_to(b.x - ux * head * 0.8, b.y - uy * head * 0.8);
-            if let Some(path) = pb.finish() {
-                pm.stroke_path(&path, &pt, &stroke(w, st.dashed), tf, None);
+            pb.move_to(a.x, a.y);
+            pb.line_to(b.x, b.y);
+            add_head(&mut pb, b, ux, uy);
+            if st.arrow == ArrowStyle::Double {
+                add_head(&mut pb, a, -ux, -uy);
             }
-            filled_head(pm, b, ux, uy);
-            filled_head(pm, a, -ux, -uy);
+            if let Some(path) = pb.finish() {
+                pm.stroke_path(&path, &pt, &thin, tf, None);
+            }
         }
     }
 }
@@ -900,9 +970,9 @@ fn draw_text_line(pm: &mut Pixmap, font: &FontVec, s: &str, baseline: P, size: f
 }
 
 pub fn text_box(at: P, text: &str, st: &Style, fonts: &Fonts) -> R {
-    let font = fonts.get(st.font);
+    let font = fonts.text(st);
     let size = st.text_size();
-    let line_h = size * 1.2;
+    let line_h = st.text_line_height();
     let lines: Vec<&str> = text.split('\n').collect();
     let w = lines.iter().map(|l| measure(font, l, size).0).fold(size * 0.3, f32::max);
     let pad = size * 0.3;
@@ -910,9 +980,9 @@ pub fn text_box(at: P, text: &str, st: &Style, fonts: &Fonts) -> R {
 }
 
 fn draw_text(pm: &mut Pixmap, at: P, text: &str, st: &Style, fonts: &Fonts) {
-    let font = fonts.get(st.font);
+    let font = fonts.text(st);
     let size = st.text_size();
-    let line_h = size * 1.2;
+    let line_h = st.text_line_height();
     let tf = Transform::identity();
     let bx = text_box(at, text, st, fonts);
     let (fg, outline) = match st.fill {
@@ -920,7 +990,7 @@ fn draw_text(pm: &mut Pixmap, at: P, text: &str, st: &Style, fonts: &Fonts) {
             if let Some(path) = round_rect_path(&bx, size * 0.25) {
                 pm.fill_path(&path, &paint(st.color, 1.0), FillRule::Winding, tf, None);
             }
-            (if is_light(st.color) { hex("#1C2B41") } else { [255, 255, 255, 255] }, None)
+            (if luminance(st.color) > TEXT_LIGHT_ABOVE { [0, 0, 0, 255] } else { [255, 255, 255, 255] }, None)
         }
         Fill::Translucent => {
             if let Some(path) = round_rect_path(&bx, size * 0.25) {
@@ -1434,6 +1504,33 @@ mod tests {
         assert_eq!((curves[0].a.x, curves[0].a.y), (12.0, 0.0));
         assert_eq!((curves[1].c1.x, curves[1].c1.y), (200.0, 0.0), "corners pull towards the exact corner");
         assert_eq!((curves[7].b.x, curves[7].b.y), (12.0, 0.0), "the outline closes");
+    }
+
+    #[test]
+    fn arrows_follow_their_size_rules() {
+        let st = Style { size: 2, scale: 2.0, ..Style::default() };
+        assert_eq!(arrow_line(20.0, &st), 4.0, "a short arrow is capped to a tenth of its length");
+        assert_eq!(arrow_line(100.0, &st), 6.0, "below the growth threshold the table applies");
+        let long = arrow_line(4000.0, &st);
+        assert_eq!(long, 9.0, "growth stops at 1.5 times");
+        let (branch, spread) = arrow_branch(10.0, 2.0, 2.0);
+        assert_eq!((branch, spread), (2.5, ARROW_SPREAD_SHORT), "branches stop at a quarter of the arrow");
+        assert_eq!(arrow_branch(300.0, 6.0, 2.0).1, ARROW_SPREAD);
+        assert_eq!(arrow_stretch(100.0, 0.7), (0.5, 0.5), "short arrows shrink as a whole");
+        assert_eq!(arrow_stretch(300.0, 0.7), (1.0, 1.0));
+        let (head, tail) = arrow_stretch(1020.0, 0.7);
+        assert!((tail - 0.8).abs() < 1e-6 && (head - 1.25).abs() < 1e-6, "long arrows widen the head: {head} {tail}");
+    }
+
+    #[test]
+    fn plain_oval_keeps_its_proportions() {
+        let square = plain_oval_curves(&R { x0: 0.0, y0: 0.0, x1: 100.0, y1: 100.0 });
+        assert!((square[0].a.x - 22.0).abs() < 1e-3 && (square[0].a.y - 6.0).abs() < 1e-3);
+        assert_eq!((square[7].b.x, square[7].b.y), (square[0].a.x, square[0].a.y), "the outline closes");
+        let wide = plain_oval_curves(&R { x0: 0.0, y0: 0.0, x1: 400.0, y1: 100.0 });
+        let k = 0.25 * 0.75 + 0.25;
+        assert!((wide[0].a.x - 400.0 * 0.22 * k).abs() < 1e-2, "corners stay near the ends of a long oval");
+        assert!((wide[0].a.y - 6.0).abs() < 1e-3, "the short axis keeps its fractions");
     }
 
     #[test]

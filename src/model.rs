@@ -36,6 +36,63 @@ pub const HIGHLIGHT_SIZES: [f32; 8] = [14., 20., 28., 38., 54., 76., 108., 154.]
 pub const SIZE_MAX: u8 = 7;
 pub const SIZE_DEFAULT: u8 = 2;
 
+/// Arrow line (0x1001af27c, data 0x1002527d8): capped to a tenth of the length, and it grows with
+/// the arrow as sqrt((length + 550) / 600), up to 1.5 times.
+pub const ARROW_WIDTHS: [f32; 10] = [1., 2., 3., 4., 6., 10., 14., 20., 28., 40.];
+pub const ARROW_LINE_DIVISOR: f32 = 10.0;
+pub const ARROW_GROW_BASE: f32 = 550.0;
+pub const ARROW_GROW_DIVISOR: f32 = 600.0;
+pub const ARROW_GROW_MAX: f32 = 1.5;
+/// Thin arrow head (0x10007ebbc): branch length, capped to a quarter of the arrow.
+pub const ARROW_BRANCH_SCALE: f32 = 0.2;
+pub const ARROW_BRANCH_ROOT: f32 = 7.0;
+pub const ARROW_BRANCH_LINE: f32 = 0.7;
+pub const ARROW_BRANCH_MAX: f32 = 0.25;
+pub const ARROW_SHORT: f32 = 20.0;
+pub const ARROW_SPREAD: f32 = 0.8726646;
+pub const ARROW_SPREAD_SHORT: f32 = 0.78539815;
+/// Hand-drawn arrow line (0x1001af27c).
+pub const ARROW_HAND_GAIN: f32 = 0.7;
+pub const ARROW_HAND_BASE: f32 = 1.3;
+pub const ARROW_HAND_DIVISOR: f32 = 15.0;
+/// Solid arrow (0x1001af27c, 0x10007e35c, data 0x100252760): drawn in units of the size step.
+/// Past 520 the head grows and the tail shrinks, down to 0.8; short arrows shrink as a whole.
+pub const ARROW_UNITS: [f32; 10] = [0.33, 0.5, 0.7, 0.9, 1.1, 1.4, 2.0, 2.8, 4.2, 6.4];
+pub const ARROW_LONG: f32 = 520.0;
+pub const ARROW_LONG_RANGE: f32 = 1000.0;
+pub const ARROW_LONG_MIN: f32 = 0.8;
+pub const ARROW_SPAN: f32 = 56.0;
+pub const ARROW_SPAN_LIMIT: f32 = 100.0;
+pub const ARROW_SHORT_LIMIT: f32 = 200.0;
+/// Proportions of the default solid arrow, in units, measured from 0x100249010.
+pub const ARROW_HEAD_LENGTH: f32 = 48.0;
+pub const ARROW_HEAD_HALF: f32 = 22.0;
+pub const ARROW_NECK_HALF: f32 = 9.0;
+pub const ARROW_TAIL_HALF: f32 = 7.0;
+
+/// Text (0x100068230): line height, the larger Goofy font, and the luminance above which a
+/// filled label turns black and the weight drops from medium to regular.
+pub const TEXT_LINE_HEIGHT: f32 = 1.15;
+pub const TEXT_GOOFY_SIZE: f32 = 1.2;
+pub const TEXT_GOOFY_LINE_HEIGHT: f32 = 1.324;
+pub const TEXT_LIGHT_ABOVE: f32 = 0.6;
+
+/// Plain oval (0x10008a8c4): eight curves as (end, control 1, control 2) in the unit square, from
+/// (0.22, 0.06). A long shape keeps its corners close to the short side's proportion.
+pub const OVAL_START: (f32, f32) = (0.22, 0.06);
+pub const OVAL_CURVES: [[(f32, f32); 3]; 8] = [
+    [(0.78, 0.06), (0.38, -0.02), (0.62, -0.02)],
+    [(0.94, 0.22), (0.8467, 0.0934), (0.9066, 0.1533)],
+    [(0.94, 0.78), (1.02, 0.38), (1.02, 0.62)],
+    [(0.78, 0.94), (0.9066, 0.8467), (0.8467, 0.9066)],
+    [(0.22, 0.94), (0.62, 1.02), (0.38, 1.02)],
+    [(0.06, 0.78), (0.1533, 0.9066), (0.0934, 0.8467)],
+    [(0.06, 0.22), (-0.02, 0.62), (-0.02, 0.38)],
+    [(0.22, 0.06), (0.0934, 0.1533), (0.1533, 0.0934)],
+];
+pub const OVAL_ASPECT_GAIN: f32 = 0.75;
+pub const OVAL_ASPECT_BASE: f32 = 0.25;
+
 /// Rectangle and oval (0x100088084): the line never exceeds a tenth of the short side, and below
 /// that side the hand-drawn brush falls back to a plain stroke.
 pub const SHAPE_LINE_DIVISOR: f32 = 10.0;
@@ -279,7 +336,11 @@ impl Style {
         LINE_WIDTHS[self.size as usize] * self.scale
     }
     pub fn text_size(&self) -> f32 {
-        TEXT_SIZES[self.size as usize] * self.scale
+        let goofy = if self.font == FontKind::Goofy { TEXT_GOOFY_SIZE } else { 1.0 };
+        TEXT_SIZES[self.size as usize] * self.scale * goofy
+    }
+    pub fn text_line_height(&self) -> f32 {
+        self.text_size() * if self.font == FontKind::Goofy { TEXT_GOOFY_LINE_HEIGHT } else { TEXT_LINE_HEIGHT }
     }
     pub fn counter_size(&self) -> f32 {
         COUNTER_SIZES[self.size as usize] * self.scale
@@ -400,7 +461,10 @@ impl Obj {
     pub fn bounds(&self) -> R {
         let w = self.style.width();
         match &self.kind {
-            Kind::Arrow { a, b } => R::from_points(*a, *b).expand(w * 3.0 + 6.0),
+            Kind::Arrow { a, b } => {
+                let reach = ARROW_WIDTHS[self.style.size as usize] * 2.0 + ARROW_UNITS[self.style.size as usize] * ARROW_HEAD_HALF / ARROW_LONG_MIN;
+                R::from_points(*a, *b).expand(reach * self.style.scale + 6.0)
+            }
             Kind::Line { a, b } | Kind::Ruler { a, b } => R::from_points(*a, *b).expand(w * 2.0 + 24.0),
             Kind::Rect { r, .. } | Kind::Oval { r, .. } => r.expand(w * 2.0 + 4.0),
             Kind::Blur { r, .. } | Kind::Spotlight { r } => *r,
