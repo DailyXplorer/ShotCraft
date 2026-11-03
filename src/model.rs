@@ -428,7 +428,7 @@ pub fn magnifier_lens(r: &R, lens: P) -> R {
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum Kind {
-    Arrow { a: P, b: P },
+    Arrow { a: P, b: P, seed: u64 },
     Line { a: P, b: P },
     Rect { r: R, seed: u64 },
     Oval { r: R, seed: u64 },
@@ -468,42 +468,9 @@ impl Obj {
         }
     }
 
-    /// Area the object paints on, used for hit tests and partial redraws.
-    pub fn bounds(&self) -> R {
-        let w = self.style.width();
-        match &self.kind {
-            Kind::Arrow { a, b } => {
-                let reach = ARROW_WIDTHS[self.style.size as usize] * 2.0 + ARROW_UNITS[self.style.size as usize] * ARROW_HEAD_HALF / ARROW_LONG_MIN;
-                R::from_points(*a, *b).expand(reach * self.style.scale + 6.0)
-            }
-            Kind::Line { a, b } | Kind::Ruler { a, b } => R::from_points(*a, *b).expand(w * 2.0 + 24.0),
-            Kind::Rect { r, .. } | Kind::Oval { r, .. } => r.expand(w * 2.0 + 4.0),
-            Kind::Blur { r, .. } | Kind::Spotlight { r } => *r,
-            Kind::Magnifier { r, lens } => r.union(&magnifier_lens(r, *lens)).expand(w + 4.0),
-            Kind::Highlighter { a, b } => R::from_points(*a, *b).expand(self.style.highlight_size() / 2.0 + 2.0),
-            Kind::Freehand { pts } => {
-                let mut r = R { x0: f32::MAX, y0: f32::MAX, x1: f32::MIN, y1: f32::MIN };
-                for q in pts {
-                    r = r.union(&R { x0: q.x, y0: q.y, x1: q.x, y1: q.y });
-                }
-                r.expand(w + 2.0)
-            }
-            Kind::Counter { at, .. } => {
-                let s = self.style.counter_size() / 2.0 + 2.0;
-                R { x0: at.x - s, y0: at.y - s, x1: at.x + s, y1: at.y + s }
-            }
-            Kind::Text { at, text } => {
-                let s = self.style.text_size();
-                let lines = text.split('\n').count().max(1) as f32;
-                let longest = text.split('\n').map(|l| l.chars().count()).max().unwrap_or(1).max(1) as f32;
-                R { x0: at.x - s * 0.4, y0: at.y - s * 0.3, x1: at.x + longest * s * 0.62 + s * 0.6, y1: at.y + lines * s * 1.25 + s * 0.4 }
-            }
-        }
-    }
-
     pub fn translate(&mut self, dx: f32, dy: f32) {
         match &mut self.kind {
-            Kind::Arrow { a, b } | Kind::Line { a, b } | Kind::Highlighter { a, b } | Kind::Ruler { a, b } => {
+            Kind::Arrow { a, b, .. } | Kind::Line { a, b } | Kind::Highlighter { a, b } | Kind::Ruler { a, b } => {
                 *a = a.add(dx, dy);
                 *b = b.add(dx, dy);
             }
@@ -517,7 +484,7 @@ impl Obj {
 
     pub fn is_empty(&self) -> bool {
         match &self.kind {
-            Kind::Arrow { a, b } | Kind::Line { a, b } | Kind::Highlighter { a, b } | Kind::Ruler { a, b } => a.dist(*b) < 3.0,
+            Kind::Arrow { a, b, .. } | Kind::Line { a, b } | Kind::Highlighter { a, b } | Kind::Ruler { a, b } => a.dist(*b) < 3.0,
             Kind::Rect { r, .. } | Kind::Oval { r, .. } | Kind::Blur { r, .. } | Kind::Spotlight { r } | Kind::Magnifier { r, .. } => r.w() < 3.0 || r.h() < 3.0,
             Kind::Text { text, .. } => text.trim().is_empty(),
             Kind::Freehand { pts } => pts.len() < 2,

@@ -369,7 +369,7 @@ pub fn draw_obj(pm: &mut Pixmap, obj: &Obj, fonts: &Fonts, scale_factor: f32) {
     let w = st.width();
     let tf = Transform::identity();
     match &obj.kind {
-        Kind::Arrow { a, b } => draw_arrow(pm, *a, *b, st),
+        Kind::Arrow { a, b, seed } => draw_arrow(pm, *a, *b, *seed, st),
         Kind::Line { a, b } => {
             let mut pb = PathBuilder::new();
             pb.move_to(a.x, a.y);
@@ -460,19 +460,22 @@ pub fn draw_obj(pm: &mut Pixmap, obj: &Obj, fonts: &Fonts, scale_factor: f32) {
 }
 
 /// Line of the thin arrows: capped to a tenth of the length, then growing with it (0x1001af27c).
+/// `len` is in image pixels here and below; the rules themselves are in points.
 fn arrow_line(len: f32, st: &Style) -> f32 {
+    let len = len / st.scale;
     let line = ARROW_WIDTHS[st.size as usize].min(len / ARROW_LINE_DIVISOR) * st.scale;
-    let grow = ((len / st.scale + ARROW_GROW_BASE) / ARROW_GROW_DIVISOR).sqrt();
+    let grow = ((len + ARROW_GROW_BASE) / ARROW_GROW_DIVISOR).sqrt();
     line * grow.clamp(1.0, ARROW_GROW_MAX)
 }
 
 /// Branch length and half angle of the thin arrow head (0x10007ebbc).
 fn arrow_branch(len: f32, line: f32, scale: f32) -> (f32, f32) {
-    let branch = scale * ARROW_BRANCH_SCALE + line.sqrt() * ARROW_BRANCH_ROOT + line * ARROW_BRANCH_LINE;
-    (branch.min(len * ARROW_BRANCH_MAX), if len < ARROW_SHORT { ARROW_SPREAD_SHORT } else { ARROW_SPREAD })
+    let (len, line) = (len / scale, line / scale);
+    let branch = ARROW_BRANCH_SCALE + line.sqrt() * ARROW_BRANCH_ROOT + line * ARROW_BRANCH_LINE;
+    (branch.min(len * ARROW_BRANCH_MAX) * scale, if len < ARROW_SHORT { ARROW_SPREAD_SHORT } else { ARROW_SPREAD })
 }
 
-/// Solid arrow stretch as (head, tail) factors (0x1001af27c).
+/// Solid arrow stretch as (head, tail) factors, from a length in points (0x1001af27c).
 fn arrow_stretch(len: f32, unit: f32) -> (f32, f32) {
     let mut tail = 1.0;
     let mut head = 1.0;
@@ -505,34 +508,35 @@ fn hand_arrow_shaft(a: P, b: P, line: f32, n: &[f32; 100]) -> Curve {
     Curve { a, c1, c2, b: end }
 }
 
-fn draw_arrow(pm: &mut Pixmap, a: P, b: P, st: &Style) {
+/// What an arrow paints, shared by drawing, bounds and hit tests so they cannot disagree.
+enum ArrowGeometry {
+    Solid { outline: [P; 7], edge: f32 },
+    /// One width per shaft point; heads run wing, tip, wing.
+    Lines { shaft: Vec<P>, widths: Vec<f32>, heads: Vec<[P; 3]>, line: f32 },
+}
+
+fn arrow_head(tip: P, dx: f32, dy: f32, branch: f32, spread: f32) -> [P; 3] {
+    let (sin, cos) = spread.sin_cos();
+    let wing = |side: f32| p(tip.x - branch * (dx * cos - side * dy * sin), tip.y - branch * (dy * cos + side * dx * sin));
+    [wing(1.0), tip, wing(-1.0)]
+}
+
+fn arrow_geometry(a: P, b: P, seed: u64, st: &Style) -> Option<ArrowGeometry> {
     let len = a.dist(b);
     if len < 1.0 {
-        return;
+        return None;
     }
     let (ux, uy) = ((b.x - a.x) / len, (b.y - a.y) / len);
     let (nx, ny) = (-uy, ux);
-    let tf = Transform::identity();
-    let pt = paint(st.color, 1.0);
-    let line = arrow_line(len, st);
-    let (branch, spread) = arrow_branch(len, line, st.scale);
-    let thin = Stroke { width: line, line_cap: LineCap::Square, line_join: LineJoin::Miter, ..stroke(line, st.dashed) };
-    let add_head = |pb: &mut PathBuilder, tip: P, dx: f32, dy: f32| {
-        let (sin, cos) = spread.sin_cos();
-        let wing = |side: f32| p(tip.x - branch * (dx * cos - side * dy * sin), tip.y - branch * (dy * cos + side * dx * sin));
-        let (left, right) = (wing(1.0), wing(-1.0));
-        pb.move_to(left.x, left.y);
-        pb.line_to(tip.x, tip.y);
-        pb.line_to(right.x, right.y);
-    };
-    match st.arrow {
+    let thin = arrow_line(len, st);
+    let (branch, spread) = arrow_branch(len, thin, st.scale);
+    Some(match st.arrow {
         ArrowStyle::Shape => {
             let unit = ARROW_UNITS[st.size as usize];
-            let (head, tail) = arrow_stretch(len, unit);
+            let (head, tail) = arrow_stretch(len / st.scale, unit);
             let (head, tail) = (head * unit * st.scale, tail * unit * st.scale);
             let back = p(b.x - ux * ARROW_HEAD_LENGTH * head, b.y - uy * ARROW_HEAD_LENGTH * head);
             let across = |q: P, half: f32| p(q.x + nx * half, q.y + ny * half);
-            let mut pb = PathBuilder::new();
             let outline = [
                 across(a, ARROW_TAIL_HALF * tail),
                 across(back, ARROW_NECK_HALF * head),
@@ -542,44 +546,133 @@ fn draw_arrow(pm: &mut Pixmap, a: P, b: P, st: &Style) {
                 across(back, -ARROW_NECK_HALF * head),
                 across(a, -ARROW_TAIL_HALF * tail),
             ];
-            pb.move_to(outline[0].x, outline[0].y);
-            for q in &outline[1..] {
-                pb.line_to(q.x, q.y);
-            }
-            pb.close();
-            if let Some(path) = pb.finish() {
-                pm.fill_path(&path, &pt, FillRule::Winding, tf, None);
-                let s = Stroke { width: st.scale, line_join: LineJoin::Round, ..Default::default() };
-                pm.stroke_path(&path, &pt, &s, tf, None);
-            }
+            ArrowGeometry::Solid { outline, edge: st.scale }
         }
         ArrowStyle::HandDrawn => {
             let line = ((ARROW_WIDTHS[st.size as usize] * ARROW_HAND_GAIN + ARROW_HAND_BASE) * st.scale).min(len / ARROW_HAND_DIVISOR);
-            let n = noise(a.x.to_bits() as u64 | (a.y.to_bits() as u64) << 32);
-            let pts = flatten(&[hand_arrow_shaft(a, b, line, &n)], BRUSH_SPACING * st.scale);
-            let last = (pts.len() - 1).max(1) as f32;
-            let widths: Vec<f32> = (0..pts.len()).map(|i| line * (ARROW_HAND_STOP + (ARROW_HAND_END - ARROW_HAND_STOP) * i as f32 / last)).collect();
-            if let Some(path) = brush_path(&pts, &widths) {
-                pm.fill_path(&path, &pt, FillRule::Winding, tf, None);
-            }
-            let mut pb = PathBuilder::new();
-            add_head(&mut pb, b, ux, uy);
-            if let Some(path) = pb.finish() {
-                pm.stroke_path(&path, &pt, &stroke(line, false), tf, None);
-            }
+            let shaft = flatten(&[hand_arrow_shaft(a, b, line, &noise(seed))], BRUSH_SPACING * st.scale);
+            let last = (shaft.len() - 1).max(1) as f32;
+            let widths = (0..shaft.len()).map(|i| line * (ARROW_HAND_STOP + (ARROW_HAND_END - ARROW_HAND_STOP) * i as f32 / last)).collect();
+            ArrowGeometry::Lines { shaft, widths, heads: vec![arrow_head(b, ux, uy, branch, spread)], line }
         }
         ArrowStyle::Line | ArrowStyle::Double => {
-            let mut pb = PathBuilder::new();
-            pb.move_to(a.x, a.y);
-            pb.line_to(b.x, b.y);
-            add_head(&mut pb, b, ux, uy);
+            let mut heads = vec![arrow_head(b, ux, uy, branch, spread)];
             if st.arrow == ArrowStyle::Double {
-                add_head(&mut pb, a, -ux, -uy);
+                heads.push(arrow_head(a, -ux, -uy, branch, spread));
             }
+            ArrowGeometry::Lines { shaft: vec![a, b], widths: vec![thin; 2], heads, line: thin }
+        }
+    })
+}
+
+fn polyline(pb: &mut PathBuilder, pts: &[P]) {
+    pb.move_to(pts[0].x, pts[0].y);
+    for q in &pts[1..] {
+        pb.line_to(q.x, q.y);
+    }
+}
+
+fn draw_arrow(pm: &mut Pixmap, a: P, b: P, seed: u64, st: &Style) {
+    let Some(geometry) = arrow_geometry(a, b, seed, st) else { return };
+    let tf = Transform::identity();
+    let pt = paint(st.color, 1.0);
+    match geometry {
+        ArrowGeometry::Solid { outline, edge } => {
+            let mut pb = PathBuilder::new();
+            polyline(&mut pb, &outline);
+            pb.close();
             if let Some(path) = pb.finish() {
-                pm.stroke_path(&path, &pt, &thin, tf, None);
+                pm.fill_path(&path, &pt, FillRule::Winding, tf, None);
+                let s = Stroke { width: edge, line_join: LineJoin::Round, ..Default::default() };
+                pm.stroke_path(&path, &pt, &s, tf, None);
             }
         }
+        ArrowGeometry::Lines { shaft, widths, heads, line } => {
+            let hand = st.arrow == ArrowStyle::HandDrawn;
+            let pen = if hand { stroke(line, false) } else { Stroke { line_cap: LineCap::Square, line_join: LineJoin::Miter, ..stroke(line, false) } };
+            if hand && !st.dashed {
+                if let Some(path) = brush_path(&shaft, &widths) {
+                    pm.fill_path(&path, &pt, FillRule::Winding, tf, None);
+                }
+            } else {
+                let mut pb = PathBuilder::new();
+                polyline(&mut pb, &shaft);
+                if let Some(path) = pb.finish() {
+                    pm.stroke_path(&path, &pt, &Stroke { dash: stroke(line, st.dashed).dash, ..pen.clone() }, tf, None);
+                }
+            }
+            let mut pb = PathBuilder::new();
+            for head in &heads {
+                polyline(&mut pb, head);
+            }
+            if let Some(path) = pb.finish() {
+                pm.stroke_path(&path, &pt, &pen, tf, None);
+            }
+        }
+    }
+}
+
+fn arrow_bounds(a: P, b: P, seed: u64, st: &Style) -> R {
+    let around = |pts: &mut dyn Iterator<Item = &P>, margin: f32| pts.fold(R::from_points(a, b), |r, q| r.union(&R::from_points(*q, *q))).expand(margin);
+    match arrow_geometry(a, b, seed, st) {
+        None => R::from_points(a, b).expand(st.width() + 2.0),
+        Some(ArrowGeometry::Solid { outline, edge }) => around(&mut outline.iter(), edge + 2.0),
+        Some(ArrowGeometry::Lines { shaft, heads, line, .. }) => around(&mut shaft.iter().chain(heads.iter().flatten()), line + 2.0),
+    }
+}
+
+pub fn seg_dist(q: P, a: P, b: P) -> f32 {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let l2 = (dx * dx + dy * dy).max(1e-6);
+    let t = (((q.x - a.x) * dx + (q.y - a.y) * dy) / l2).clamp(0.0, 1.0);
+    q.dist(p(a.x + dx * t, a.y + dy * t))
+}
+
+fn inside(polygon: &[P], q: P) -> bool {
+    let edges = polygon.iter().zip(polygon.iter().cycle().skip(1));
+    edges.filter(|(s, e)| (s.y > q.y) != (e.y > q.y) && q.x < s.x + (q.y - s.y) / (e.y - s.y) * (e.x - s.x)).count() % 2 == 1
+}
+
+/// True on anything the arrow paints, and always within reach of the line from tail to tip.
+pub fn arrow_hit(a: P, b: P, seed: u64, st: &Style, q: P, tol: f32) -> bool {
+    if seg_dist(q, a, b) <= st.width() * 1.5 + tol {
+        return true;
+    }
+    match arrow_geometry(a, b, seed, st) {
+        None => false,
+        Some(ArrowGeometry::Solid { outline, edge }) => {
+            inside(&outline, q) || outline.iter().zip(outline.iter().cycle().skip(1)).any(|(s, e)| seg_dist(q, *s, *e) <= edge + tol)
+        }
+        Some(ArrowGeometry::Lines { shaft, widths, heads, line }) => {
+            shaft.windows(2).zip(&widths).any(|(s, w)| seg_dist(q, s[0], s[1]) <= w + tol)
+                || heads.iter().flat_map(|h| h.windows(2)).any(|s| seg_dist(q, s[0], s[1]) <= line + tol)
+        }
+    }
+}
+
+/// Area the object paints on, used for hit tests and partial redraws.
+pub fn bounds(obj: &Obj, fonts: &Fonts) -> R {
+    let st = &obj.style;
+    let w = st.width();
+    match &obj.kind {
+        Kind::Arrow { a, b, seed } => arrow_bounds(*a, *b, *seed, st),
+        Kind::Line { a, b } | Kind::Ruler { a, b } => R::from_points(*a, *b).expand(w * 2.0 + 24.0),
+        Kind::Rect { r, .. } | Kind::Oval { r, .. } => r.expand(w * 2.0 + 4.0),
+        Kind::Blur { r, .. } | Kind::Spotlight { r } => *r,
+        Kind::Magnifier { r, lens } => r.union(&magnifier_lens(r, *lens)).expand(w + 4.0),
+        Kind::Highlighter { a, b } => R::from_points(*a, *b).expand(st.highlight_size() / 2.0 + 2.0),
+        Kind::Freehand { pts } => {
+            let mut r = R { x0: f32::MAX, y0: f32::MAX, x1: f32::MIN, y1: f32::MIN };
+            for q in pts {
+                r = r.union(&R { x0: q.x, y0: q.y, x1: q.x, y1: q.y });
+            }
+            r.expand(w + 2.0)
+        }
+        Kind::Counter { at, .. } => {
+            let s = st.counter_size() / 2.0 + 2.0;
+            R { x0: at.x - s, y0: at.y - s, x1: at.x + s, y1: at.y + s }
+        }
+        Kind::Text { at, text } => text_box(*at, text, st, fonts).expand(text_outline(st.text_size()) + 2.0),
     }
 }
 
@@ -986,6 +1079,10 @@ fn draw_text_line(pm: &mut Pixmap, font: &FontVec, s: &str, baseline: P, size: f
     }
 }
 
+fn text_outline(size: f32) -> f32 {
+    (size * 0.14).max(2.0)
+}
+
 pub fn text_box(at: P, text: &str, st: &Style, fonts: &Fonts) -> R {
     let font = fonts.text(st);
     let size = st.text_size();
@@ -1017,7 +1114,7 @@ fn draw_text(pm: &mut Pixmap, at: P, text: &str, st: &Style, fonts: &Fonts) {
         }
         Fill::Transparent => {
             let oc = if is_light(st.color) { [0, 0, 0, 200] } else { [255, 255, 255, 255] };
-            (st.color, Some((oc, (size * 0.14).max(2.0))))
+            (st.color, Some((oc, text_outline(size))))
         }
         Fill::HandDrawn => (st.color, None),
     };
@@ -1526,7 +1623,7 @@ mod tests {
     #[test]
     fn arrows_follow_their_size_rules() {
         let st = Style { size: 2, scale: 2.0, ..Style::default() };
-        assert_eq!(arrow_line(20.0, &st), 4.0, "a short arrow is capped to a tenth of its length");
+        assert_eq!(arrow_line(20.0, &st), 2.0, "a short arrow is capped to a tenth of its length");
         assert_eq!(arrow_line(100.0, &st), 6.0, "below the growth threshold the table applies");
         let long = arrow_line(4000.0, &st);
         assert_eq!(long, 9.0, "growth stops at 1.5 times");
@@ -1559,6 +1656,147 @@ mod tests {
         assert!((wide[0].a.y - 6.0).abs() < 1e-3, "the short axis keeps its fractions");
     }
 
+    const ARROWS: [ArrowStyle; 4] = [ArrowStyle::Line, ArrowStyle::Double, ArrowStyle::HandDrawn, ArrowStyle::Shape];
+
+    fn arrow(a: P, b: P, st: Style) -> Obj {
+        Obj { kind: Kind::Arrow { a, b, seed: 7 }, style: st }
+    }
+
+    fn painted(obj: &Obj, fonts: &Fonts, w: u32, h: u32) -> Pixmap {
+        let mut pm = Pixmap::new(w, h).unwrap();
+        draw_obj(&mut pm, obj, fonts, 1.0);
+        pm
+    }
+
+    fn ink(pm: &Pixmap) -> Vec<(u32, u32)> {
+        let w = pm.width();
+        pm.pixels().iter().enumerate().filter(|(_, c)| c.alpha() > 0).map(|(i, _)| (i as u32 % w, i as u32 / w)).collect()
+    }
+
+    fn ink_height(pm: &Pixmap) -> f32 {
+        let rows: Vec<u32> = ink(pm).iter().map(|q| q.1).collect();
+        (rows.iter().max().unwrap() - rows.iter().min().unwrap() + 1) as f32
+    }
+
+    #[test]
+    fn arrows_keep_their_proportions_on_retina_captures() {
+        let fonts = Fonts::load();
+        for style in ARROWS {
+            for size in [0, 2, 7] {
+                for len in [10.0, 60.0, 150.0, 800.0] {
+                    let st = Style { size, arrow: style, ..Style::default() };
+                    let one = painted(&arrow(p(150.0, 300.0), p(150.0 + len, 300.0), Style { scale: 1.0, ..st }), &fonts, 1200, 600);
+                    let two = painted(&arrow(p(300.0, 600.0), p(300.0 + len * 2.0, 600.0), Style { scale: 2.0, ..st }), &fonts, 2400, 1200);
+                    let (h1, h2) = (ink_height(&one), ink_height(&two));
+                    assert!((h2 - h1 * 2.0).abs() <= 4.0, "{style:?} size {size} length {len}: {h1} at 1x, {h2} at 2x");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hand_drawn_arrow_keeps_its_curve_when_moved() {
+        let fonts = Fonts::load();
+        let st = Style { arrow: ArrowStyle::HandDrawn, ..Style::default() };
+        let mut obj = arrow(p(120.0, 140.0), p(420.0, 260.0), st);
+        let before = painted(&obj, &fonts, 500, 400);
+        obj.translate(-60.0, -80.0);
+        let moved = painted(&obj, &fonts, 500, 400);
+        assert_eq!(ink(&before).len(), ink(&moved).len());
+        let shifted: Vec<(u32, u32)> = ink(&moved).iter().map(|q| (q.0 + 60, q.1 + 80)).collect();
+        assert_eq!(ink(&before), shifted, "the same pixels, 60 and 80 further");
+    }
+
+    #[test]
+    fn hand_drawn_arrows_differ_from_one_another() {
+        let fonts = Fonts::load();
+        let st = Style { arrow: ArrowStyle::HandDrawn, ..Style::default() };
+        let first = painted(&Obj { kind: Kind::Arrow { a: p(20.0, 100.0), b: p(400.0, 100.0), seed: 1 }, style: st }, &fonts, 450, 200);
+        let second = painted(&Obj { kind: Kind::Arrow { a: p(20.0, 100.0), b: p(400.0, 100.0), seed: 2 }, style: st }, &fonts, 450, 200);
+        assert_ne!(ink(&first), ink(&second));
+    }
+
+    #[test]
+    fn arrows_paint_inside_their_bounds_and_can_be_clicked_anywhere() {
+        let fonts = Fonts::load();
+        for style in ARROWS {
+            for size in 0..=SIZE_MAX {
+                for scale in [1.0, 2.0] {
+                    for (a, b) in [(p(300.0, 300.0), p(330.0, 300.0)), (p(300.0, 500.0), p(900.0, 250.0)), (p(900.0, 300.0), p(300.0, 400.0))] {
+                        let st = Style { size, scale, arrow: style, ..Style::default() };
+                        let obj = arrow(a, b, st);
+                        let area = bounds(&obj, &fonts);
+                        for (x, y) in ink(&painted(&obj, &fonts, 1200, 800)) {
+                            let q = p(x as f32 + 0.5, y as f32 + 0.5);
+                            assert!(area.contains(q), "{style:?} size {size} scale {scale}: {x},{y} outside {area:?}");
+                            assert!(arrow_hit(a, b, 7, &st, q, 1.0), "{style:?} size {size} scale {scale}: {x},{y} cannot be clicked");
+                        }
+                        let len = a.dist(b);
+                        let beside = p((a.x + b.x) / 2.0 - (b.y - a.y) / len * 200.0, (a.y + b.y) / 2.0 + (b.x - a.x) / len * 200.0);
+                        assert!(!arrow_hit(a, b, 7, &st, beside, 1.0), "{style:?} size {size} scale {scale}: far from the arrow is a miss");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn long_hand_drawn_arrow_stays_inside_its_bounds() {
+        let fonts = Fonts::load();
+        for seed in 0..20 {
+            let st = Style { size: 0, scale: 2.0, arrow: ArrowStyle::HandDrawn, ..Style::default() };
+            let obj = Obj { kind: Kind::Arrow { a: p(100.0, 500.0), b: p(6100.0, 500.0), seed }, style: st };
+            let area = bounds(&obj, &fonts);
+            for (x, y) in ink(&painted(&obj, &fonts, 6200, 1000)) {
+                assert!(area.contains(p(x as f32 + 0.5, y as f32 + 0.5)), "seed {seed}: {x},{y} outside {area:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn text_paints_inside_its_bounds() {
+        let fonts = Fonts::load();
+        let lines = vec!["gjpqy WWWW"; 10].join("\n");
+        for font in [FontKind::Sans, FontKind::Goofy] {
+            for fill in [Fill::Opaque, Fill::Translucent, Fill::Transparent, Fill::HandDrawn] {
+                let st = Style { font, fill, size: 2, scale: 2.0, ..Style::default() };
+                let obj = Obj { kind: Kind::Text { at: p(60.0, 60.0), text: lines.clone() }, style: st };
+                let area = bounds(&obj, &fonts);
+                for (x, y) in ink(&painted(&obj, &fonts, 1400, 1200)) {
+                    assert!(area.contains(p(x as f32 + 0.5, y as f32 + 0.5)), "{font:?} {fill:?}: {x},{y} outside {area:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dashed_hand_drawn_arrow_shows_gaps() {
+        let fonts = Fonts::load();
+        let st = Style { arrow: ArrowStyle::HandDrawn, ..Style::default() };
+        let (a, b) = (p(20.0, 100.0), p(420.0, 100.0));
+        let solid = ink(&painted(&arrow(a, b, st), &fonts, 450, 200)).len();
+        let dashed = ink(&painted(&arrow(a, b, Style { dashed: true, ..st }), &fonts, 450, 200)).len();
+        assert!((dashed as f32) < solid as f32 * 0.8, "{dashed} dashed pixels, {solid} solid");
+    }
+
+    #[test]
+    fn dashed_arrows_keep_their_tips() {
+        let fonts = Fonts::load();
+        for style in [ArrowStyle::Line, ArrowStyle::Double, ArrowStyle::HandDrawn] {
+            for size in 0..=SIZE_MAX {
+                for len in (40..500).step_by(7) {
+                    let (a, b) = (p(100.0, 200.0), p(100.0 + len as f32, 200.0));
+                    let st = Style { size, arrow: style, dashed: true, ..Style::default() };
+                    let pm = painted(&arrow(a, b, st), &fonts, 700, 400);
+                    assert!(pm.pixel(b.x as u32, 200).unwrap().alpha() > 0, "{style:?} size {size} length {len}: no tip");
+                    if style == ArrowStyle::Double {
+                        assert!(pm.pixel(100, 200).unwrap().alpha() > 0, "size {size} length {len}: no tail tip");
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn renders_every_tool() {
         let fonts = Fonts::load();
@@ -1581,8 +1819,8 @@ mod tests {
         dashed.color = hex("#00A490");
         let objs = vec![
             Obj { kind: Kind::Highlighter { a: p(40.0, 100.0), b: p(300.0, 100.0) }, style: hl },
-            Obj { kind: Kind::Arrow { a: p(60.0, 300.0), b: p(240.0, 180.0) }, style: st },
-            Obj { kind: Kind::Arrow { a: p(300.0, 320.0), b: p(440.0, 200.0) }, style: hand },
+            Obj { kind: Kind::Arrow { a: p(60.0, 300.0), b: p(240.0, 180.0), seed: 9 }, style: st },
+            Obj { kind: Kind::Arrow { a: p(300.0, 320.0), b: p(440.0, 200.0), seed: 10 }, style: hand },
             Obj { kind: Kind::Rect { r: R { x0: 520.0, y0: 300.0, x1: 760.0, y1: 420.0 }, seed: 11 }, style: filled },
             Obj { kind: Kind::Oval { r: R { x0: 60.0, y0: 360.0, x1: 240.0, y1: 480.0 }, seed: 12 }, style: dashed },
             Obj { kind: Kind::Rect { r: R { x0: 640.0, y0: 30.0, x1: 880.0, y1: 190.0 }, seed: 13 }, style: sketch },
