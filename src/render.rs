@@ -489,6 +489,22 @@ fn arrow_stretch(len: f32, unit: f32) -> (f32, f32) {
     (head, tail)
 }
 
+/// Shaft of the hand-drawn arrow, nearly straight with a slight lean at each end (0x1001b0adc).
+fn hand_arrow_shaft(a: P, b: P, line: f32, n: &[f32; 100]) -> Curve {
+    let len = a.dist(b);
+    let (ux, uy) = ((b.x - a.x) / len, (b.y - a.y) / len);
+    let reach = (len - line * ARROW_HAND_STOP).max(1.0);
+    let end = p(a.x + ux * reach, a.y + uy * reach);
+    let handle = reach * ARROW_HAND_HANDLE;
+    let lean = |q: P, dx: f32, dy: f32, turn: f32| {
+        let (sin, cos) = (turn * std::f32::consts::PI).sin_cos();
+        p(q.x + handle * (dx * cos - dy * sin), q.y + handle * (dy * cos + dx * sin))
+    };
+    let c1 = lean(a, ux, uy, n[11] * ARROW_HAND_LEAN_START - ARROW_HAND_LEAN_START / 2.0);
+    let c2 = lean(end, -ux, -uy, n[12] * ARROW_HAND_LEAN_END - ARROW_HAND_LEAN_END / 2.0);
+    Curve { a, c1, c2, b: end }
+}
+
 fn draw_arrow(pm: &mut Pixmap, a: P, b: P, st: &Style) {
     let len = a.dist(b);
     if len < 1.0 {
@@ -539,16 +555,17 @@ fn draw_arrow(pm: &mut Pixmap, a: P, b: P, st: &Style) {
         }
         ArrowStyle::HandDrawn => {
             let line = ((ARROW_WIDTHS[st.size as usize] * ARROW_HAND_GAIN + ARROW_HAND_BASE) * st.scale).min(len / ARROW_HAND_DIVISOR);
-            let bend = len * 0.12;
-            let c = p((a.x + b.x) / 2.0 + nx * bend, (a.y + b.y) / 2.0 + ny * bend);
+            let n = noise(a.x.to_bits() as u64 | (a.y.to_bits() as u64) << 32);
+            let pts = flatten(&[hand_arrow_shaft(a, b, line, &n)], BRUSH_SPACING * st.scale);
+            let last = (pts.len() - 1).max(1) as f32;
+            let widths: Vec<f32> = (0..pts.len()).map(|i| line * (ARROW_HAND_STOP + (ARROW_HAND_END - ARROW_HAND_STOP) * i as f32 / last)).collect();
+            if let Some(path) = brush_path(&pts, &widths) {
+                pm.fill_path(&path, &pt, FillRule::Winding, tf, None);
+            }
             let mut pb = PathBuilder::new();
-            pb.move_to(a.x, a.y);
-            pb.quad_to(c.x, c.y, b.x, b.y);
-            let (tx, ty) = (b.x - c.x, b.y - c.y);
-            let tl = (tx * tx + ty * ty).sqrt().max(1.0);
-            add_head(&mut pb, b, tx / tl, ty / tl);
+            add_head(&mut pb, b, ux, uy);
             if let Some(path) = pb.finish() {
-                pm.stroke_path(&path, &pt, &stroke(line, st.dashed), tf, None);
+                pm.stroke_path(&path, &pt, &stroke(line, false), tf, None);
             }
         }
         ArrowStyle::Line | ArrowStyle::Double => {
@@ -1520,6 +1537,15 @@ mod tests {
         assert_eq!(arrow_stretch(300.0, 0.7), (1.0, 1.0));
         let (head, tail) = arrow_stretch(1020.0, 0.7);
         assert!((tail - 0.8).abs() < 1e-6 && (head - 1.25).abs() < 1e-6, "long arrows widen the head: {head} {tail}");
+    }
+
+    #[test]
+    fn hand_drawn_arrow_is_nearly_straight() {
+        let (a, b) = (p(0.0, 0.0), p(300.0, 0.0));
+        let c = hand_arrow_shaft(a, b, 10.0, &noise(3));
+        assert_eq!((c.b.x, c.b.y), (292.0, 0.0), "the shaft stops short of the tip");
+        assert!((c.c1.x - 96.36).abs() < 1.0 && c.c1.y.abs() < 9.1, "handles sit a third of the way in: {:?}", c.c1);
+        assert!(c.c2.y.abs() < 3.1);
     }
 
     #[test]

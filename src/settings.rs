@@ -80,7 +80,7 @@ impl Default for Settings {
             after_show: AfterShow::Editor,
             after_copy: false,
             after_save: false,
-            thumbnail_auto_close: true,
+            thumbnail_auto_close: false,
             autostart: false,
             folder: crate::system::home().join("Desktop").display().to_string(),
             save_auto_format: false,
@@ -98,7 +98,11 @@ impl Default for Settings {
             logical_points: false,
             ocr_remove_breaks: false,
             hide_menubar_icon: false,
-            hotkeys: vec![(HotkeyAction::Fullscreen, "super+shift+Digit1".into()), (HotkeyAction::Area, "super+shift+Digit2".into())],
+            hotkeys: vec![
+                (HotkeyAction::Fullscreen, "super+shift+Digit1".into()),
+                (HotkeyAction::Area, "super+shift+Digit2".into()),
+                (HotkeyAction::Ocr, "control+alt+super+KeyO".into()),
+            ],
             last_area: None,
         }
     }
@@ -148,4 +152,18 @@ pub fn pretty_hotkey(s: &str) -> String {
         });
     }
     out
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_hotkeys_parse() {
+        let settings = Settings::default();
+        for (_, keys) in &settings.hotkeys {
+            assert!(keys.parse::<global_hotkey::hotkey::HotKey>().is_ok(), "{keys}");
+        }
+        assert_eq!(pretty_hotkey(settings.hotkey(HotkeyAction::Ocr).unwrap()), "⌃⌥⌘O");
+    }
 }

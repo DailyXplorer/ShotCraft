@@ -36,6 +36,10 @@ pub const HIGHLIGHT_SIZES: [f32; 8] = [14., 20., 28., 38., 54., 76., 108., 154.]
 pub const SIZE_MAX: u8 = 7;
 pub const SIZE_DEFAULT: u8 = 2;
 
+/// Preview thumbnail window (0x100016228).
+pub const THUMB_WIDTH: f32 = 204.0;
+pub const THUMB_MAX_HEIGHT: f32 = 190.0;
+
 /// Arrow line (0x1001af27c, data 0x1002527d8): capped to a tenth of the length, and it grows with
 /// the arrow as sqrt((length + 550) / 600), up to 1.5 times.
 pub const ARROW_WIDTHS: [f32; 10] = [1., 2., 3., 4., 6., 10., 14., 20., 28., 40.];
@@ -55,6 +59,13 @@ pub const ARROW_SPREAD_SHORT: f32 = 0.78539815;
 pub const ARROW_HAND_GAIN: f32 = 0.7;
 pub const ARROW_HAND_BASE: f32 = 1.3;
 pub const ARROW_HAND_DIVISOR: f32 = 15.0;
+/// Hand-drawn arrow shaft (0x1001b0adc): stops short of the tip, its curve handles sit a third of
+/// the way in and lean by a little noise, and the line thickens from the tail to the head.
+pub const ARROW_HAND_STOP: f32 = 0.8;
+pub const ARROW_HAND_END: f32 = 1.2;
+pub const ARROW_HAND_HANDLE: f32 = 0.33;
+pub const ARROW_HAND_LEAN_START: f32 = 0.06;
+pub const ARROW_HAND_LEAN_END: f32 = 0.02;
 /// Solid arrow (0x1001af27c, 0x10007e35c, data 0x100252760): drawn in units of the size step.
 /// Past 520 the head grows and the tail shrinks, down to 0.8; short arrows shrink as a whole.
 pub const ARROW_UNITS: [f32; 10] = [0.33, 0.5, 0.7, 0.9, 1.1, 1.4, 2.0, 2.8, 4.2, 6.4];
