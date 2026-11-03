@@ -1,0 +1,5 @@
+target/
+shots/
+MECHANICS.md
+mechanics.json
+.DS_Store
