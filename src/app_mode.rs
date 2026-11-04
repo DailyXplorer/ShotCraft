@@ -71,17 +71,23 @@ mod mac {
     /// Activates the app and puts its windows in front, the one titled `key` in focus. Needed for
     /// every window, since an accessory app is never brought forward by the system. Returns whether
     /// the window titled `key` is on screen and the app is active; windows are created a few
-    /// frames after they are asked for, so the caller keeps trying until this is true.
-    pub fn bring_to_front(key: &str) -> bool {
+    /// frames after they are asked for, so the caller keeps trying until this is true. Without `focus`
+    /// the window is only ordered in front: the app stays inactive and the key window stays where it is
+    /// (a HUD over a browser must not take the keyboard from it).
+    pub fn bring_to_front(key: &str, focus: bool) -> bool {
         let Some(mtm) = MainThreadMarker::new() else { return false };
-        activate();
+        if focus {
+            activate();
+        }
         let shown: Vec<_> = windows(mtm).into_iter().filter(|w| w.isVisible() && w.alphaValue() > 0.0 && w.canBecomeKeyWindow()).collect();
         let target = shown.iter().find(|w| w.title().to_string() == key);
         if let Some(w) = target {
             w.orderFrontRegardless();
-            w.makeKeyWindow();
+            if focus {
+                w.makeKeyWindow();
+            }
         }
-        target.is_some() && NSApplication::sharedApplication(mtm).isActive()
+        target.is_some() && (!focus || NSApplication::sharedApplication(mtm).isActive())
     }
 
     /// Activates the app, so that its windows, and the ones Sparkle opens, can come forward.
@@ -104,7 +110,7 @@ pub use mac::{activate, bring_to_front, set_editor_alpha};
 #[cfg(not(target_os = "macos"))]
 pub fn set_editor_alpha(_alpha: f64) {}
 #[cfg(not(target_os = "macos"))]
-pub fn bring_to_front(_key: &str) -> bool {
+pub fn bring_to_front(_key: &str, _focus: bool) -> bool {
     true
 }
 #[cfg(not(target_os = "macos"))]
