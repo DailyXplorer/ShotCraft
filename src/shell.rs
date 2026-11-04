@@ -3,6 +3,7 @@ use crate::settings::{HotkeyAction, Settings};
 use crate::{Action, Queue};
 use crate::model::Tool;
 use crate::system::CaptureMode;
+use crate::updater::Updater;
 use global_hotkey::{hotkey::HotKey, GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -14,6 +15,8 @@ pub struct Shell {
     tray: Option<TrayIcon>,
     _menubar: Menu,
     autostart_item: CheckMenuItem,
+    auto_updates_item: CheckMenuItem,
+    updater: Option<Updater>,
     hotkeys: Option<GlobalHotKeyManager>,
     registered: Vec<HotKey>,
     hotkey_map: Arc<Mutex<HashMap<u32, HotkeyAction>>>,
@@ -32,6 +35,8 @@ fn action_for(id: &str) -> Option<Action> {
         "show" => Action::Show,
         "prefs" => Action::Preferences,
         "autostart" => Action::ToggleAutostart,
+        "updates" => Action::CheckForUpdates,
+        "autoupdates" => Action::ToggleAutoUpdates,
         "quit" => Action::Quit,
         "copy" => Action::Copy,
         "save" => Action::Save,
@@ -64,6 +69,7 @@ fn acc(m: Modifiers, c: Code) -> Option<Accelerator> {
 const MENU_SYMBOLS: &[(&str, &str)] = &[
     ("Preferences", "gearshape"),
     ("About", "info.circle"),
+    ("Check for Updates", "arrow.triangle.2.circlepath"),
     ("Quit", "rectangle.portrait.and.arrow.right"),
     ("Show ShotCraft", "eye"),
     ("Show All", "eye"),
@@ -167,12 +173,18 @@ impl Shell {
     pub fn start(queue: Queue, ctx: eframe::egui::Context, settings: &Settings) -> Shell {
         let cmd = Modifiers::META;
         let cmd_shift = Modifiers::META | Modifiers::SHIFT;
+        let updater = Updater::start();
+        let updates_item = MenuItem::with_id("updates", "Check for Updates…", updater.is_some(), None);
+        let automatic = updater.as_ref().is_some_and(Updater::checks_automatically);
+        let auto_updates_item = CheckMenuItem::with_id("autoupdates", "Check for Updates Automatically", updater.is_some(), automatic, None);
 
         let app_menu = Submenu::with_items(
             "ShotCraft",
             true,
             &[
                 &MenuItem::with_id("about", "About ShotCraft", true, None),
+                &updates_item,
+                &auto_updates_item,
                 &PredefinedMenuItem::separator(),
                 &MenuItem::with_id("prefs", "Preferences…", true, acc(cmd, Code::Comma)),
                 &PredefinedMenuItem::separator(),
@@ -314,7 +326,7 @@ impl Shell {
             ctx.request_repaint();
         }));
 
-        let mut shell = Shell { tray, _menubar: menubar, autostart_item, hotkeys: GlobalHotKeyManager::new().ok(), registered: vec![], hotkey_map };
+        let mut shell = Shell { tray, _menubar: menubar, autostart_item, auto_updates_item, updater, hotkeys: GlobalHotKeyManager::new().ok(), registered: vec![], hotkey_map };
         shell.apply_hotkeys(settings);
         shell
     }
@@ -338,6 +350,19 @@ impl Shell {
             }
         }
         failed
+    }
+
+    pub fn check_for_updates(&self) {
+        if let Some(updater) = &self.updater {
+            updater.check_now();
+        }
+    }
+
+    /// The menu has already flipped its check mark, so it holds what the user asked for.
+    pub fn apply_auto_updates(&self) {
+        if let Some(updater) = &self.updater {
+            updater.set_checks_automatically(self.auto_updates_item.is_checked());
+        }
     }
 
     pub fn sync(&self, settings: &Settings) {

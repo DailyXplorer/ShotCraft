@@ -6,6 +6,8 @@ mod render;
 mod settings;
 #[cfg(target_os = "macos")]
 mod shell;
+#[cfg(target_os = "macos")]
+mod updater;
 mod system;
 
 use eframe::egui::{self, Color32, ViewportBuilder, ViewportCommand, ViewportId};
@@ -25,6 +27,8 @@ pub enum Action {
     Show,
     Preferences,
     ToggleAutostart,
+    CheckForUpdates,
+    ToggleAutoUpdates,
     Quit,
     Copy,
     Save,
@@ -470,6 +474,18 @@ impl App {
             }
             Action::Show => self.show_window(),
             Action::Preferences => self.open_prefs(),
+            Action::CheckForUpdates => {
+                #[cfg(target_os = "macos")]
+                if let Some(s) = &self.shell {
+                    s.check_for_updates();
+                }
+            }
+            Action::ToggleAutoUpdates => {
+                #[cfg(target_os = "macos")]
+                if let Some(s) = &self.shell {
+                    s.apply_auto_updates();
+                }
+            }
             Action::ToggleAutostart => {
                 self.settings.autostart = !self.settings.autostart;
                 system::set_autostart(self.settings.autostart);
@@ -825,6 +841,16 @@ impl eframe::App for App {
 
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().collect();
+    #[cfg(target_os = "macos")]
+    if args.iter().any(|a| a == "--check-updater") {
+        match updater::check() {
+            Ok(()) => std::process::exit(0),
+            Err(e) => {
+                eprintln!("Sparkle did not load: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
     let screenshot = args.iter().position(|a| a == "--screenshot").and_then(|i| args.get(i + 1)).map(PathBuf::from);
     let background = args.iter().any(|a| a == "--background");
     let open = args.iter().skip(1).find(|a| !a.starts_with("--") && Some(a.as_str()) != screenshot.as_ref().and_then(|p| p.to_str())).map(PathBuf::from);

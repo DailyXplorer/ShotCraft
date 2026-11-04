@@ -23,7 +23,7 @@ global-hotkey = "0.8"
 tray-icon = "0.25"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSMenu", "NSMenuItem", "NSImage"] }
-objc2-foundation = { version = "0.3", features = ["NSArray", "NSData", "NSDictionary", "NSString", "NSError"] }
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSBundle", "NSData", "NSDictionary", "NSString", "NSError"] }
 objc2-vision = "0.3"
 
 [profile.release]
