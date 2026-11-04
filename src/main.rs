@@ -1070,6 +1070,7 @@ fn main() -> eframe::Result {
     let (size, min) = if std::env::var_os("SHOTCRAFT_PREFS_TAB").is_some() { (prefs::WINDOW, prefs::WINDOW) } else { ([1180.0, 760.0], [editor::MIN_W, 420.0]) };
     let options = eframe::NativeOptions {
         viewport: ViewportBuilder::default()
+            .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../assets/window-icon.png")).expect("window icon"))
             .with_title(EDITOR_TITLE)
             .with_inner_size(size)
             .with_min_inner_size(min)
