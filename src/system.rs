@@ -1,5 +1,5 @@
 use crate::model::{Image, R};
-use crate::targets::{self, Rect, Snapshot, Target, WindowInfo};
+use crate::targets::{self, Snapshot, Target};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -93,26 +93,27 @@ fn selection_args(mode: CaptureMode, opt: &CaptureOptions) -> Result<Vec<String>
             };
             a.push(format!("-R{},{},{},{}", r.x0, r.y0, r.w(), r.h()));
         }
-        _ => return pick_window_args(opt),
+        CaptureMode::Window => return Ok(pick_window_args(opt)),
+        _ => return Err("This capture needs no selection.".into()),
     }
     Ok(a)
 }
 
 /// The interactive window picker.
-fn pick_window_args(opt: &CaptureOptions) -> Result<Vec<String>, String> {
+fn pick_window_args(opt: &CaptureOptions) -> Vec<String> {
     let mut a = vec!["-x".to_string(), "-i".into(), "-w".into()];
     if opt.trim_shadow {
         a.push("-o".into());
     }
-    Ok(a)
+    a
 }
 
 /// Non-interactive capture of a resolved target, with the picture's pixels per point.
 fn capture_target(target: Target, opt: &CaptureOptions) -> Result<Option<(Image, f32)>, String> {
     let scale = opt.scale;
     Ok(match target {
-        Target::Window(id) => shoot(&targets::window_args(id, opt.trim_shadow), |_| ())?.map(|(img, _)| (img, scale)),
-        Target::PickWindow => shoot(&pick_window_args(opt)?, |_| ())?.map(|(img, _)| (img, scale)),
+        Target::Window(id, px_per_point) => shoot(&targets::window_args(id, opt.trim_shadow), |_| ())?.map(|(img, _)| (img, px_per_point as f32)),
+        Target::PickWindow => shoot(&pick_window_args(opt), |_| ())?.map(|(img, _)| (img, scale)),
         Target::MainDisplay => shoot(&["-x".to_string(), "-m".to_string()], |_| ())?.map(|(img, _)| (img, scale)),
         Target::Displays(displays) => {
             let mut shots = Vec::new();
@@ -131,8 +132,7 @@ fn capture_target(target: Target, opt: &CaptureOptions) -> Result<Option<(Image,
 }
 
 pub fn capture(mode: CaptureMode, opt: &CaptureOptions) -> Result<Option<Captured>, String> {
-    let windows = if mode == CaptureMode::ActiveWindow { window_infos() } else { Vec::new() };
-    let (img, scale, area) = match targets::resolve(mode, &opt.snapshot, &windows) {
+    let (img, scale, area) = match targets::resolve(mode, &opt.snapshot) {
         Some(target) => {
             if mode == CaptureMode::Delayed {
                 std::thread::sleep(std::time::Duration::from_secs(3));
@@ -168,29 +168,33 @@ fn flatten_on(img: &Image, bg: [u8; 4]) -> Image {
 
 /// Reads the displays, the mouse and the frontmost app. Call it on the main thread.
 #[cfg(target_os = "macos")]
-pub fn snapshot() -> Snapshot {
+pub fn snapshot(mode: CaptureMode) -> Snapshot {
     use objc2::MainThreadMarker;
     use objc2_app_kit::{NSEvent, NSScreen, NSWorkspace};
+    use targets::Rect;
     let own_pid = std::process::id() as i32;
     let frontmost_pid = NSWorkspace::sharedWorkspace().frontmostApplication().map(|a| a.processIdentifier());
-    let Some(mtm) = MainThreadMarker::new() else { return Snapshot { own_pid, frontmost_pid, ..Snapshot::default() } };
+    let windows = if mode == CaptureMode::ActiveWindow { window_infos() } else { Vec::new() };
+    let Some(mtm) = MainThreadMarker::new() else { return Snapshot { own_pid, frontmost_pid, windows, ..Snapshot::default() } };
     let screens = NSScreen::screens(mtm);
     let rect = |f: objc2_foundation::NSRect| Rect::new(f.origin.x, f.origin.y, f.size.width, f.size.height);
     // The first screen is the one with the menu bar; every frame is relative to its bottom left corner.
     let primary_h = screens.iter().next().map_or(0.0, |s| s.frame().size.height);
     let displays = screens.iter().map(|s| targets::flip_frame(rect(s.frame()), primary_h)).collect();
     let m = NSEvent::mouseLocation();
-    Snapshot { own_pid, frontmost_pid, displays, mouse: Some(targets::flip_point((m.x, m.y), primary_h)) }
+    let scales = screens.iter().map(|s| s.backingScaleFactor()).collect();
+    Snapshot { own_pid, frontmost_pid, displays, scales, mouse: Some(targets::flip_point((m.x, m.y), primary_h)), windows }
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn snapshot() -> Snapshot {
+pub fn snapshot(_mode: CaptureMode) -> Snapshot {
     Snapshot { own_pid: std::process::id() as i32, ..Snapshot::default() }
 }
 
 /// On-screen windows, front to back.
 #[cfg(target_os = "macos")]
-fn window_infos() -> Vec<WindowInfo> {
+fn window_infos() -> Vec<targets::WindowInfo> {
+    use targets::{Rect, WindowInfo};
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
     use objc2_core_foundation::{CFArray, CFString};
@@ -226,11 +230,6 @@ fn window_infos() -> Vec<WindowInfo> {
             })
             .collect()
     }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn window_infos() -> Vec<WindowInfo> {
-    Vec::new()
 }
 
 pub fn copy_image(img: &Image) -> Result<(), String> {

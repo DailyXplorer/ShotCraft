@@ -268,7 +268,7 @@ impl App {
             return;
         }
         self.busy = true;
-        let snapshot = system::snapshot();
+        let snapshot = system::snapshot(mode);
         let was_visible = !self.hidden;
         if was_visible {
             self.hide_window();

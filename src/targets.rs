@@ -50,14 +50,14 @@ pub const MIN_WINDOW_SIDE: f64 = 50.0;
 /// The frontmost normal window of the app with `frontmost_pid`. `windows` is in front-to-back order,
 /// as the window server returns it. Menu bar items, the Dock, floating panels and overlays live on
 /// layers other than 0. ShotCraft's own windows are never the target.
-pub fn pick_window(windows: &[WindowInfo], frontmost_pid: i32, own_pid: i32) -> Option<u32> {
+pub fn pick_window(windows: &[WindowInfo], frontmost_pid: i32, own_pid: i32) -> Option<WindowInfo> {
     if frontmost_pid == own_pid {
         return None;
     }
     windows
         .iter()
         .find(|w| w.pid == frontmost_pid && w.layer == 0 && w.alpha > 0.0 && w.bounds.w >= MIN_WINDOW_SIDE && w.bounds.h >= MIN_WINDOW_SIDE)
-        .map(|w| w.id)
+        .copied()
 }
 
 /// A `NSScreen` frame has its origin at the bottom left of the main display; flip it to the top-left
@@ -86,13 +86,17 @@ pub struct Snapshot {
     pub frontmost_pid: Option<i32>,
     /// Displays in `NSScreen` order: the main display first.
     pub displays: Vec<Rect>,
+    /// Pixels per point of each display, in the same order.
+    pub scales: Vec<f64>,
     pub mouse: Option<(f64, f64)>,
+    /// On-screen windows front to back. Read together with `frontmost_pid` so the two agree.
+    pub windows: Vec<WindowInfo>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Target {
-    /// One non-interactive window capture by window id.
-    Window(u32),
+    /// One non-interactive window capture by window id; the second field is the picture's pixels per point.
+    Window(u32, f64),
     /// No usable window: let the user pick one.
     PickWindow,
     /// These display rectangles, one `screencapture` run each.
@@ -101,11 +105,16 @@ pub enum Target {
     MainDisplay,
 }
 
-/// Where a non-interactive capture of `mode` goes. `windows` is only read for `ActiveWindow`.
-pub fn resolve(mode: CaptureMode, snap: &Snapshot, windows: &[WindowInfo]) -> Option<Target> {
+/// Pixels per point of the display that holds the middle of `r`; 1 when there are no displays.
+pub fn scale_at(displays: &[Rect], scales: &[f64], r: Rect) -> f64 {
+    display_at(displays, (r.x + r.w / 2.0, r.y + r.h / 2.0)).and_then(|i| scales.get(i).copied()).unwrap_or(1.0)
+}
+
+/// Where a non-interactive capture of `mode` goes.
+pub fn resolve(mode: CaptureMode, snap: &Snapshot) -> Option<Target> {
     Some(match mode {
-        CaptureMode::ActiveWindow => match snap.frontmost_pid.and_then(|pid| pick_window(windows, pid, snap.own_pid)) {
-            Some(id) => Target::Window(id),
+        CaptureMode::ActiveWindow => match snap.frontmost_pid.and_then(|pid| pick_window(&snap.windows, pid, snap.own_pid)) {
+            Some(w) => Target::Window(w.id, scale_at(&snap.displays, &snap.scales, w.bounds)),
             None => Target::PickWindow,
         },
         CaptureMode::Fullscreen | CaptureMode::Delayed => match snap.mouse.and_then(|m| display_at(&snap.displays, m)) {
@@ -171,7 +180,10 @@ pub fn compose(displays: &[Rect], shots: &[Image]) -> Option<Image> {
     let mut out = vec![0u8; lay.width as usize * lay.height as usize * 4];
     for (shot, &(cx, cy, cw, ch)) in shots.iter().zip(&lay.cells) {
         let rgba;
-        let src: &[u8] = if (shot.w, shot.h) == (cw, ch) {
+        // A picture a pixel off its cell (fractional point sizes) is copied as it is; a different density is resized.
+        let close = shot.w.abs_diff(cw) <= 1 && shot.h.abs_diff(ch) <= 1;
+        let (cw, ch) = if close { (shot.w, shot.h) } else { (cw, ch) };
+        let src: &[u8] = if close {
             &shot.px
         } else {
             let from = image::RgbaImage::from_raw(shot.w, shot.h, shot.px.to_vec())?;
@@ -207,7 +219,7 @@ mod tests {
             win(6, 42, 0, 1.0, 900.0, 700.0),  // the one
             win(7, 42, 0, 1.0, 1000.0, 800.0), // behind it
         ];
-        assert_eq!(pick_window(&windows, 42, 7), Some(6));
+        assert_eq!(pick_window(&windows, 42, 7).map(|w| w.id), Some(6));
     }
 
     #[test]
@@ -254,23 +266,32 @@ mod tests {
     }
 
     fn snap(pid: Option<i32>, mouse: Option<(f64, f64)>) -> Snapshot {
-        Snapshot { own_pid: 7, frontmost_pid: pid, displays: setup(), mouse }
+        let windows = vec![win(9, 42, 0, 1.0, 800.0, 600.0)]; // at (10, 10) on the main display
+        Snapshot { own_pid: 7, frontmost_pid: pid, displays: setup(), scales: vec![2.0, 1.0, 1.0], mouse, windows }
     }
 
     #[test]
     fn resolves_each_mode() {
-        let windows = [win(9, 42, 0, 1.0, 800.0, 600.0)];
-        assert_eq!(resolve(CaptureMode::ActiveWindow, &snap(Some(42), None), &windows), Some(Target::Window(9)));
-        assert_eq!(resolve(CaptureMode::ActiveWindow, &snap(Some(43), None), &windows), Some(Target::PickWindow));
-        assert_eq!(resolve(CaptureMode::ActiveWindow, &snap(None, None), &windows), Some(Target::PickWindow));
-        assert_eq!(resolve(CaptureMode::ActiveWindow, &snap(Some(7), None), &windows), Some(Target::PickWindow));
+        assert_eq!(resolve(CaptureMode::ActiveWindow, &snap(Some(42), None)), Some(Target::Window(9, 2.0)));
+        assert_eq!(resolve(CaptureMode::ActiveWindow, &snap(Some(43), None)), Some(Target::PickWindow));
+        assert_eq!(resolve(CaptureMode::ActiveWindow, &snap(None, None)), Some(Target::PickWindow));
+        assert_eq!(resolve(CaptureMode::ActiveWindow, &snap(Some(7), None)), Some(Target::PickWindow));
         let left = setup()[1];
-        assert_eq!(resolve(CaptureMode::Fullscreen, &snap(None, Some((-300.0, 20.0))), &[]), Some(Target::Displays(vec![left])));
-        assert_eq!(resolve(CaptureMode::Delayed, &snap(None, Some((-300.0, 20.0))), &[]), Some(Target::Displays(vec![left])));
-        assert_eq!(resolve(CaptureMode::Fullscreen, &snap(None, None), &[]), Some(Target::MainDisplay));
-        assert_eq!(resolve(CaptureMode::AllDisplays, &snap(None, None), &[]), Some(Target::Displays(setup())));
-        assert_eq!(resolve(CaptureMode::AllDisplays, &Snapshot::default(), &[]), Some(Target::MainDisplay));
-        assert_eq!(resolve(CaptureMode::Area, &snap(None, None), &[]), None);
+        assert_eq!(resolve(CaptureMode::Fullscreen, &snap(None, Some((-300.0, 20.0)))), Some(Target::Displays(vec![left])));
+        assert_eq!(resolve(CaptureMode::Delayed, &snap(None, Some((-300.0, 20.0)))), Some(Target::Displays(vec![left])));
+        assert_eq!(resolve(CaptureMode::Fullscreen, &snap(None, None)), Some(Target::MainDisplay));
+        assert_eq!(resolve(CaptureMode::AllDisplays, &snap(None, None)), Some(Target::Displays(setup())));
+        assert_eq!(resolve(CaptureMode::AllDisplays, &Snapshot::default()), Some(Target::MainDisplay));
+        assert_eq!(resolve(CaptureMode::Area, &snap(None, None)), None);
+    }
+
+    #[test]
+    fn a_window_takes_the_density_of_its_display() {
+        let d = setup();
+        let on_left = Rect::new(-1500.0, 0.0, 400.0, 300.0);
+        assert_eq!(scale_at(&d, &[2.0, 1.0, 1.0], Rect::new(10.0, 10.0, 800.0, 600.0)), 2.0);
+        assert_eq!(scale_at(&d, &[2.0, 1.5, 1.0], on_left), 1.5);
+        assert_eq!(scale_at(&[], &[], on_left), 1.0);
     }
 
     #[test]
@@ -316,6 +337,15 @@ mod tests {
         // Corner not covered by any display stays transparent.
         assert_eq!(pixel(&out, 0, 0), [0, 0, 0, 0]);
         assert_eq!(pixel(&out, 11, 5), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn a_picture_one_pixel_off_its_cell_is_copied_not_resized() {
+        // 2.5 × 2 points at 2 px per point: the cell is 5 × 4 px, the picture 5 × 5.
+        let displays = [Rect::new(0.0, 0.0, 2.5, 2.0)];
+        let out = compose(&displays, &[solid(5, 5, [9, 9, 9, 255])]).unwrap();
+        assert_eq!((out.w, out.h), (5, 4));
+        assert_eq!(pixel(&out, 4, 3), [9, 9, 9, 255]);
     }
 
     #[test]
