@@ -21,6 +21,8 @@ pub struct Shell {
     tray: Option<TrayIcon>,
     _menubar: Menu,
     autostart_item: CheckMenuItem,
+    /// "Delayed Screenshot (Ns)": the wait is a setting.
+    delayed_item: Option<MenuItem>,
     auto_updates_item: CheckMenuItem,
     /// Items whose enabled state follows the editor (see `menu_model::item_enabled`), by id.
     stateful: Vec<(String, MenuItem)>,
@@ -46,6 +48,7 @@ fn action_for(id: &str) -> Option<Action> {
         "repeat" => Action::Capture(CaptureMode::RepeatArea),
         "window" => Action::Capture(CaptureMode::Window),
         "scrolling" => Action::ScrollingCapture,
+        "scrollingup" => Action::ScrollingCaptureUp,
         "activewindow" => Action::Capture(CaptureMode::ActiveWindow),
         "alldisplays" => Action::Capture(CaptureMode::AllDisplays),
         "delayed" => Action::Capture(CaptureMode::Delayed),
@@ -103,6 +106,7 @@ struct Parts {
     autostart: bool,
     stateful: Vec<(String, MenuItem)>,
     hotkey_items: Vec<(HotkeyAction, MenuItem)>,
+    delayed_item: Option<MenuItem>,
     autostart_item: Option<CheckMenuItem>,
     auto_updates_item: Option<CheckMenuItem>,
     help: Option<Submenu>,
@@ -117,6 +121,9 @@ impl Parts {
                 let item = MenuItem::with_id(id.as_str(), *title, on, key.and_then(key_equivalent));
                 if *enabled && menu_model::is_stateful(id) {
                     self.stateful.push((id.clone(), item.clone()));
+                }
+                if id == "delayed" {
+                    self.delayed_item = Some(item.clone());
                 }
                 if let Some(a) = menu_model::hotkey_of_item(id) {
                     self.hotkey_items.push((a, item.clone()));
@@ -181,6 +188,7 @@ const MENU_SYMBOLS: &[(&str, &str)] = &[
     ("Repeat Area Capture", "arrow.clockwise"),
     ("Capture Any Window", "macwindow"),
     ("Capture Active Window", "macwindow.on.rectangle"),
+    ("Scrolling Capture (Up)", "arrow.up.square"),
     ("Scrolling Capture", "arrow.up.and.down.square"),
     ("Delayed Screenshot", "timer"),
     ("Recognize Text", "text.viewfinder"),
@@ -267,6 +275,7 @@ impl Shell {
         let tray_items: Vec<Box<dyn IsMenuItem>> = menu_model::status_menu().iter().map(|e| parts.build(e)).collect();
         let tray_menu = Menu::with_items(&tray_items.iter().map(|b| &**b).collect::<Vec<_>>()).expect("menu");
         stateful.append(&mut parts.stateful);
+        let delayed_item = parts.delayed_item.take();
         let (autostart_item, auto_updates_item, hotkey_items) = (parts.autostart_item.expect("autostart item"), parts.auto_updates_item.expect("updates item"), parts.hotkey_items);
         if let Some(updater) = &updater {
             auto_updates_item.set_checked(updater.checks_automatically());
@@ -328,7 +337,7 @@ impl Shell {
             ctx.request_repaint();
         }));
 
-        let mut shell = Shell { tray, _menubar: menubar, autostart_item, auto_updates_item, stateful, hotkey_items, state: None, updater, hotkeys: GlobalHotKeyManager::new().ok(), registered: vec![], show_hotkey_works: false, hotkey_map, escape: None, escape_id, enter: None, enter_id };
+        let mut shell = Shell { tray, _menubar: menubar, autostart_item, auto_updates_item, delayed_item, stateful, hotkey_items, state: None, updater, hotkeys: GlobalHotKeyManager::new().ok(), registered: vec![], show_hotkey_works: false, hotkey_map, escape: None, escape_id, enter: None, enter_id };
         shell.apply_hotkeys(settings);
         shell
     }
@@ -415,6 +424,9 @@ impl Shell {
             let _ = item.set_accelerator(accel);
         }
         self.autostart_item.set_checked(settings.autostart);
+        if let Some(item) = &self.delayed_item {
+            item.set_text(crate::settings::delayed_label(settings.delay()));
+        }
         self.refresh_updates();
         if let Some(t) = &self.tray {
             let _ = t.set_visible(settings.menubar_icon_visible(self.show_hotkey_works));

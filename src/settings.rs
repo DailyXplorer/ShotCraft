@@ -20,6 +20,15 @@ pub enum WindowBg {
     Wallpaper,
 }
 
+/// The waits Delayed Screenshot offers, in seconds. The first one is the default.
+pub const DELAYS: [u32; 3] = [3, 5, 10];
+pub const DEFAULT_DELAY: u32 = DELAYS[0];
+
+/// The menu entry of Delayed Screenshot, which tells how long it waits.
+pub fn delayed_label(secs: u32) -> String {
+    format!("Delayed Screenshot ({secs}s)")
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Confirm {
     Custom,
@@ -80,6 +89,10 @@ pub struct Settings {
     pub downscale_retina: bool,
     pub window_bg: WindowBg,
     pub window_solid: String,
+    /// Whether the mouse pointer is in the pictures of the captures that take no selection.
+    pub capture_cursor: bool,
+    /// Seconds Delayed Screenshot waits before it takes the picture.
+    pub delay_secs: u32,
     /// Settings files written before `WindowBg::Trimmed` kept "Trim shadow" as its own checkbox.
     /// Only read, to carry an old choice over; never written.
     #[serde(skip_serializing)]
@@ -114,6 +127,8 @@ impl Default for Settings {
             downscale_retina: false,
             window_bg: WindowBg::Transparent,
             window_solid: "#C4C6C8".into(),
+            capture_cursor: false,
+            delay_secs: DEFAULT_DELAY,
             trim_shadow: false,
             always_on_top: false,
             reverse_zoom: false,
@@ -169,6 +184,11 @@ impl Settings {
     /// effect while the Show ShotCraft hotkey works: without either, nothing could open it again.
     pub fn menubar_icon_visible(&self, show_hotkey_works: bool) -> bool {
         !self.hide_menubar_icon || !show_hotkey_works
+    }
+
+    /// The wait of Delayed Screenshot: a hand-edited settings file can't make it zero or endless.
+    pub fn delay(&self) -> u32 {
+        self.delay_secs.clamp(1, 60)
     }
 
     pub fn hotkey(&self, a: HotkeyAction) -> Option<&str> {
@@ -234,6 +254,36 @@ mod window_bg_tests {
         assert!(!json.contains("trim_shadow"));
         let again: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(again, Settings::default());
+    }
+}
+
+#[cfg(test)]
+mod capture_option_tests {
+    use super::*;
+
+    #[test]
+    fn the_pointer_stays_out_and_the_delay_is_three_seconds_by_default() {
+        let s = Settings::default();
+        assert!(!s.capture_cursor);
+        assert_eq!(s.delay(), 3);
+    }
+
+    #[test]
+    fn old_settings_files_get_the_defaults_and_odd_delays_are_kept_in_range() {
+        let old: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!((old.capture_cursor, old.delay_secs), (false, 3));
+        let s: Settings = serde_json::from_str(r#"{"capture_cursor":true,"delay_secs":0}"#).unwrap();
+        assert!(s.capture_cursor);
+        assert_eq!(s.delay(), 1);
+        let s: Settings = serde_json::from_str(r#"{"delay_secs":100000}"#).unwrap();
+        assert_eq!(s.delay(), 60);
+    }
+
+    #[test]
+    fn the_menu_label_tells_the_wait() {
+        assert_eq!(delayed_label(3), "Delayed Screenshot (3s)");
+        assert_eq!(delayed_label(10), "Delayed Screenshot (10s)");
+        assert!(DELAYS.contains(&DEFAULT_DELAY));
     }
 }
 

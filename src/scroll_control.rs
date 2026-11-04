@@ -152,6 +152,7 @@ mod tests {
             Note::ScrollYourself,
             Note::Capturing,
             Note::AboveStart,
+            Note::BelowStart,
             Note::ScrollSlower,
             Note::LostTrack,
             Note::SizeChanged,
