@@ -456,10 +456,15 @@ impl App {
         self.ed.selected = None;
         self.ed.popover = Popover::None;
         if t == Tool::Backdrop {
-            if let Some(d) = &mut self.doc {
-                if d.backdrop.is_none() {
-                    d.checkpoint();
-                    d.backdrop = Some(Backdrop::default());
+            if self.doc.as_ref().map_or(false, |d| d.backdrop.is_none()) {
+                if self.backdrop_allowed() {
+                    let bd = self.new_backdrop();
+                    if let Some(d) = &mut self.doc {
+                        d.checkpoint();
+                        d.backdrop = Some(bd);
+                    }
+                } else {
+                    return;
                 }
             }
         }
@@ -1068,61 +1073,168 @@ impl App {
         }
     }
 
+    /// A fresh backdrop: the last configuration used (kept in the settings), with its picture reloaded.
+    fn new_backdrop(&self) -> Backdrop {
+        let mut bd = self.settings.backdrop.clone().unwrap_or_default();
+        bd.restore_image();
+        bd.recenter();
+        bd
+    }
+
+    /// Backdrops are refused on pictures above 15 megapixels: says so and returns false.
+    fn backdrop_allowed(&mut self) -> bool {
+        let Some(d) = &self.doc else { return false };
+        let (w, h) = match d.crop {
+            Some(r) => (r.w() as u32, r.h() as u32),
+            None => (d.base.w, d.base.h),
+        };
+        if backdrop_too_large(w, h) {
+            self.error("The image is too large. Crop or resize to 15 megapixel first.");
+            return false;
+        }
+        true
+    }
+
+    fn pick_backdrop_image(&mut self, bd: &mut Backdrop) {
+        let Some(path) = rfd::FileDialog::new().add_filter("Images", crate::system::OPEN_EXTENSIONS).pick_file() else { return };
+        let dir = crate::system::home().join("Library/Application Support/ShotCraft/backdrops");
+        let stored = store_backdrop_image(&path, &dir, 12);
+        let src = stored.clone().unwrap_or(path);
+        match load_backdrop_image(&src) {
+            Some(img) => {
+                bd.image = Some(img);
+                bd.image_path = src.display().to_string();
+            }
+            None => self.error("Could not read that picture."),
+        }
+    }
+
     fn backdrop_options(&mut self, ui: &mut Ui, t: &Th) {
-        let Some(d) = &mut self.doc else { return };
-        let Some(mut bd) = d.backdrop else {
-            if ui.button("Add Gradient Background").clicked() {
-                d.checkpoint();
-                d.backdrop = Some(Backdrop::default());
+        let Some(d) = &self.doc else { return };
+        let Some(mut bd) = d.backdrop.clone() else {
+            if ui.button("Add Gradient Background").clicked() && self.backdrop_allowed() {
+                let bd = self.new_backdrop();
+                if let Some(d) = &mut self.doc {
+                    d.checkpoint();
+                    d.backdrop = Some(bd);
+                }
             }
             return;
         };
-        let before = bd;
-        crate::icons::combo("gradkind").width(150.0).selected_text(bd.kind.label()).show_ui(ui, |ui| {
-            for k in GradientKind::ALL {
-                ui.selectable_value(&mut bd.kind, k, k.label());
-            }
-        });
-        let (sw, sresp) = ui.allocate_exact_size(vec2(44.0, 24.0), Sense::click());
-        let stops = gradient_stops(bd.gradient);
-        let n = 12;
-        for i in 0..n {
-            let tt = i as f32 / (n - 1) as f32;
-            let c = stops.iter().rev().find(|(s, _)| *s <= tt).or(stops.first()).map(|x| x.1).unwrap_or([0, 0, 0, 255]);
-            let x0 = sw.left() + sw.width() * i as f32 / n as f32;
-            ui.painter().rect_filled(Rect::from_min_max(pos2(x0, sw.top()), pos2(x0 + sw.width() / n as f32 + 0.5, sw.bottom())), 0.0, c32(c));
-        }
-        ui.painter().rect_stroke(sw, 4.0, Stroke::new(1.0, t.line), StrokeKind::Inside);
-        if sresp.on_hover_text("Next gradient").clicked() {
-            bd.gradient = (bd.gradient + 1) % GRADIENTS.len();
-        }
-        if icon_btn(ui, Icon::Randomize, false, "Randomize", t, 26.0).clicked() {
-            let seed = (ui.input(|i| i.time) * 1000.0) as usize;
-            bd.gradient = seed % GRADIENTS.len();
-            bd.kind = GradientKind::ALL[(seed / 7) % 4];
-        }
-        if icon_btn(ui, Icon::Revert, false, "Reverse colors", t, 26.0).clicked() {
-            bd.reverse = !bd.reverse;
-        }
-        let slider = |ui: &mut Ui, label: &str, v: &mut f32, range: std::ops::RangeInclusive<f32>| {
-            ui.label(egui::RichText::new(label).color(t.dim).size(12.0));
-            ui.add_sized([78.0, 20.0], egui::Slider::new(v, range).show_value(false));
+        let before = bd.clone();
+        let mut pick_image = false;
+        let mode = |bd: &Backdrop| match (&bd.image, bd.fill) {
+            (Some(_), _) => 3,
+            (None, BackdropFill::Preset) => 0,
+            (None, BackdropFill::Custom) => 1,
+            (None, BackdropFill::Solid) => 2,
         };
-        slider(ui, "Backdrop", &mut bd.padding, 0.0..=BACKDROP_SLIDER_MAX);
-        slider(ui, "Shadow", &mut bd.shadow, 0.0..=BACKDROP_SLIDER_MAX);
-        slider(ui, "Inset", &mut bd.inset, 0.0..=BACKDROP_SLIDER_MAX);
-        slider(ui, "Outer Radius", &mut bd.outer_radius, 0.0..=BACKDROP_SLIDER_MAX);
-        slider(ui, "Inner Radius", &mut bd.inner_radius, 0.0..=BACKDROP_SLIDER_MAX);
-        let ratio_label = RATIOS.iter().find(|(_, r)| *r == bd.ratio && r.is_some()).map(|x| x.0).unwrap_or("•••");
-        crate::icons::combo("ratio").width(70.0).selected_text(ratio_label).show_ui(ui, |ui| {
-            for (name, r) in RATIOS {
-                if ui.selectable_label(bd.ratio == r && r.is_some(), name).clicked() {
-                    bd.ratio = r;
+        let mode_names = ["Gradient", "Two colors", "Color", "Picture"];
+        let mut cur = mode(&bd);
+        crate::icons::combo("bdfill").width(96.0).selected_text(mode_names[cur]).show_ui(ui, |ui| {
+            for (i, n) in mode_names.iter().enumerate() {
+                if ui.selectable_label(cur == i, *n).clicked() {
+                    cur = i;
                 }
             }
         });
-        let remove = ui.button("Remove").clicked();
+        if cur != mode(&bd) {
+            match cur {
+                0 | 1 | 2 => {
+                    // The picture is forgotten, so it does not come back with the next backdrop.
+                    bd.forget_image();
+                    bd.fill = [BackdropFill::Preset, BackdropFill::Custom, BackdropFill::Solid][cur];
+                }
+                _ => {
+                    if bd.image_path.is_empty() {
+                        pick_image = true;
+                    } else {
+                        bd.restore_image();
+                    }
+                }
+            }
+        }
+        if bd.image.is_none() && bd.fill != BackdropFill::Solid {
+            crate::icons::combo("gradkind").width(110.0).selected_text(bd.kind.label().trim_end_matches(" gradient")).show_ui(ui, |ui| {
+                for k in GradientKind::ALL {
+                    ui.selectable_value(&mut bd.kind, k, k.label());
+                }
+            });
+        }
+        if bd.image.is_none() && bd.fill == BackdropFill::Preset {
+            let (sw, sresp) = ui.allocate_exact_size(vec2(44.0, 24.0), Sense::click());
+            let stops = gradient_stops(bd.gradient);
+            let n = 12;
+            for i in 0..n {
+                let tt = i as f32 / (n - 1) as f32;
+                let c = stops.iter().rev().find(|(s, _)| *s <= tt).or(stops.first()).map(|x| x.1).unwrap_or([0, 0, 0, 255]);
+                let x0 = sw.left() + sw.width() * i as f32 / n as f32;
+                ui.painter().rect_filled(Rect::from_min_max(pos2(x0, sw.top()), pos2(x0 + sw.width() / n as f32 + 0.5, sw.bottom())), 0.0, c32(c));
+            }
+            ui.painter().rect_stroke(sw, 4.0, Stroke::new(1.0, t.line), StrokeKind::Inside);
+            if sresp.on_hover_text("Next gradient").clicked() {
+                bd.gradient = (bd.gradient + 1) % GRADIENTS.len();
+            }
+            if icon_btn(ui, Icon::Randomize, false, "Randomize", t, 26.0).clicked() {
+                let seed = (ui.input(|i| i.time) * 1000.0) as usize;
+                bd.gradient = seed % GRADIENTS.len();
+                bd.kind = GradientKind::ALL[(seed / 7) % 4];
+            }
+        }
+        if bd.image.is_none() && bd.fill == BackdropFill::Custom {
+            ui.color_edit_button_srgb(&mut bd.custom_from).on_hover_text("From");
+            ui.color_edit_button_srgb(&mut bd.custom_to).on_hover_text("To");
+        }
+        if bd.image.is_none() && bd.fill == BackdropFill::Solid {
+            ui.color_edit_button_srgb(&mut bd.solid).on_hover_text("Color");
+        }
+        let slider = |ui: &mut Ui, label: &str, v: &mut f32, range: std::ops::RangeInclusive<f32>| {
+            ui.label(egui::RichText::new(label).color(t.dim).size(12.0));
+            ui.add_sized([64.0, 20.0], egui::Slider::new(v, range).show_value(false));
+        };
+        if bd.image.is_some() {
+            if ui.button("Choose…").clicked() {
+                pick_image = true;
+            }
+            slider(ui, "Image Blur", &mut bd.blur, 0.0..=BACKDROP_BLUR_MAX);
+        }
+        slider(ui, "Backdrop", &mut bd.padding, 0.0..=BACKDROP_SLIDER_MAX);
+        slider(ui, "Shadow", &mut bd.shadow, 0.0..=BACKDROP_SLIDER_MAX);
+        slider(ui, "Inset", &mut bd.inset, 0.0..=BACKDROP_SLIDER_MAX);
+        if ui.add_enabled(bd.offset != [0.0, 0.0], egui::Button::new("Recenter")).on_hover_text("Drag the picture to move it; this puts it back in the middle").clicked() {
+            bd.recenter();
+        }
+        ui.menu_button("•••", |ui| {
+            ui.set_min_width(190.0);
+            for (name, r) in RATIOS {
+                if ui.selectable_label(bd.ratio == r && r.is_some(), name).clicked() {
+                    bd.ratio = r;
+                    ui.close();
+                }
+            }
+            ui.separator();
+            if bd.image.is_none() && bd.fill != BackdropFill::Solid {
+                ui.checkbox(&mut bd.reverse, "Reverse colors");
+            }
+            ui.checkbox(&mut bd.autocrop, "Autocrop").on_hover_text("Trims the empty border off the screenshot first");
+            ui.separator();
+            for (label, v) in [("Outer Radius", &mut bd.outer_radius), ("Inner Radius", &mut bd.inner_radius)] {
+                ui.horizontal(|ui| {
+                    ui.add_sized([86.0, 18.0], egui::Label::new(label));
+                    ui.add(egui::Slider::new(v, 0.0..=BACKDROP_SLIDER_MAX).show_value(false));
+                });
+            }
+        });
+        let remove_image = bd.image.is_some() && ui.button("Remove").on_hover_text("Forget the background picture").clicked();
+        let remove = bd.image.is_none() && ui.button("Remove").clicked();
         let ok = ui.button("Ok").clicked();
+        if pick_image {
+            self.pick_backdrop_image(&mut bd);
+        }
+        if remove_image {
+            bd.forget_image();
+        }
+        let Some(d) = &mut self.doc else { return };
         if remove {
             d.checkpoint();
             d.backdrop = None;
@@ -1132,12 +1244,17 @@ impl App {
         if bd != before {
             if self.ed.drag == Drag::None && !ui.ctx().egui_is_using_pointer() {
                 d.checkpoint();
+                self.settings.backdrop = Some(bd.clone());
+                self.settings.save();
             } else {
                 d.touch();
+                self.settings.backdrop = Some(bd.clone());
             }
-            d.backdrop = Some(bd);
+            d.backdrop = Some(bd.clone());
         }
         if ok {
+            self.settings.backdrop = Some(bd);
+            self.settings.save();
             self.ed.tool = Tool::Select;
         }
     }
@@ -1356,6 +1473,27 @@ impl App {
                 tex.paint_in(&painter, r, Color32::WHITE);
             }
             self.canvas_zoom_pan(ui, &resp);
+            // Dragging moves the screenshot inside the backdrop; Recenter puts it back.
+            if resp.hovered() || resp.dragged() {
+                ui.ctx().set_cursor_icon(if resp.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
+            }
+            if let Some(d) = &mut self.doc {
+                if resp.drag_started() {
+                    d.checkpoint();
+                }
+                if resp.dragged() {
+                    let delta = resp.drag_delta() / self.ed.zoom;
+                    let (cw, ch) = match d.crop {
+                        Some(r) => (r.w(), r.h()),
+                        None => (d.base.w as f32, d.base.h as f32),
+                    };
+                    if let Some(bd) = &mut d.backdrop {
+                        let (mx, my) = render::backdrop_max_offset(cw, ch, bd);
+                        bd.offset = [(bd.offset[0] + delta.x).clamp(-mx, mx), (bd.offset[1] + delta.y).clamp(-my, my)];
+                    }
+                    d.touch();
+                }
+            }
             return;
         }
 

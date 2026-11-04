@@ -705,4 +705,101 @@ mod tests {
             "the shadow keeps its alpha: {a:?} vs {b:?}"
         );
     }
+
+    /// A busy picture to put a backdrop around.
+    fn shot_picture() -> Image {
+        let (w, h) = (420u32, 260u32);
+        let mut px = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let bar = y < 28;
+                let c = if bar { [60, 63, 70] } else if (x / 40 + y / 40) % 2 == 0 { [248, 248, 250] } else { [226, 232, 242] };
+                px.extend_from_slice(&[c[0], c[1], c[2], 255]);
+            }
+        }
+        Image { w, h, px: Arc::new(px) }
+    }
+
+    /// Optional (`SHOTCRAFT_TEST_OUT`): backdrop variants for the eyes, and checks that they differ.
+    #[test]
+    fn backdrop_variants_for_the_eyes() {
+        use crate::model::{Backdrop, BackdropFill, BackdropImage, GradientKind};
+        let fonts = render::Fonts::load();
+        let sky = {
+            let (w, h) = (300u32, 200u32);
+            let mut px = Vec::new();
+            for y in 0..h {
+                for x in 0..w {
+                    let k = if (x / 30 + y / 30) % 2 == 0 { 1.0 } else { 0.45 };
+                    px.extend_from_slice(&[((x * 255 / w) as f32 * k) as u8, (90.0 * k) as u8, ((y * 255 / h) as f32 * k) as u8, 255]);
+                }
+            }
+            Image { w, h, px: Arc::new(px) }
+        };
+        let make = |f: &dyn Fn(&mut Backdrop)| {
+            let mut doc = Doc::new(shot_picture(), 1.0);
+            let mut bd = Backdrop::default();
+            f(&mut bd);
+            doc.backdrop = Some(bd);
+            render::export(&doc, &fonts)
+        };
+        let variants: Vec<(&str, Image)> = vec![
+            ("mesh", make(&|_| {})),
+            ("vertical", make(&|b| b.kind = GradientKind::Vertical)),
+            ("diagonal-16x9", make(&|b| {
+                b.kind = GradientKind::Diagonal;
+                b.gradient = 3;
+                b.ratio = Some(16.0 / 9.0);
+            })),
+            ("radial-reversed", make(&|b| {
+                b.kind = GradientKind::Radial;
+                b.gradient = 5;
+                b.reverse = true;
+            })),
+            ("two-colors", make(&|b| b.fill = BackdropFill::Custom)),
+            ("solid", make(&|b| b.fill = BackdropFill::Solid)),
+            ("picture", make(&|b| b.image = Some(BackdropImage::new(sky.clone())))),
+            ("picture-blur", make(&|b| {
+                b.image = Some(BackdropImage::new(sky.clone()));
+                b.blur = 4.0;
+            })),
+            ("moved", make(&|b| {
+                b.ratio = Some(1.0);
+                b.offset = [-60.0, 30.0];
+            })),
+        ];
+        // Each variant really is a different picture.
+        for (i, (na, a)) in variants.iter().enumerate() {
+            for (nb, b) in variants.iter().skip(i + 1) {
+                assert!((a.w, a.h) != (b.w, b.h) || a.px != b.px, "{na} and {nb} look the same");
+            }
+        }
+        let Some(dir) = out_dir() else { return };
+        let dir = dir.join("backdrop");
+        for (name, img) in &variants {
+            save_png(img, &dir.join(format!("{name}.png")));
+        }
+        // The editor with the backdrop tool open: its options bar.
+        let shot = with_rig(|rig| {
+            let mut app = rig.app();
+            let mut doc = Doc::new(shot_picture(), PPP);
+            doc.backdrop = Some(Backdrop::default());
+            app.doc = Some(doc);
+            app.ed.tool = crate::model::Tool::Backdrop;
+            rig.render_editor(&mut app, SIZE, PPP, false)
+        });
+        save_png(&shot, &dir.join("editor-backdrop-tool.png"));
+        let shot = with_rig(|rig| {
+            let mut app = rig.app();
+            let mut doc = Doc::new(shot_picture(), PPP);
+            let mut bd = Backdrop::default();
+            bd.image = Some(BackdropImage::new(sky.clone()));
+            bd.blur = 3.0;
+            doc.backdrop = Some(bd);
+            app.doc = Some(doc);
+            app.ed.tool = crate::model::Tool::Backdrop;
+            rig.render_editor(&mut app, SIZE, PPP, true)
+        });
+        save_png(&shot, &dir.join("editor-backdrop-picture-dark.png"));
+    }
 }
