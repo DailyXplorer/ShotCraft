@@ -83,27 +83,27 @@ const PIN_ZOOM_FACTOR: f32 = 1.259_921;
 
 /// The zoom (in percent of the picture at its own size) one wheel step away, or `None` when the pin
 /// is at its limit. `shown_width` is the pin's width now and `max_width` the widest it may get.
-/// The factor is applied to the percent, which is then snapped down to a multiple of 5 up to 90 and
-/// of 25 above, so repeated steps land on round values (100, 125, 150, 175, 200, 250, ...).
+/// The factor is applied to the percent, which is then snapped to a multiple of 5 up to 90 and of 25
+/// above. Zooming in snaps down and zooming out snaps to the nearest, so a notch up then a notch
+/// down comes back to where it started (100, 125, 150, 175, 200, 250, ...).
 pub fn pin_zoom_step(current_pct: u32, zoom_in: bool, shown_width: f32, max_width: f32) -> Option<u32> {
     if !shown_width.is_finite() || !max_width.is_finite() {
         return None;
     }
     let cur = current_pct.max(PIN_MIN_ZOOM_PCT);
-    if zoom_in && shown_width >= max_width || !zoom_in && shown_width <= PIN_MIN_WIDTH {
+    if zoom_in && shown_width >= max_width || !zoom_in && (shown_width <= PIN_MIN_WIDTH || cur <= PIN_MIN_ZOOM_PCT) {
         return None;
     }
     let target = cur as f32 * if zoom_in { PIN_ZOOM_FACTOR } else { 1.0 / PIN_ZOOM_FACTOR };
-    let grid = if target > 90.0 { 25 } else { 5 };
-    let snapped = ((target / grid as f32).floor() as u32 * grid).max(PIN_MIN_ZOOM_PCT);
-    // Snapping down must never turn a step up into no step at all.
-    if zoom_in {
-        Some(if snapped > cur { snapped } else { cur + grid })
-    } else if snapped < cur {
-        Some(snapped)
+    let grid: u32 = if target > 90.0 { 25 } else { 5 };
+    let cells = target / grid as f32;
+    let snapped = (if zoom_in { cells.floor() } else { cells.round() } as u32 * grid).max(PIN_MIN_ZOOM_PCT);
+    // Snapping must never turn a step into no step at all.
+    Some(if zoom_in {
+        snapped.max(cur + grid.min(5))
     } else {
-        None
-    }
+        snapped.min(cur.saturating_sub(grid.min(5))).max(PIN_MIN_ZOOM_PCT)
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -403,13 +403,20 @@ mod tests {
             up.push(z);
         }
         assert_eq!(up, [125, 150, 175, 200]);
+        // and back down the same ladder
+        let mut back = vec![];
+        for _ in 0..4 {
+            z = pin_zoom_step(z, false, 300.0, 5000.0).unwrap();
+            back.push(z);
+        }
+        assert_eq!(back, [150, 125, 100, 80]);
         let mut z = 100;
         let mut down = vec![];
         for _ in 0..5 {
             z = pin_zoom_step(z, false, 400.0, 5000.0).unwrap();
             down.push(z);
         }
-        assert_eq!(down, [75, 55, 40, 30, 20]);
+        assert_eq!(down, [80, 65, 50, 40, 30]);
     }
 
     #[test]

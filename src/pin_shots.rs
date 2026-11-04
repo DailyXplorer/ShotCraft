@@ -67,11 +67,11 @@ fn the_wheel_over_a_pin_resizes_it_in_steps_and_keeps_the_aspect() {
     assert!(widths.windows(2).all(|p| p[1] > p[0]), "zoomed in each notch: {widths:?}");
     assert_eq!(pin.zoom, 1.75);
     let shot3 = draw_pin(&mut pin, vec![]);
-    for _ in 0..8 {
+    for _ in 0..20 {
         draw_pin(&mut pin, notch(-1.0, Modifiers::NONE));
     }
     assert_eq!(pin.zoom, 0.2, "zoom out stops at the minimum width");
-    assert!(pin.layout().window.0 >= sizing::PIN_MIN_WIDTH * 0.7);
+    assert!(pin.layout().window.0 <= sizing::PIN_MIN_WIDTH + 0.01);
     let shot_small = draw_pin(&mut pin, vec![]);
     if let Some(dir) = out_dir() {
         save_png(&shot0, &dir.join("pin-100.png"));
