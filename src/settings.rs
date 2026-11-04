@@ -10,8 +10,14 @@ pub enum AfterShow {
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum WindowBg {
+    /// The window with its shadow on a see-through background.
     Transparent,
+    /// The window cut tight, without its shadow; the corners stay rounded and see-through.
+    Trimmed,
+    /// The window and its shadow on a solid colour: an opaque picture.
     Solid,
+    /// The window and its shadow on the desktop wallpaper: an opaque picture.
+    Wallpaper,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -74,6 +80,9 @@ pub struct Settings {
     pub downscale_retina: bool,
     pub window_bg: WindowBg,
     pub window_solid: String,
+    /// Settings files written before `WindowBg::Trimmed` kept "Trim shadow" as its own checkbox.
+    /// Only read, to carry an old choice over; never written.
+    #[serde(skip_serializing)]
     pub trim_shadow: bool,
     pub always_on_top: bool,
     pub reverse_zoom: bool,
@@ -82,6 +91,7 @@ pub struct Settings {
     pub esc_save: bool,
     pub confirmation: Confirm,
     pub color_format: usize,
+    pub contrast_type: crate::color::ContrastType,
     pub logical_points: bool,
     pub ocr_remove_breaks: bool,
     pub hide_menubar_icon: bool,
@@ -110,6 +120,7 @@ impl Default for Settings {
             esc_save: false,
             confirmation: Confirm::Custom,
             color_format: 0,
+            contrast_type: crate::color::ContrastType::Wcag2,
             logical_points: false,
             ocr_remove_breaks: false,
             hide_menubar_icon: false,
@@ -130,7 +141,15 @@ fn path() -> PathBuf {
 
 impl Settings {
     pub fn load() -> Settings {
-        std::fs::read(path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+        std::fs::read(path()).ok().and_then(|b| serde_json::from_slice::<Settings>(&b).ok()).unwrap_or_default().migrated()
+    }
+
+    /// Carries the old "Trim shadow" checkbox over to the window background mode.
+    fn migrated(mut self) -> Settings {
+        if std::mem::take(&mut self.trim_shadow) && self.window_bg == WindowBg::Transparent {
+            self.window_bg = WindowBg::Trimmed;
+        }
+        self
     }
 
     pub fn save(&self) {
@@ -174,6 +193,45 @@ pub fn pretty_hotkey(s: &str) -> String {
         });
     }
     out
+}
+
+#[cfg(test)]
+mod window_bg_tests {
+    use super::*;
+
+    fn load(json: &str) -> Settings {
+        serde_json::from_slice::<Settings>(json.as_bytes()).unwrap().migrated()
+    }
+
+    #[test]
+    fn the_factory_default_keeps_the_shadow_on_a_transparent_background() {
+        let s = Settings::default();
+        assert_eq!(s.window_bg, WindowBg::Transparent);
+        assert_eq!(s.window_solid, "#C4C6C8");
+    }
+
+    #[test]
+    fn old_settings_files_still_load() {
+        assert_eq!(load("{}").window_bg, WindowBg::Transparent);
+        assert_eq!(load(r#"{"window_bg":"Solid"}"#).window_bg, WindowBg::Solid);
+        assert_eq!(load(r#"{"window_bg":"Wallpaper"}"#).window_bg, WindowBg::Wallpaper);
+    }
+
+    #[test]
+    fn the_old_trim_shadow_checkbox_becomes_a_mode() {
+        assert_eq!(load(r#"{"window_bg":"Transparent","trim_shadow":true}"#).window_bg, WindowBg::Trimmed);
+        // With a solid colour the shadow was composited, not trimmed: the colour wins.
+        assert_eq!(load(r#"{"window_bg":"Solid","trim_shadow":true}"#).window_bg, WindowBg::Solid);
+        assert_eq!(load(r#"{"trim_shadow":false}"#).window_bg, WindowBg::Transparent);
+    }
+
+    #[test]
+    fn the_old_checkbox_is_not_written_back() {
+        let json = serde_json::to_string(&Settings::default()).unwrap();
+        assert!(!json.contains("trim_shadow"));
+        let again: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(again, Settings::default());
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]

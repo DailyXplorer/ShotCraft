@@ -65,6 +65,9 @@ fn action_for(id: &str) -> Option<Action> {
         "zoomout" => Action::ZoomOut,
         "zoomfit" => Action::ZoomFit,
         "zoom100" => Action::Zoom100,
+        "zoomsel" => Action::ZoomSelection,
+        "seltl" => Action::SelectionTopLeft,
+        "selbr" => Action::SelectionBottomRight,
         "about" => Action::About,
         "shortcuts" => Action::Shortcuts,
         t if t.starts_with("tool:") => {
@@ -256,6 +259,12 @@ impl Shell {
                 &PredefinedMenuItem::separator(),
                 &MenuItem::with_id("zoomfit", "Zoom To Fit", true, acc(cmd, Code::Digit1)),
                 &MenuItem::with_id("zoom100", "Zoom To 100%", true, acc(cmd, Code::Digit0)),
+                &PredefinedMenuItem::separator(),
+                &MenuItem::with_id("zoomsel", "Zoom To Selection", true, acc(cmd, Code::Digit2)),
+                // Q and W work from the editor's own key handling: like the Draw items, these
+                // carry no menu key equivalent, which would also swallow letters typed into a text.
+                &MenuItem::with_id("seltl", "Selection Top Left", true, None),
+                &MenuItem::with_id("selbr", "Selection Bottom Right", true, None),
                 &PredefinedMenuItem::separator(),
                 &PredefinedMenuItem::fullscreen(Some("Enter Full Screen")),
             ],

@@ -12,7 +12,7 @@ ShotCraft is written in Rust. It is an early version (0.1.2).
 * Active Window captures the frontmost window of the app you are using, without clicking. Use it from a hotkey, or from the menu bar icon menu, which targets the app that was in front before you opened it. When that app has no capturable window, you pick a window instead.
 * A 3-second delayed capture of the display the mouse was on when you started it.
 * Scrolling capture: pick an area and ShotCraft scrolls it for you, grabs it again and again and stitches what the area showed into one tall image that opens in the editor. A small dark control below the area (above or beside it when there is no room; it never covers the area and never takes the keyboard from the page) shows the live height and frame count, with Done (`Return`) and Cancel (`Esc`). Scrolling for you needs the Accessibility permission, which macOS asks for the first time; without it you scroll by hand and the capture ends by itself 3 seconds after the page stops moving. Fixed headers, footers and side panels are kept once, scrolling back up adds nothing, and the image stops at 20,000 px. Start it from the menu bar icon or with its hotkey (not set by default); pressing the hotkey again acts as Done.
-* Window captures can keep a transparent background or use a solid color, and can trim the window shadow.
+* Active Window and Any Window captures have four looks (Preferences → General → Window Screenshot Background): **Transparent** (the default: the window with its shadow, rounded corners and see-through background), **Trim shadow** (cut tight without the shadow, corners stay rounded), **Solid Color** and **Wallpaper** (the window and its shadow laid on a color, or on your desktop picture, as an opaque rectangle; the padding is the shadow's own margin, so the window sits in the middle). If the wallpaper can't be read, Wallpaper falls back to the solid color. Area, Fullscreen and All Displays captures are never changed.
 * Instant text and QR recognition: select an area and the recognized text goes straight to the clipboard, with no editor.
 * Open an existing image from a file or from the clipboard. The file picker and the command line open PNG, JPEG, GIF, BMP, TIFF and WebP files; saving writes PNG or JPEG. Animated GIFs open as their first frame.
 * Lives in the menu bar only: no Dock icon, and starting the app (Finder, Launch at startup, `open`) shows no window. Windows appear when you capture, open a file, open Preferences, pin an image or check for updates. Every command, including Preferences, Check for Updates, Check for Updates Automatically, About and Quit, is in the menu bar icon menu. The app has no menu bar of its own and no Cmd+Tab entry; global hotkeys work at any time.
@@ -65,7 +65,7 @@ A pinned image is a borderless window that stays above other windows. Drag it an
 
 ### Preferences
 
-* General: what happens after a screenshot (editor, thumbnail or nothing; copy; save), thumbnail auto-close, launch at startup, screenshots folder, save format, Retina downscale, window screenshot background and shadow.
+* General: what happens after a screenshot (editor, thumbnail or nothing; copy; save), thumbnail auto-close, launch at startup, screenshots folder, save format, Retina downscale, window screenshot background (Wallpaper, Transparent, Solid Color or Trim shadow).
 * Hotkeys: record or clear a shortcut for each of the nine actions listed under Keyboard shortcuts. ShotCraft flags a shortcut that macOS refuses because another app uses it.
 * Advanced: OCR line breaks, hide the menu bar icon (only while a Show ShotCraft hotkey is set and registered, since the icon is the way back into the app), keep the main window on top, zoom direction, default zoom level, what Esc does when hiding the editor (copy and/or save), and confirmation style (custom notification, system notification or none).
 
@@ -101,6 +101,20 @@ In the editor:
 | `Del` | Delete the selected object, or erase the selected area |
 | `Esc` | Deselect, then copy and hide (copy on Esc is on by default) |
 | `Space` + drag | Move around the picture |
+| `Z` + click, `Z` + drag | Zoom in on a spot, or on the dragged area |
+| `Cmd+2`, `Q`, `W` | With a selection: zoom to it, to its top left corner, to its bottom right corner |
+| `Cmd` + click | Select the flat area under the pointer (a button, a bar, a background) |
+| `Shift` + drag | Make the selection (or crop frame) square; shapes and lines keep their square / 45 degree constraint |
+| `Opt` + drag | While selecting, preview the selection snapped to the content inside it |
+| `A` | With a selection (Select tool, no object picked): snap it to the content inside |
+| `B` | With a selection: blur it |
+| `Enter` | With a selection: crop to it |
+| `Left` `Right` `Up` `Down` | Move the selection (or the selected object) by 1 pixel, 10 with `Shift` |
+| `Cmd` + arrows | Resize the selection by 1 pixel (right and bottom edge), 10 with `Shift` |
+| `[` `]` | Shrink or grow the selection by 1 pixel on every side, 10 with `Shift` |
+| `Cmd+Enter` | Freehand: next stroke variability (off, light, strong). Highlighter: flat or round ends |
+| `Opt+Up`, `Opt+Down` | Freehand: smoother, rougher strokes |
+| `1` to `9` | Spotlight tool: how dark the surroundings are (10 to 90 percent) |
 
 Keyboard Shortcuts in the menu bar icon menu lists them in the app. `Cmd+,` opens Preferences from the editor.
 
