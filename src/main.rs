@@ -10,6 +10,7 @@ mod shell;
 #[cfg(target_os = "macos")]
 mod updater;
 mod system;
+mod targets;
 
 use eframe::egui::{self, Color32, ViewportBuilder, ViewportCommand, ViewportId};
 use model::{Doc, Image, Tool};
@@ -315,6 +316,7 @@ impl App {
             return;
         }
         self.busy = true;
+        let snapshot = system::snapshot(mode);
         let was_visible = !self.hidden;
         if was_visible {
             self.hide_window();
@@ -325,6 +327,7 @@ impl App {
             trim_shadow: self.settings.trim_shadow,
             solid_bg: solid,
             scale: self.pixels_per_point(),
+            snapshot,
         };
         let q = self.queue.clone();
         let ctx = self.ctx.clone();
@@ -479,7 +482,7 @@ impl App {
                             self.settings.last_area = Some([r.x0, r.y0, r.x1, r.y1]);
                             self.settings.save();
                         }
-                        let full = c.mode == CaptureMode::Fullscreen || c.mode == CaptureMode::Delayed;
+                        let full = matches!(c.mode, CaptureMode::Fullscreen | CaptureMode::Delayed | CaptureMode::AllDisplays);
                         self.doc = Some(Doc::new(c.img.clone(), c.scale));
                         if self.settings.after_copy {
                             self.copy();
