@@ -26,19 +26,31 @@ pub enum HotkeyAction {
     Fullscreen,
     Area,
     Window,
+    ActiveWindow,
+    AllDisplays,
     RepeatArea,
     Ocr,
     Show,
 }
 
 impl HotkeyAction {
-    pub const ALL: [HotkeyAction; 6] =
-        [HotkeyAction::Fullscreen, HotkeyAction::Area, HotkeyAction::Window, HotkeyAction::RepeatArea, HotkeyAction::Ocr, HotkeyAction::Show];
+    pub const ALL: [HotkeyAction; 8] = [
+        HotkeyAction::Fullscreen,
+        HotkeyAction::AllDisplays,
+        HotkeyAction::Area,
+        HotkeyAction::Window,
+        HotkeyAction::ActiveWindow,
+        HotkeyAction::RepeatArea,
+        HotkeyAction::Ocr,
+        HotkeyAction::Show,
+    ];
     pub fn label(self) -> &'static str {
         match self {
             HotkeyAction::Fullscreen => "Fullscreen screenshot",
+            HotkeyAction::AllDisplays => "All displays screenshot",
             HotkeyAction::Area => "Area screenshot",
             HotkeyAction::Window => "Any window screenshot",
+            HotkeyAction::ActiveWindow => "Active window screenshot",
             HotkeyAction::RepeatArea => "Repeat area screenshot",
             HotkeyAction::Ocr => "Instant Text/QR Recognition",
             HotkeyAction::Show => "Show ShotCraft",
@@ -101,6 +113,7 @@ impl Default for Settings {
             hotkeys: vec![
                 (HotkeyAction::Fullscreen, "super+shift+Digit1".into()),
                 (HotkeyAction::Area, "super+shift+Digit2".into()),
+                (HotkeyAction::ActiveWindow, "control+alt+super+KeyW".into()),
                 (HotkeyAction::Ocr, "control+alt+super+KeyO".into()),
             ],
             last_area: None,
