@@ -327,7 +327,7 @@ impl Shell {
             .build()
             .ok();
         if let Some(t) = &tray {
-            let _ = t.set_visible(settings.menubar_icon_visible(false));
+            let _ = t.set_visible(!settings.hide_menubar_icon);
         }
 
         let q = queue.clone();
