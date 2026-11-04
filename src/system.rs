@@ -1,5 +1,7 @@
 use crate::model::{Image, R};
+use crate::settings::WindowBg;
 use crate::targets::{self, Snapshot, Target};
+use crate::windowbg;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -58,8 +60,10 @@ pub(crate) fn capture_rect(path: &Path) -> Option<R> {
 
 pub struct CaptureOptions {
     pub last_area: Option<R>,
-    pub trim_shadow: bool,
-    pub solid_bg: Option<[u8; 4]>,
+    /// The look of Active Window and Any Window captures.
+    pub window_bg: WindowBg,
+    /// The colour of `WindowBg::Solid`, and what Wallpaper falls back to.
+    pub solid_color: [u8; 3],
     pub scale: f32,
     /// What the screen looked like when the capture was asked for.
     pub snapshot: Snapshot,
@@ -102,19 +106,30 @@ fn selection_args(mode: CaptureMode, opt: &CaptureOptions) -> Result<Vec<String>
 /// The interactive window picker.
 fn pick_window_args(opt: &CaptureOptions) -> Vec<String> {
     let mut a = vec!["-x".to_string(), "-i".into(), "-w".into()];
-    if opt.trim_shadow {
+    if opt.window_bg == WindowBg::Trimmed {
         a.push("-o".into());
     }
     a
 }
 
-/// Non-interactive capture of a resolved target, with the picture's pixels per point.
-fn capture_target(target: Target, opt: &CaptureOptions) -> Result<Option<(Image, f32)>, String> {
+/// Where a window sits on screen: x, y, width and height in global points.
+type Frame = (f64, f64, f64, f64);
+
+/// Non-interactive capture of a resolved target, with the picture's pixels per point and, for a
+/// window, where it was on screen when that is known and needed.
+fn capture_target(target: Target, opt: &CaptureOptions) -> Result<Option<(Image, f32, Option<Frame>)>, String> {
     let scale = opt.scale;
+    let trim = opt.window_bg == WindowBg::Trimmed;
     Ok(match target {
-        Target::Window(id, px_per_point) => shoot(&targets::window_args(id, opt.trim_shadow), |_| ())?.map(|(img, _)| (img, px_per_point as f32)),
-        Target::PickWindow => shoot(&pick_window_args(opt), |_| ())?.map(|(img, _)| (img, scale)),
-        Target::MainDisplay => shoot(&["-x".to_string(), "-m".to_string()], |_| ())?.map(|(img, _)| (img, scale)),
+        Target::Window(id, px_per_point) => {
+            let frame = opt.snapshot.windows.iter().find(|w| w.id == id).map(|w| (w.bounds.x, w.bounds.y, w.bounds.w, w.bounds.h));
+            shoot(&targets::window_args(id, trim), |_| ())?.map(|(img, _)| (img, px_per_point as f32, frame))
+        }
+        Target::PickWindow => {
+            let want_frame = opt.window_bg == WindowBg::Wallpaper;
+            shoot(&pick_window_args(opt), |p| if want_frame { capture_rect(p) } else { None })?.map(|(img, r)| (img, scale, r.map(frame_of)))
+        }
+        Target::MainDisplay => shoot(&["-x".to_string(), "-m".to_string()], |_| ())?.map(|(img, _)| (img, scale, None)),
         Target::Displays(displays) => {
             let mut shots = Vec::new();
             for d in &displays {
@@ -124,47 +139,94 @@ fn capture_target(target: Target, opt: &CaptureOptions) -> Result<Option<(Image,
             let snap = &opt.snapshot;
             let px_per_point = displays.iter().map(|d| targets::scale_at(&snap.displays, &snap.scales, *d) as f32).fold(1.0, f32::max);
             if shots.len() == 1 {
-                return Ok(Some((shots.remove(0), px_per_point)));
+                return Ok(Some((shots.remove(0), px_per_point, None)));
             }
             let canvas = targets::compose(&displays, &shots).ok_or("Can't put the displays together in one picture.")?;
-            Some((canvas, px_per_point))
+            Some((canvas, px_per_point, None))
         }
     })
 }
 
+fn frame_of(r: R) -> Frame {
+    (r.x0 as f64, r.y0 as f64, r.w() as f64, r.h() as f64)
+}
+
 pub fn capture(mode: CaptureMode, opt: &CaptureOptions) -> Result<Option<Captured>, String> {
-    let (img, scale, area) = match targets::resolve(mode, &opt.snapshot) {
+    let is_window = matches!(mode, CaptureMode::Window | CaptureMode::ActiveWindow);
+    let (img, scale, area, frame) = match targets::resolve(mode, &opt.snapshot) {
         Some(target) => {
             if mode == CaptureMode::Delayed {
                 std::thread::sleep(std::time::Duration::from_secs(3));
             }
-            let Some((img, scale)) = capture_target(target, opt)? else { return Ok(None) };
-            (img, scale, None)
+            let Some((img, scale, frame)) = capture_target(target, opt)? else { return Ok(None) };
+            (img, scale, None, frame)
         }
         None => {
             let args = selection_args(mode, opt)?;
-            let Some((img, area)) = shoot(&args, |p| if mode == CaptureMode::Area { capture_rect(p) } else { opt.last_area.filter(|_| mode == CaptureMode::RepeatArea) })? else { return Ok(None) };
-            (img, opt.scale, area)
+            let want_frame = mode == CaptureMode::Window && opt.window_bg == WindowBg::Wallpaper;
+            let Some((img, rect)) = shoot(&args, |p| match mode {
+                CaptureMode::Area => capture_rect(p),
+                CaptureMode::RepeatArea => opt.last_area,
+                _ if want_frame => capture_rect(p),
+                _ => None,
+            })?
+            else {
+                return Ok(None);
+            };
+            // The rectangle of a picked window places it on the wallpaper; it is not an area to repeat.
+            if is_window {
+                (img, opt.scale, None, rect.map(frame_of))
+            } else {
+                (img, opt.scale, rect, None)
+            }
         }
     };
-    let flatten = matches!(mode, CaptureMode::Window | CaptureMode::ActiveWindow);
-    let img = match opt.solid_bg {
-        Some(bg) if flatten => flatten_on(&img, bg),
-        _ => img,
-    };
+    let img = if is_window { apply_window_bg(img, scale, frame, opt) } else { img };
     Ok(Some(Captured { img, scale, area, mode }))
 }
 
-fn flatten_on(img: &Image, bg: [u8; 4]) -> Image {
-    let mut out = Vec::with_capacity(img.px.len());
-    for s in img.px.chunks_exact(4) {
-        let a = s[3] as u32;
-        for c in 0..3 {
-            out.push(((s[c] as u32 * a + bg[c] as u32 * (255 - a)) / 255) as u8);
-        }
-        out.push(255);
+/// The final look of a window capture for the chosen background.
+fn apply_window_bg(img: Image, scale: f32, frame: Option<Frame>, opt: &CaptureOptions) -> Image {
+    match opt.window_bg {
+        WindowBg::Transparent | WindowBg::Trimmed => windowbg::trim_transparent(&img),
+        WindowBg::Solid => windowbg::on_color(&img, opt.solid_color),
+        WindowBg::Wallpaper => match wallpaper_backdrop(&img, scale, frame, opt) {
+            Ok(wall) => windowbg::on_picture(&img, &wall),
+            Err(why) => {
+                notify("ShotCraft", &format!("Can't read the desktop wallpaper ({why}). The window is on the solid colour instead."));
+                windowbg::on_color(&img, opt.solid_color)
+            }
+        },
     }
-    Image { w: img.w, h: img.h, px: Arc::new(out) }
+}
+
+/// The wallpaper of the window's display, cut to the canvas of `img`.
+fn wallpaper_backdrop(img: &Image, scale: f32, frame: Option<Frame>, opt: &CaptureOptions) -> Result<Image, String> {
+    let snap = &opt.snapshot;
+    let center = frame.map(|f| (f.0 + f.2 / 2.0, f.1 + f.3 / 2.0)).or(snap.mouse);
+    let index = center.and_then(|c| targets::display_at(&snap.displays, c)).unwrap_or(0);
+    let path = snap.wallpapers.get(index).cloned().flatten().ok_or("the system gave no picture for this display")?;
+    let wall = load_wallpaper(&path)?;
+    let lay = windowbg::layout(img);
+    let display = snap.displays.get(index).zip(snap.scales.get(index)).map(|(d, s)| windowbg::DisplayPlace { frame: (d.x, d.y, d.w, d.h), px_per_point: *s });
+    let origin = frame.and_then(|f| windowbg::canvas_origin(f, scale as f64, img, &lay));
+    Ok(windowbg::wallpaper_canvas(&wall, &lay, origin, display))
+}
+
+/// Reads a desktop picture. Formats the `image` crate lacks (HEIC, the usual one on macOS) go
+/// through `sips`, which ships with macOS.
+fn load_wallpaper(path: &Path) -> Result<Image, String> {
+    if path.is_dir() {
+        return Err("the desktop shows a folder of pictures".into());
+    }
+    if let Ok(img) = load_image_file(path) {
+        return Ok(img);
+    }
+    let tmp = temp_png("wallpaper");
+    let ok = Command::new("/usr/bin/sips").args(["-s", "format", "png"]).arg(path).arg("--out").arg(&tmp).output().map(|o| o.status.success()).unwrap_or(false);
+    let img = if ok { load_image_file(&tmp).ok() } else { None };
+    let _ = std::fs::remove_file(&tmp);
+    img.ok_or_else(|| format!("{} can't be opened", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()))
 }
 
 /// Reads the displays, the mouse and the frontmost app. Call it on the main thread.
@@ -184,7 +246,14 @@ pub fn snapshot(mode: CaptureMode) -> Snapshot {
     let displays = screens.iter().map(|s| targets::flip_frame(rect(s.frame()), primary_h)).collect();
     let m = NSEvent::mouseLocation();
     let scales = screens.iter().map(|s| s.backingScaleFactor()).collect();
-    Snapshot { own_pid, frontmost_pid, displays, scales, mouse: Some(targets::flip_point((m.x, m.y), primary_h)), windows }
+    // Only a window capture on the wallpaper needs the desktop pictures.
+    let wallpapers = if matches!(mode, CaptureMode::Window | CaptureMode::ActiveWindow) {
+        let ws = NSWorkspace::sharedWorkspace();
+        screens.iter().map(|s| ws.desktopImageURLForScreen(&s).and_then(|u| u.path()).map(|p| PathBuf::from(p.to_string()))).collect()
+    } else {
+        Vec::new()
+    };
+    Snapshot { own_pid, frontmost_pid, displays, scales, mouse: Some(targets::flip_point((m.x, m.y), primary_h)), windows, wallpapers }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -278,7 +347,7 @@ pub fn save_image(img: &Image, path: &Path) -> Result<(), String> {
     let is_jpeg = path.extension().map(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg")).unwrap_or(false);
     if is_jpeg {
         // JPEG has no alpha: lay the picture on white, or transparent pixels (stored as black) come out black.
-        let flat = flatten_on(img, [255, 255, 255, 255]);
+        let flat = windowbg::flatten(img, [255, 255, 255]);
         let flat = image::RgbaImage::from_raw(flat.w, flat.h, flat.px.to_vec()).ok_or("bad image")?;
         let rgb = image::DynamicImage::ImageRgba8(flat).to_rgb8();
         let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
@@ -559,5 +628,68 @@ mod tests {
         );
         assert_eq!(p.get(2, 2)[3], 0, "a PNG keeps the transparent corner");
         assert_eq!(p.get(360, 340), win.get(360, 340), "and the opaque body");
+    }
+}
+
+#[cfg(test)]
+mod window_bg_tests {
+    use super::*;
+    use crate::headless::window_capture;
+    use crate::targets::Rect;
+
+    fn options(bg: WindowBg, snapshot: Snapshot) -> CaptureOptions {
+        CaptureOptions { last_area: None, window_bg: bg, solid_color: [10, 20, 30], scale: 2.0, snapshot }
+    }
+
+    #[test]
+    fn only_trim_shadow_asks_for_a_capture_without_shadow() {
+        assert!(pick_window_args(&options(WindowBg::Trimmed, Snapshot::default())).contains(&"-o".to_string()));
+        for bg in [WindowBg::Transparent, WindowBg::Solid, WindowBg::Wallpaper] {
+            assert!(!pick_window_args(&options(bg, Snapshot::default())).contains(&"-o".to_string()), "{bg:?}");
+        }
+    }
+
+    #[test]
+    fn transparent_and_trim_keep_the_alpha_and_solid_makes_it_opaque() {
+        let win = window_capture(300, 200, 2);
+        let snap = Snapshot::default();
+        assert!(apply_window_bg(win.clone(), 2.0, None, &options(WindowBg::Transparent, snap.clone())).has_alpha());
+        assert!(apply_window_bg(win.clone(), 2.0, None, &options(WindowBg::Trimmed, snap.clone())).has_alpha());
+        let solid = apply_window_bg(win.clone(), 2.0, None, &options(WindowBg::Solid, snap));
+        assert!(!solid.has_alpha());
+        assert_eq!(&solid.get(0, 0)[..3], &[10, 20, 30]);
+    }
+
+    #[test]
+    fn an_unreadable_wallpaper_falls_back_to_the_solid_colour() {
+        let win = window_capture(300, 200, 2);
+        let expect = windowbg::on_color(&win, [10, 20, 30]);
+        // No wallpaper known at all, then a path that is not a picture.
+        let none = Snapshot { displays: vec![Rect::new(0.0, 0.0, 1000.0, 600.0)], scales: vec![2.0], ..Snapshot::default() };
+        let out = apply_window_bg(win.clone(), 2.0, None, &options(WindowBg::Wallpaper, none.clone()));
+        assert_eq!(out.px, expect.px);
+        let bad = Snapshot { wallpapers: vec![Some(PathBuf::from("/nonexistent/wall.heic"))], ..none };
+        let out = apply_window_bg(win, 2.0, None, &options(WindowBg::Wallpaper, bad));
+        assert_eq!(out.px, expect.px);
+    }
+
+    #[test]
+    fn a_readable_wallpaper_ends_up_behind_the_window() {
+        let win = window_capture(300, 200, 2);
+        let dir = std::env::temp_dir().join("shotcraft-wallpaper-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("wall.png");
+        image::RgbaImage::from_pixel(64, 36, image::Rgba([200, 30, 30, 255])).save(&path).unwrap();
+        let snap = Snapshot {
+            displays: vec![Rect::new(0.0, 0.0, 1000.0, 600.0)],
+            scales: vec![2.0],
+            wallpapers: vec![Some(path.clone())],
+            ..Snapshot::default()
+        };
+        let out = apply_window_bg(win.clone(), 2.0, None, &options(WindowBg::Wallpaper, snap));
+        let _ = std::fs::remove_file(&path);
+        assert!(!out.has_alpha());
+        assert_eq!(&out.get(0, 0)[..3], &[200, 30, 30], "the wallpaper shows in the margin");
+        assert_eq!((out.w, out.h), (windowbg::layout(&win).w, windowbg::layout(&win).h));
     }
 }

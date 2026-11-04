@@ -91,6 +91,8 @@ pub struct Snapshot {
     pub mouse: Option<(f64, f64)>,
     /// On-screen windows front to back. Read together with `frontmost_pid` so the two agree.
     pub windows: Vec<WindowInfo>,
+    /// The desktop picture file of each display, in the same order as `displays`. Only read for window captures.
+    pub wallpapers: Vec<Option<std::path::PathBuf>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -267,7 +269,7 @@ mod tests {
 
     fn snap(pid: Option<i32>, mouse: Option<(f64, f64)>) -> Snapshot {
         let windows = vec![win(9, 42, 0, 1.0, 800.0, 600.0)]; // at (10, 10) on the main display
-        Snapshot { own_pid: 7, frontmost_pid: pid, displays: setup(), scales: vec![2.0, 1.0, 1.0], mouse, windows }
+        Snapshot { own_pid: 7, frontmost_pid: pid, displays: setup(), scales: vec![2.0, 1.0, 1.0], mouse, windows, wallpapers: Vec::new() }
     }
 
     #[test]

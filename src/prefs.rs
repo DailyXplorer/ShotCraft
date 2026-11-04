@@ -143,7 +143,7 @@ impl PrefsState {
         egui::CentralPanel::default().frame(egui::Frame::new().fill(t.bar2).inner_margin(20)).show(ui, |ui| {
             let before = self.settings.clone();
             match self.tab {
-                0 => self.prefs_general(ui),
+                0 => self.prefs_general(ui, t.dim),
                 1 => self.prefs_hotkeys(ui, t.dim),
                 _ => self.prefs_advanced(ui, t.dim),
             }
@@ -154,7 +154,7 @@ impl PrefsState {
         });
     }
 
-    fn prefs_general(&mut self, ui: &mut Ui) {
+    fn prefs_general(&mut self, ui: &mut Ui, dim: Color32) {
         let queue = self.queue.clone();
         let s = &mut self.settings;
         row(ui, "After screenshot", |ui| {
@@ -199,8 +199,9 @@ impl PrefsState {
         });
         row(ui, "Window Screenshot Background", |ui| {
             ui.horizontal(|ui| {
-                ui.radio_value(&mut s.window_bg, WindowBg::Transparent, "Transparent");
-                ui.radio_value(&mut s.window_bg, WindowBg::Solid, "Solid Color");
+                ui.radio_value(&mut s.window_bg, WindowBg::Wallpaper, "Wallpaper").on_hover_text("The window and its shadow on your desktop picture");
+                ui.radio_value(&mut s.window_bg, WindowBg::Transparent, "Transparent").on_hover_text("The window and its shadow on a see-through background");
+                ui.radio_value(&mut s.window_bg, WindowBg::Solid, "Solid Color").on_hover_text("The window and its shadow on a colour");
                 if s.window_bg == WindowBg::Solid {
                     let c = crate::model::hex(&s.window_solid);
                     let mut col = Color32::from_rgb(c[0], c[1], c[2]);
@@ -209,7 +210,8 @@ impl PrefsState {
                     }
                 }
             });
-            ui.checkbox(&mut s.trim_shadow, "Trim shadow");
+            ui.radio_value(&mut s.window_bg, WindowBg::Trimmed, "Trim shadow").on_hover_text("The window cut out without its shadow");
+            ui.label(egui::RichText::new("Applies to Active Window and Any Window screenshots, not to Area or Fullscreen.").color(dim).size(11.0));
         });
     }
 
