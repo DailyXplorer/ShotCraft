@@ -394,7 +394,9 @@ pub fn run(page: &mut dyn Page, area_w: u32, area_h: u32, mode: Mode, stop: &Ato
                     }
                     Push::Capped => Note::HeightLimit,
                 };
-                lp.show(&stitcher, lost, mode, if stitcher.is_capped() { Note::HeightLimit } else { note });
+                // The missing-permission warning stays until the page first moves.
+                let kept = lp.progress.lock().unwrap().note == Note::NeedsAccessibility && stitcher.frames_used() <= 1 && note == Note::ScrollYourself;
+                lp.show(&stitcher, lost, mode, if stitcher.is_capped() { Note::HeightLimit } else if kept { Note::NeedsAccessibility } else { note });
                 if state == DONE || stitcher.is_capped() {
                     break;
                 }
@@ -418,6 +420,7 @@ pub fn run(page: &mut dyn Page, area_w: u32, area_h: u32, mode: Mode, stop: &Ato
                 if page.scroll(step).is_err() {
                     // Cannot scroll (no permission, no events): leave it to the user.
                     mode = Mode::Manual;
+                    last_move = page.now();
                     lp.show(&stitcher, lost, mode, Note::NeedsAccessibility);
                     continue;
                 }
@@ -453,6 +456,7 @@ pub fn run(page: &mut dyn Page, area_w: u32, area_h: u32, mode: Mode, stop: &Ato
                         if stitcher.frames_used() <= 1 {
                             // It never moved: no wheel events arrive, or there is nothing to scroll.
                             mode = Mode::Manual;
+                            last_move = page.now();
                             let sees = autoscroll::screen_recording_ok();
                             lp.show(&stitcher, lost, mode, if sees { Note::PageDidNotMove } else { Note::CheckScreenRecording });
                             continue;
@@ -470,6 +474,7 @@ pub fn run(page: &mut dyn Page, area_w: u32, area_h: u32, mode: Mode, stop: &Ato
                         lost_in_row += 1;
                         if lost_in_row >= MAX_LOST_IN_ROW || matches!(result, Push::SizeMismatch) {
                             mode = Mode::Manual;
+                            last_move = page.now();
                             lp.show(&stitcher, lost, mode, if matches!(result, Push::SizeMismatch) { Note::SizeChanged } else { Note::LostTrack });
                             continue;
                         }
