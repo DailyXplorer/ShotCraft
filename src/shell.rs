@@ -10,6 +10,7 @@ use crate::system::CaptureMode;
 use crate::updater::Updater;
 use global_hotkey::{hotkey::HotKey, GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use tray_icon::menu::accelerator::{Accelerator, Code, Modifiers};
 use tray_icon::menu::{CheckMenuItem, ContextMenu, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
@@ -25,6 +26,9 @@ pub struct Shell {
     registered: Vec<HotKey>,
     show_hotkey_works: bool,
     hotkey_map: Arc<Mutex<HashMap<u32, HotkeyAction>>>,
+    /// Esc, registered only while a scrolling capture runs so that it can be cancelled from any app.
+    escape: Option<HotKey>,
+    escape_id: Arc<AtomicU32>,
 }
 
 fn action_for(id: &str) -> Option<Action> {
@@ -33,6 +37,7 @@ fn action_for(id: &str) -> Option<Action> {
         "area" => Action::Capture(CaptureMode::Area),
         "repeat" => Action::Capture(CaptureMode::RepeatArea),
         "window" => Action::Capture(CaptureMode::Window),
+        "scrolling" => Action::ScrollingCapture,
         "activewindow" => Action::Capture(CaptureMode::ActiveWindow),
         "alldisplays" => Action::Capture(CaptureMode::AllDisplays),
         "delayed" => Action::Capture(CaptureMode::Delayed),
@@ -90,6 +95,7 @@ const MENU_SYMBOLS: &[(&str, &str)] = &[
     ("Repeat Area Capture", "arrow.clockwise"),
     ("Capture Any Window", "macwindow"),
     ("Capture Active Window", "macwindow.on.rectangle"),
+    ("Scrolling Capture", "arrow.up.and.down.square"),
     ("Delayed Screenshot", "timer"),
     ("Recognize Text", "text.viewfinder"),
     ("Load From Clipboard", "doc.on.clipboard"),
@@ -304,6 +310,7 @@ impl Shell {
             &MenuItem::with_id("repeat", "Repeat Area Capture", true, None),
             &MenuItem::with_id("window", "Capture Any Window", true, None),
             &MenuItem::with_id("activewindow", "Capture Active Window", true, None),
+            &MenuItem::with_id("scrolling", "Scrolling Capture", true, None),
             &MenuItem::with_id("delayed", "Delayed Screenshot (3s)", true, None),
             &MenuItem::with_id("ocr", "Recognize Text/QR", true, None),
             &MenuItem::with_id("clipboard", "Load From Clipboard", true, None),
@@ -347,8 +354,15 @@ impl Shell {
 
         let hotkey_map: Arc<Mutex<HashMap<u32, HotkeyAction>>> = Arc::default();
         let map = hotkey_map.clone();
+        let escape_id: Arc<AtomicU32> = Arc::default();
+        let esc = escape_id.clone();
         GlobalHotKeyEvent::set_event_handler(Some(move |e: GlobalHotKeyEvent| {
             if e.state != HotKeyState::Pressed {
+                return;
+            }
+            if e.id == esc.load(Ordering::SeqCst) {
+                queue.lock().unwrap().push(Action::ScrollingCancel);
+                ctx.request_repaint();
                 return;
             }
             let Some(a) = map.lock().unwrap().get(&e.id).copied() else { return };
@@ -361,12 +375,13 @@ impl Shell {
                 HotkeyAction::RepeatArea => Action::Capture(CaptureMode::RepeatArea),
                 HotkeyAction::Ocr => Action::InstantOcr,
                 HotkeyAction::Show => Action::Show,
+                HotkeyAction::Scrolling => Action::ScrollingCapture,
             };
             queue.lock().unwrap().push(action);
             ctx.request_repaint();
         }));
 
-        let mut shell = Shell { tray, _menubar: menubar, autostart_item, auto_updates_item, updater, hotkeys: GlobalHotKeyManager::new().ok(), registered: vec![], show_hotkey_works: false, hotkey_map };
+        let mut shell = Shell { tray, _menubar: menubar, autostart_item, auto_updates_item, updater, hotkeys: GlobalHotKeyManager::new().ok(), registered: vec![], show_hotkey_works: false, hotkey_map, escape: None, escape_id };
         shell.apply_hotkeys(settings);
         shell
     }
@@ -392,6 +407,22 @@ impl Shell {
         self.show_hotkey_works = settings.hotkey(HotkeyAction::Show).is_some() && !failed.contains(&HotkeyAction::Show);
         self.sync(settings);
         failed
+    }
+
+    /// Takes Esc for the length of a scrolling capture, or gives it back.
+    pub fn grab_escape(&mut self, on: bool) {
+        let Some(mgr) = &self.hotkeys else { return };
+        if let Some(hk) = self.escape.take() {
+            self.escape_id.store(0, Ordering::SeqCst);
+            let _ = mgr.unregister(hk);
+        }
+        if on {
+            let Ok(hk) = "Escape".parse::<HotKey>() else { return };
+            if mgr.register(hk).is_ok() {
+                self.escape_id.store(hk.id(), Ordering::SeqCst);
+                self.escape = Some(hk);
+            }
+        }
     }
 
     pub fn check_for_updates(&self) {
