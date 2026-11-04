@@ -1253,7 +1253,7 @@ impl App {
         }
     }
 
-    /// Checkerboard layer (0x10007b654): a repeating tile of two greys behind the picture.
+    /// Checkerboard layer: a repeating tile of two greys behind the picture.
     fn paint_checker(&mut self, ui: &mut Ui, rect: Rect) {
         let dark = ui.visuals().dark_mode;
         if self.ed.checker.as_ref().map_or(true, |c| c.0 != dark) {
@@ -1411,7 +1411,7 @@ impl App {
         }
     }
 
-    /// Ruler keys (0x10009e964): 2 and ←→ measure across, 1 and ↑↓ measure down.
+    /// Ruler keys: 2 and ←→ measure across, 1 and ↑↓ measure down.
     /// `Some(true)` is horizontal. Arrows keep moving a selected object.
     fn ruler_axis(&self, ui: &Ui) -> Option<bool> {
         if self.ed.editing_text {
@@ -1444,7 +1444,7 @@ impl App {
         d.touch();
     }
 
-    /// Blur Text and Erase Text only touch the text found inside their area (0x100107cfc).
+    /// Blur Text and Erase Text only touch the text found inside their area.
     fn detect_blur_text(&mut self) {
         let (Some(d), Some(i)) = (&mut self.doc, self.ed.selected) else { return };
         let Some(Obj { kind: Kind::Blur { r, text }, style }) = d.objs.get_mut(i) else { return };

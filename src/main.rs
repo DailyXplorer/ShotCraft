@@ -720,7 +720,7 @@ fn pin_window(ui: &mut egui::Ui, pin: &mut Pin, queue: &Queue) {
 
 fn thumb_window(ui: &mut egui::Ui, th: &mut Thumb, queue: &Queue) {
     let ctx = ui.ctx().clone();
-    // Automatic closing follows the window losing focus (0x100014c80).
+    // Automatic closing follows the window losing focus.
     let focused = ctx.input(|i| i.viewport().focused.unwrap_or(false));
     th.blurred |= th.focused && !focused;
     th.focused = focused;

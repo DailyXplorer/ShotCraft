@@ -31,7 +31,7 @@ impl Fonts {
             goofy,
         }
     }
-    /// Annotation text: regular on light colours, medium on dark ones (0x100068230).
+    /// Annotation text: regular on light colours, medium on dark ones.
     pub fn text(&self, st: &Style) -> &FontVec {
         match st.font {
             FontKind::Sans if luminance(st.color) > TEXT_LIGHT_ABOVE => &self.regular,
@@ -124,7 +124,7 @@ fn oval_path(r: &R) -> Option<Path> {
     PathBuilder::from_oval(rect(r)?)
 }
 
-/// Unit-square coordinate of the plain oval, pulled towards the edge on the long axis (0x10008a8c4).
+/// Unit-square coordinate of the plain oval, pulled towards the edge on the long axis.
 fn oval_axis(f: f32, along: f32, across: f32) -> f32 {
     if along <= across {
         return f;
@@ -156,7 +156,7 @@ fn stroke(width: f32, dashed: bool) -> Stroke {
     s
 }
 
-/// Noise behind the hand-drawn shapes: 100 values in 0...1 from an xorshift stream (0x1001b3d58).
+/// Noise behind the hand-drawn shapes: 100 values in 0...1 from an xorshift stream.
 fn noise(seed: u64) -> [f32; 100] {
     let mut x = seed | 1;
     std::array::from_fn(|_| {
@@ -175,7 +175,7 @@ struct Curve {
     b: P,
 }
 
-/// Rounded outline as eight curves, sides then corners, clockwise from the top left (0x100089fec).
+/// Rounded outline as eight curves, sides then corners, clockwise from the top left.
 /// With `wobble` at zero it is a plain rounded rectangle.
 fn outline_curves(r: &R, wobble: f32, radius: f32, scale: f32, n: &[f32; 100]) -> [Curve; 8] {
     let (w, h) = (r.w().max(1.0), r.h().max(1.0));
@@ -226,7 +226,7 @@ fn curves_path(curves: &[Curve]) -> Option<Path> {
     pb.finish()
 }
 
-/// Points along the curves, about `spacing` apart (0x1000ffb9c).
+/// Points along the curves, about `spacing` apart.
 fn flatten(curves: &[Curve], spacing: f32) -> Vec<P> {
     let mut out = vec![];
     for c in curves {
@@ -248,7 +248,7 @@ fn flatten(curves: &[Curve], spacing: f32) -> Vec<P> {
     out
 }
 
-/// Hand-drawn rectangle (0x10008b3f8): the whole outline slips by up to half a point, except
+/// Hand-drawn rectangle: the whole outline slips by up to half a point, except
 /// where it starts and ends, which leaves the small kink of a pen closing its loop.
 fn hand_rect(r: &R, base: f32, scale: f32, n: &[f32; 100]) -> Vec<P> {
     let d = base * HAND_CORNER_LINE_RATIO;
@@ -269,7 +269,7 @@ fn hand_rect(r: &R, base: f32, scale: f32, n: &[f32; 100]) -> Vec<P> {
     flatten(&curves, BRUSH_SPACING * scale)
 }
 
-/// Hand-drawn oval (0x100089c20): one turn from a random angle that overshoots or stops short
+/// Hand-drawn oval: one turn from a random angle that overshoots or stops short
 /// while the radius drifts, so the two ends of the stroke do not meet.
 fn hand_oval(r: &R, line: f32, scale: f32, n: &[f32; 100]) -> Vec<P> {
     let (w, h) = (r.w().max(1.0), r.h().max(1.0));
@@ -295,7 +295,7 @@ fn hand_oval(r: &R, line: f32, scale: f32, n: &[f32; 100]) -> Vec<P> {
     out
 }
 
-/// Stroke width at every point (0x10008b8a0, 0x100100498, 0x100100a04, 0x100100e3c): noise and a
+/// Stroke width at every point: noise and a
 /// slow wave, plus a swell in the bends when `bends` is set, smoothed around the loop, then
 /// spread between line × (1 - taper) and line × (1 + taper).
 fn brush_widths(pts: &[P], line: f32, taper: f32, bends: bool, n: &[f32; 100]) -> Vec<f32> {
@@ -459,7 +459,7 @@ pub fn draw_obj(pm: &mut Pixmap, obj: &Obj, fonts: &Fonts, scale_factor: f32) {
     }
 }
 
-/// Line of the thin arrows: capped to a tenth of the length, then growing with it (0x1001af27c).
+/// Line of the thin arrows: capped to a tenth of the length, then growing with it.
 /// `len` is in image pixels here and below; the rules themselves are in points.
 fn arrow_line(len: f32, st: &Style) -> f32 {
     let len = len / st.scale;
@@ -468,14 +468,14 @@ fn arrow_line(len: f32, st: &Style) -> f32 {
     line * grow.clamp(1.0, ARROW_GROW_MAX)
 }
 
-/// Branch length and half angle of the thin arrow head (0x10007ebbc).
+/// Branch length and half angle of the thin arrow head.
 fn arrow_branch(len: f32, line: f32, scale: f32) -> (f32, f32) {
     let (len, line) = (len / scale, line / scale);
     let branch = ARROW_BRANCH_SCALE + line.sqrt() * ARROW_BRANCH_ROOT + line * ARROW_BRANCH_LINE;
     (branch.min(len * ARROW_BRANCH_MAX) * scale, if len < ARROW_SHORT { ARROW_SPREAD_SHORT } else { ARROW_SPREAD })
 }
 
-/// Solid arrow stretch as (head, tail) factors, from a length in points (0x1001af27c).
+/// Solid arrow stretch as (head, tail) factors, from a length in points.
 fn arrow_stretch(len: f32, unit: f32) -> (f32, f32) {
     let mut tail = 1.0;
     let mut head = 1.0;
@@ -492,7 +492,7 @@ fn arrow_stretch(len: f32, unit: f32) -> (f32, f32) {
     (head, tail)
 }
 
-/// Shaft of the hand-drawn arrow, nearly straight with a slight lean at each end (0x1001b0adc).
+/// Shaft of the hand-drawn arrow, nearly straight with a slight lean at each end.
 fn hand_arrow_shaft(a: P, b: P, line: f32, n: &[f32; 100]) -> Curve {
     let len = a.dist(b);
     let (ux, uy) = ((b.x - a.x) / len, (b.y - a.y) / len);
@@ -820,7 +820,7 @@ fn border_average(pm: &Pixmap, r: &R) -> [u8; 4] {
     [(acc[0] / n) as u8, (acc[1] / n) as u8, (acc[2] / n) as u8, (acc[3] / n) as u8]
 }
 
-/// Average-colour blocks, see the PIXEL_ constants (0x1001087b0).
+/// Average-colour blocks, see the PIXEL_ constants.
 fn pixelate(pm: &mut Pixmap, r: &R, size: u8, scale: f32) {
     let (x0, y0, x1, y1) = region(pm, r);
     if x1 <= x0 || y1 <= y0 {
@@ -876,7 +876,7 @@ fn pixelate(pm: &mut Pixmap, r: &R, size: u8, scale: f32) {
 }
 
 /// Line-by-line gradient between two opposite edges, across the direction whose other two
-/// edges are the most uniform (0x10010954c).
+/// edges are the most uniform.
 fn erase(pm: &mut Pixmap, r: &R) {
     let (x0, y0, x1, y1) = region(pm, r);
     if x1 - x0 < 2 || y1 - y0 < 2 {
@@ -1230,7 +1230,7 @@ fn sample_stops(stops: &[(f32, Rgba)], t: f32) -> [f32; 3] {
     [c[0] as f32, c[1] as f32, c[2] as f32]
 }
 
-/// Seeded single-octave Perlin noise, the source of the mesh gradient (0x100035f0c).
+/// Seeded single-octave Perlin noise, the source of the mesh gradient.
 struct Perlin {
     perm: [u8; 512],
 }
@@ -1281,7 +1281,7 @@ impl Perlin {
 
 /// Mesh gradient: noise normalised to its own min…max picks a colour from a 256-step table,
 /// then the map is Gaussian-blurred (radius MESH_BLUR × size) and trimmed by twice the radius
-/// a Gaussian blur then a crop (0x100035f0c, 0x100035c6c).
+/// a Gaussian blur then a crop.
 fn mesh_pixmap(w: u32, h: u32, stops: &[(f32, Rgba)], seed: u64) -> Pixmap {
     let n = MESH_MAP_SIZE;
     let radius = (n as f32 * MESH_BLUR).round() as i32;
@@ -1417,7 +1417,7 @@ pub fn rasterize(doc: &mut Doc, fonts: &Fonts) {
     doc.objs.clear();
 }
 
-/// Interpolation follows the reference resize (0x100071c18): high quality by
+/// Interpolation: high quality by
 /// default, medium at 50 % or below, none for whole-number enlargements so pixels stay sharp.
 pub fn resize(img: &Image, factor: f32) -> Image {
     use image::imageops::FilterType;
@@ -1567,7 +1567,7 @@ mod tests {
     }
 
     #[test]
-    fn zoom_steps_match_the_original() {
+    fn zoom_keys_and_wheel_step_to_round_levels() {
         assert_eq!(zoom_key_target(1.0, true), 2.0);
         assert_eq!(zoom_key_target(1.0, false), 0.5);
         assert_eq!(zoom_key_target(8.0, true), 12.0);
@@ -1630,7 +1630,7 @@ mod tests {
         doc.objs = vec![Obj { kind: Kind::Text { at: p(40.0, 280.0), text: "Hello ShotCraft".into() }, style: st }];
         let boxes = crate::system::text_boxes(&export(&doc, &fonts));
         assert!(!boxes.is_empty(), "the Vision framework sees the text");
-        assert!(boxes[0].y0 > 220.0 && boxes[0].y1 < 400.0, "box is near the text and measured from the top: {:?}", boxes[0]);
+        assert!(boxes[0].y0 > 220.0 && boxes[0].y1 < 400.0, "box is near the text and counted from the top: {:?}", boxes[0]);
     }
 
     #[test]
