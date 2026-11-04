@@ -24,7 +24,7 @@ global-hotkey = "0.8"
 tray-icon = "0.25"
 objc2 = "0.6"
 winit = "0.30"
-objc2-app-kit = { version = "0.3", features = ["NSMenu", "NSMenuItem", "NSImage", "NSWorkspace", "NSRunningApplication", "NSScreen", "NSEvent"] }
+objc2-app-kit = { version = "0.3", features = ["NSMenu", "NSMenuItem", "NSImage", "NSWorkspace", "NSRunningApplication", "NSScreen", "NSEvent", "NSImageView", "NSPrintInfo", "NSPrintOperation", "NSView", "NSControl", "NSResponder"] }
 objc2-foundation = { version = "0.3", features = ["NSArray", "NSBundle", "NSData", "NSDictionary", "NSString", "NSError", "NSValue", "NSGeometry", "NSLocale"] }
 objc2-core-foundation = "0.3"
 objc2-core-graphics = "0.3"
