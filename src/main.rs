@@ -9,6 +9,7 @@ mod prefs;
 mod render;
 mod autoscroll;
 mod scroll;
+mod selection;
 mod scroll_control;
 mod settings;
 mod sizing;
@@ -55,6 +56,9 @@ pub enum Action {
     ZoomOut,
     ZoomFit,
     Zoom100,
+    ZoomSelection,
+    SelectionTopLeft,
+    SelectionBottomRight,
     About,
     Shortcuts,
     Tool(Tool),
