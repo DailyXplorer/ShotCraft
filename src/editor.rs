@@ -2,6 +2,7 @@ use crate::icons::{self, Icon};
 use crate::model::*;
 use crate::render;
 use crate::selection::{self, snap45, square, Corner};
+use crate::snap;
 use crate::tiled::{Alpha, TiledTexture};
 use crate::{Action, App};
 use eframe::egui::{
@@ -140,6 +141,10 @@ pub struct Editor {
     checker: Option<(bool, egui::TextureHandle)>,
     /// Whether the picture has see-through pixels, for the document version in the first field.
     alpha: Option<(u64, bool)>,
+    /// How far snapping has moved the dragged annotation off the pointer, to undo before the next step.
+    snap_carry: (f32, f32),
+    /// The alignment guides of the last snap, drawn while the drag lasts.
+    snap_guides: Vec<snap::Guide>,
 }
 
 impl Default for Editor {
@@ -163,6 +168,8 @@ impl Default for Editor {
             editing_text: false,
             drag: Drag::None,
             selection: None,
+            snap_carry: (0.0, 0.0),
+            snap_guides: vec![],
             hover: None,
             hover_color: [255, 255, 255, 255],
             comp: None,
@@ -1620,6 +1627,8 @@ impl App {
                 self.ed.drag = Drag::Zoom { start: q };
             } else {
                 self.finish_text();
+                self.ed.snap_carry = (0.0, 0.0);
+                self.ed.snap_guides.clear();
                 self.begin_drag(q, tol);
             }
         }
@@ -1633,19 +1642,23 @@ impl App {
                         self.ed.drag = Drag::Pan { last: cs };
                     }
                     Drag::Create { start } => {
-                        if let (Some(d), Some(i)) = (&mut self.doc, self.ed.selected) {
-                            set_end(&mut d.objs[i].kind, start, q, shift);
-                            d.touch();
+                        if let Some(i) = self.ed.selected {
+                            let free = self.doc.as_ref().map_or(true, |d| matches!(d.objs[i].kind, Kind::Freehand { .. } | Kind::Counter { .. } | Kind::Text { .. }));
+                            let rect = self.doc.as_ref().map_or(false, |d| handles(&d.objs[i]).len() == 4);
+                            let q = if shift || free { q } else { self.snap_pointer(q, i, rect.then_some(start)) };
+                            if let Some(d) = &mut self.doc {
+                                set_end(&mut d.objs[i].kind, start, q, shift);
+                                d.touch();
+                            }
                         }
                     }
                     Drag::Move { idx, last } => {
-                        if let Some(d) = &mut self.doc {
-                            d.objs[idx].translate(q.x - last.x, q.y - last.y);
-                            d.touch();
-                        }
+                        self.snap_move_object(idx, q, last);
                         self.ed.drag = Drag::Move { idx, last: q };
                     }
                     Drag::Handle { idx, h, anchor } => {
+                        let rect = matches!(h, Handle::Corner(_));
+                        let q = if shift { q } else { self.snap_pointer(q, idx, rect.then_some(anchor)) };
                         if let Some(d) = &mut self.doc {
                             match (&mut d.objs[idx].kind, h) {
                                 (Kind::Arrow { a, .. } | Kind::Line { a, .. } | Kind::Ruler { a, .. } | Kind::Highlighter { a, .. }, Handle::A) => *a = q,
@@ -1676,6 +1689,8 @@ impl App {
             }
         }
         if resp.drag_stopped() {
+            self.ed.snap_guides.clear();
+            self.ed.snap_carry = (0.0, 0.0);
             if matches!(self.ed.drag, Drag::Create { .. } | Drag::Handle { .. }) {
                 self.detect_blur_text();
                 self.keep_lens_inside();
@@ -1868,6 +1883,52 @@ impl App {
         }
     }
 
+    /// Drags the annotation at `idx` as the pointer would, for the headless pictures of the guides.
+    #[cfg(test)]
+    pub(crate) fn preview_snap_drag(&mut self, idx: usize, from: P, to: P) {
+        self.snap_move_object(idx, to, from);
+    }
+
+    fn snap_opts(&self) -> snap::Opts {
+        snap::Opts { objects: self.settings.snap_objects, similar: self.settings.snap_similar }
+    }
+
+    /// The other annotations as snap targets for the one at `idx`.
+    fn snap_targets(&self, idx: usize) -> Vec<snap::Other> {
+        match &self.doc {
+            Some(d) if idx < d.objs.len() => snap::others_of(&d.objs, Some(idx), &d.objs[idx], &self.fonts),
+            _ => vec![],
+        }
+    }
+
+    /// Moves the annotation by the pointer's step and lets its edges and centres fall onto the others.
+    fn snap_move_object(&mut self, idx: usize, q: P, last: P) {
+        let opts = self.snap_opts();
+        let tol = snap::SNAP_POINTS / self.ed.zoom;
+        let others = if opts.any() { self.snap_targets(idx) } else { vec![] };
+        let (cx, cy) = self.ed.snap_carry;
+        let Some(d) = &mut self.doc else { return };
+        d.objs[idx].translate(q.x - last.x - cx, q.y - last.y - cy);
+        let s = snap::snap_move(snap::object_rect(&d.objs[idx], &self.fonts), &others, opts, tol);
+        d.objs[idx].translate(s.dx, s.dy);
+        d.touch();
+        self.ed.snap_carry = (s.dx, s.dy);
+        self.ed.snap_guides = s.guides;
+    }
+
+    /// A dragged corner or end point `q` of the annotation at `idx`, pulled onto the others' lines.
+    fn snap_pointer(&mut self, q: P, idx: usize, anchor: Option<P>) -> P {
+        let opts = self.snap_opts();
+        self.ed.snap_guides.clear();
+        if !opts.any() {
+            return q;
+        }
+        let others = self.snap_targets(idx);
+        let s = snap::snap_point(q, anchor, &others, opts, snap::SNAP_POINTS / self.ed.zoom);
+        self.ed.snap_guides = s.guides;
+        p(q.x + s.dx, q.y + s.dy)
+    }
+
     fn handle_at(&self, i: usize, q: P, tol: f32) -> Option<Handle> {
         let o = self.doc.as_ref()?.objs.get(i)?;
         handles(o).into_iter().find(|(_, hp)| hp.dist(q) <= tol * 1.4).map(|(h, _)| h)
@@ -1989,6 +2050,22 @@ impl App {
                         }
                     }
                     ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
+                }
+            }
+        }
+        for g in &self.ed.snap_guides {
+            let (a, b) = (self.ed.to_screen(g.a), self.ed.to_screen(g.b));
+            let guide = Color32::from_rgb(0xFF, 0x2D, 0x78);
+            match g.kind {
+                snap::GuideKind::Edge | snap::GuideKind::Centre => {
+                    painter.line_segment([a, b], Stroke::new(1.5, guide));
+                }
+                snap::GuideKind::Gap | snap::GuideKind::Size => {
+                    painter.line_segment([a, b], Stroke::new(1.5, guide));
+                    let cap = if (b.x - a.x).abs() >= (b.y - a.y).abs() { vec2(0.0, 4.0) } else { vec2(4.0, 0.0) };
+                    for e in [a, b] {
+                        painter.line_segment([e - cap, e + cap], Stroke::new(1.5, guide));
+                    }
                 }
             }
         }
@@ -2404,6 +2481,116 @@ mod key_tests {
     }
     fn r(x0: f32, y0: f32, x1: f32, y1: f32) -> R {
         R { x0, y0, x1, y1 }
+    }
+
+    fn two_boxes(t: &mut Rig) {
+        let d = t.app.doc.as_mut().unwrap();
+        d.objs.push(Obj { kind: Kind::Rect { r: r(10.0, 10.0, 60.0, 50.0), seed: 1 }, style: Style::default() });
+        d.objs.push(Obj { kind: Kind::Rect { r: r(200.0, 100.0, 250.0, 140.0), seed: 2 }, style: Style::default() });
+        t.app.ed.tool = Tool::Select;
+        // Selected up front: the options bar changes with the selection, which would move the canvas mid-drag.
+        t.app.ed.selected = Some(0);
+        t.app.ed.zoom = 1.0;
+        t.app.ed.fit = false;
+        t.frame(vec![], NONE);
+    }
+
+    fn rect_of(t: &Rig, i: usize) -> R {
+        match t.app.doc.as_ref().unwrap().objs[i].kind {
+            Kind::Rect { r, .. } => r,
+            _ => panic!("not a rectangle"),
+        }
+    }
+
+    #[test]
+    fn dragging_an_annotation_snaps_its_edges_to_another_and_shows_guides() {
+        let mut t = Rig::new();
+        two_boxes(&mut t);
+        t.app.settings.snap_objects = true;
+        // Grab the top edge and move by (192, 87): left would be 202, top 97.
+        let (a, b) = (t.at(35.0, 10.0), t.at(35.0 + 192.0, 10.0 + 87.0));
+        t.drag(a, b, NONE);
+        let m = rect_of(&t, 0);
+        assert_eq!((m.x0, m.y0), (200.0, 100.0), "{m:?}");
+        assert_eq!((m.w(), m.h()), (50.0, 40.0), "the size is untouched");
+        assert!(t.app.ed.snap_guides.is_empty(), "the guides go with the drag");
+    }
+
+    #[test]
+    fn guides_are_there_while_the_drag_lasts() {
+        let mut t = Rig::new();
+        two_boxes(&mut t);
+        t.app.settings.snap_objects = true;
+        let from = t.at(35.0, 10.0);
+        let to = t.at(35.0 + 192.0, 10.0 + 87.0);
+        let button = |pos, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: NONE };
+        t.frame(vec![Event::PointerMoved(from)], NONE);
+        t.frame(vec![button(from, true)], NONE);
+        t.frame(vec![Event::PointerMoved(from + (to - from) * 0.5)], NONE);
+        t.frame(vec![Event::PointerMoved(to)], NONE);
+        assert!(!t.app.ed.snap_guides.is_empty(), "snapped guides while dragging");
+        t.frame(vec![button(to, false)], NONE);
+        t.frame(vec![], NONE);
+        assert!(t.app.ed.snap_guides.is_empty());
+    }
+
+    #[test]
+    fn snapping_can_be_switched_off() {
+        let mut t = Rig::new();
+        two_boxes(&mut t);
+        t.app.settings.snap_objects = false;
+        t.app.settings.snap_similar = false;
+        let (a, b) = (t.at(35.0, 10.0), t.at(35.0 + 192.0, 10.0 + 87.0));
+        t.drag(a, b, NONE);
+        let m = rect_of(&t, 0);
+        assert!((m.x0 - 202.0).abs() < 0.01 && (m.y0 - 97.0).abs() < 0.01, "{m:?}");
+        assert!(t.app.ed.snap_guides.is_empty());
+    }
+
+    #[test]
+    fn the_pointer_leaves_a_snap_without_drifting() {
+        let mut t = Rig::new();
+        two_boxes(&mut t);
+        t.app.settings.snap_objects = true;
+        let (q0, q1, q2) = (p(35.0, 10.0), p(35.0 + 192.0, 10.0 + 87.0), p(35.0 + 222.0, 10.0 + 87.0));
+        t.app.snap_move_object(0, q1, q0);
+        let m = rect_of(&t, 0);
+        assert_eq!((m.x0, m.y0), (200.0, 100.0));
+        t.app.snap_move_object(0, q2, q1);
+        let m = rect_of(&t, 0);
+        assert_eq!((m.x0, m.y0), (232.0, 100.0), "x follows the pointer, y is still held by the other box: {m:?}");
+        assert_eq!(t.app.ed.snap_carry.0, 0.0, "no leftover pull on x");
+    }
+
+    #[test]
+    fn drawing_a_rectangle_snaps_its_corner_to_the_other_ones() {
+        let mut t = Rig::new();
+        two_boxes(&mut t);
+        t.app.settings.snap_objects = true;
+        t.app.ed.tool = Tool::Rectangle;
+        let (a, b) = (t.at(300.0, 200.0), t.at(253.0, 143.0));
+        t.drag(a, b, NONE);
+        let n = t.app.doc.as_ref().unwrap().objs.len();
+        assert_eq!(n, 3);
+        let m = rect_of(&t, 2);
+        assert_eq!((m.x0, m.y0, m.x1, m.y1), (250.0, 140.0, 300.0, 200.0), "{m:?}");
+    }
+
+    #[test]
+    fn dragging_a_handle_snaps_and_shift_does_not() {
+        let mut t = Rig::new();
+        two_boxes(&mut t);
+        t.app.settings.snap_objects = true;
+        t.app.ed.selected = Some(0);
+        let (a, b) = (t.at(60.0, 50.0), t.at(198.0, 98.0));
+        t.drag(a, b, NONE);
+        let m = rect_of(&t, 0);
+        assert_eq!((m.x1, m.y1), (200.0, 100.0), "{m:?}");
+        let (a, b) = (t.at(200.0, 100.0), t.at(194.0, 94.0));
+        t.app.ed.selected = Some(0);
+        t.drag(a, b, shift());
+        let m = rect_of(&t, 0);
+        assert!(m.x1 < 196.0 && (m.w() - m.h()).abs() < 0.01, "shift leaves the corner under the pointer: {m:?}");
     }
 
     #[test]
