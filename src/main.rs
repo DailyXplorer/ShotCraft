@@ -221,6 +221,7 @@ impl App {
             woke_at: Instant::now(),
             front_until: None,
             front_title: "",
+            front_focus: true,
             scroll: None,
             ocr_running: false,
             busy: false,

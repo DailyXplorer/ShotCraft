@@ -664,74 +664,84 @@ mod tests {
         img
     }
 
+    fn label(p: &Push) -> String {
+        match p {
+            Push::First => "first".into(),
+            Push::Appended { offset, .. } => format!("+{offset}"),
+            other => format!("{other:?}"),
+        }
+    }
+
+    /// Frames of a list of look-alike rows, scrolled by every step from a few rows to nearly a whole
+    /// frame. Every step must be found exactly: a shift by a whole number of rows would line the
+    /// icons up as well, which is what makes this the hard case.
     #[test]
-    #[ignore]
-    fn explore_inner_scroll() {
-        // Web-mail-like: a fixed top bar, a fixed side column and a fixed right margin; only the list moves.
+    fn look_alike_rows_are_followed_for_every_scroll_step() {
+        let page = inbox_page(W, 200, 40, 5, 0);
+        for step in [4u32, 10, 20, 39, 40, 41, 60, 80, 100, 120, 150, 200, 240] {
+            for hint in [None, Some(step as i32)] {
+                let mut s = Stitcher::new();
+                let mut got = vec![];
+                for k in 0..8u32 {
+                    let f = crop(&page, k * step, 492);
+                    got.push(if k == 0 { s.push(&f) } else { s.push_hinted(&f, hint) });
+                }
+                assert!(got[1..].iter().all(|p| matches!(p, Push::Appended { offset, .. } if *offset == step as i32)), "step {step} hint {hint:?}: {:?}", got.iter().map(label).collect::<Vec<_>>());
+                assert_eq!(s.finish().unwrap(), crop(&page, 0, 7 * step + 492), "step {step} hint {hint:?}");
+            }
+        }
+    }
+
+    /// The same list where every second row is an exact copy of the one above: only the words around
+    /// differ, and rows repeat with period 2. A hint breaks the tie in favour of the real scroll.
+    #[test]
+    fn a_hint_picks_the_real_shift_among_exact_repeats() {
+        let page = inbox_page(W, 120, 40, 7, 2);
+        let step = 200;
+        let mut s = Stitcher::new();
+        s.push(&crop(&page, 0, 492));
+        for k in 1..8u32 {
+            let r = s.push_hinted(&crop(&page, k * step, 492), Some(step as i32));
+            assert!(matches!(r, Push::Appended { offset, .. } if offset == step as i32), "{k}: {r:?}");
+        }
+        assert_eq!(s.finish().unwrap(), crop(&page, 0, 7 * step + 492));
+    }
+
+    /// Web mail looks like this: a bar on top, a side column and a margin on the right that stay put
+    /// while only the list moves. Every row of the frame then differs from the one before in the
+    /// list columns and matches in the others, so no whole-row shift ever matches.
+    #[test]
+    fn a_list_that_scrolls_between_fixed_panels_is_followed() {
         let (w, fh) = (1100u32, 984u32);
         let page = inbox_page(w, 140, 80, 5, 0);
         let side = text_page(220, fh, 9);
         let top = bar(w, 120, [240, 242, 245]);
         let right = text_page(70, fh, 11);
         for step in [20u32, 60, 100, 200, 300, 500] {
-            for hint in [false, true] {
-                let mut s = Stitcher::new();
-                let mut out = String::new();
-                for k in 0..7u32 {
-                    let mut f = crop(&page, k * step, fh);
-                    paste(&mut f, &side, 0);
-                    paste(&mut f, &right, w - 70);
-                    paste(&mut f, &top, 0);
-                    let r = if hint && k > 0 { s.push_hinted(&f, Some(step as i32)) } else { s.push(&f) };
-                    out += &format!("{} ", match r { Push::First => "F".into(), Push::Appended { offset, .. } => format!("+{offset}"), Push::Lost => "LOST".into(), Push::Unchanged => "=".into(), other => format!("{other:?}") });
-                }
-                println!("inner step {step:4} hint={hint:5} frames={} h={}: {out}", s.frames_used(), s.height());
+            let mut s = Stitcher::new();
+            let mut got = vec![];
+            for k in 0..7u32 {
+                let mut f = crop(&page, k * step, fh);
+                paste(&mut f, &side, 0);
+                paste(&mut f, &right, w - 70);
+                paste(&mut f, &top, 0);
+                got.push(if k == 0 { s.push(&f) } else { s.push_hinted(&f, Some(step as i32)) });
             }
+            assert!(got[1..].iter().all(|p| matches!(p, Push::Appended { offset, .. } if *offset == step as i32)), "step {step}: {:?}", got.iter().map(label).collect::<Vec<_>>());
+            assert_eq!(s.frames_used(), 7);
         }
     }
 
+    /// Retina frames, as `screencapture` writes them: twice as many pixel rows as points.
     #[test]
-    #[ignore]
-    fn explore_real_png() {
-        let Some(path) = std::env::var_os("REPRO_PNG") else { return };
-        let page = image::open(path).unwrap().to_rgba8();
-        let fh = 984;
-        for step in [4u32, 10, 20, 40, 80, 120, 200, 400, 600, 800] {
-            for hint in [false, true] {
-                let mut s = Stitcher::new();
-                let mut y = 0;
-                let mut out = String::new();
-                for _ in 0..8 {
-                    if y + fh > page.height() { break; }
-                    let r = if hint && y > 0 { s.push_hinted(&crop(&page, y, fh), Some(step as i32)) } else { s.push(&crop(&page, y, fh)) };
-                    out += &format!("{} ", match r { Push::First => "F".into(), Push::Appended { offset, .. } => format!("+{offset}"), Push::Lost => "LOST".into(), Push::Unchanged => "=".into(), other => format!("{other:?}") });
-                    y += step;
-                }
-                println!("step {step:4} hint={hint:5} frames={} h={}: {out}", s.frames_used(), s.height());
-            }
-        }
-    }
-
-    #[test]
-    #[ignore]
-    fn explore_inbox_steps() {
-        let page = inbox_page(W, 200, 40, 5, 0);
-        for step in [4u32, 10, 20, 40, 60, 80, 100, 120, 150, 200, 240, 300, 400, 600] {
-            for hint in [false, true] {
-                let mut s = Stitcher::new();
-                let mut y = 0;
-                let mut out = String::new();
-                let mut lost = 0;
-                for _ in 0..8 {
-                    let r = if hint && y > 0 { s.push_hinted(&crop(&page, y, 492), Some(step as i32)) } else { s.push(&crop(&page, y, 492)) };
-                    if matches!(r, Push::Lost) {
-                        lost += 1;
-                    }
-                    out += &format!("{} ", match r { Push::First => "F".into(), Push::Appended { offset, .. } => format!("+{offset}"), Push::Lost => "LOST".into(), Push::Unchanged => "=".into(), other => format!("{other:?}") });
-                    y += step;
-                }
-                println!("step {step:4} hint={hint:5} frames={} h={} lost={lost}: {out}", s.frames_used(), s.height());
-            }
+    fn retina_scaled_frames_are_followed_with_a_step_in_points() {
+        let page = inbox_page(W * 2, 120, 80, 3, 0);
+        let step_px = 2 * 150;
+        let mut s = Stitcher::new();
+        s.push(&crop(&page, 0, 984));
+        for k in 1..6u32 {
+            let r = s.push_hinted(&crop(&page, k * step_px, 984), Some(step_px as i32));
+            assert!(matches!(r, Push::Appended { offset, .. } if offset == step_px as i32), "{k}: {r:?}");
         }
     }
 

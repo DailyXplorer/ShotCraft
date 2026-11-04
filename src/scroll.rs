@@ -18,6 +18,9 @@ use std::time::{Duration, Instant};
 /// Pause between two grabs in manual mode. Each grab runs `screencapture` (about 150 ms), so the real rate is
 /// about four frames per second.
 const FRAME_INTERVAL: Duration = Duration::from_millis(100);
+/// In manual mode the capture ends by itself when the page has not moved for this long (once something
+/// was stitched), so the user does not have to reach for Done.
+pub const IDLE_FINISH: Duration = Duration::from_secs(3);
 /// Consecutive failed grabs before the capture gives up (usually a missing Screen Recording permission).
 const MAX_FAILURES: u32 = 3;
 /// The control window, in points.
@@ -189,7 +192,7 @@ impl Session {
         std::thread::spawn(move || {
             // A panic must not leave the control window up for ever: report it like any other error.
             let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let mut page = ScreenPage { rect, scroller: autoscroll::Scroller::new(rect) };
+                let mut page = ScreenPage { rect, scroller: autoscroll::Scroller::new(rect), started: Instant::now() };
                 let repaint = || ctx.request_repaint_of(control_id());
                 run(&mut page, rect.w, rect.h, mode, &s, &p, &repaint)
             }))
@@ -247,12 +250,15 @@ pub trait Page {
     /// Scrolls the page down by `dy` points (up when negative).
     fn scroll(&mut self, dy: i32) -> Result<(), String>;
     fn sleep(&mut self, d: Duration);
+    /// Time since the capture started, on the same clock `sleep` advances.
+    fn now(&self) -> Duration;
 }
 
 /// The real thing: `screencapture` and wheel events.
 struct ScreenPage {
     rect: GrabRect,
     scroller: autoscroll::Scroller,
+    started: Instant,
 }
 
 impl Page for ScreenPage {
@@ -266,6 +272,10 @@ impl Page for ScreenPage {
 
     fn sleep(&mut self, d: Duration) {
         std::thread::sleep(d);
+    }
+
+    fn now(&self) -> Duration {
+        self.started.elapsed()
     }
 }
 
@@ -351,6 +361,7 @@ pub fn run(page: &mut dyn Page, area_w: u32, area_h: u32, mode: Mode, stop: &Ato
     let mut ratio = 1.0f32;
     let mut lost_in_row = 0u32;
     let mut undid = false;
+    let mut last_move = page.now();
     loop {
         let state = lp.state();
         if state == CANCEL {
@@ -383,8 +394,13 @@ pub fn run(page: &mut dyn Page, area_w: u32, area_h: u32, mode: Mode, stop: &Ato
                     }
                     Push::Capped => Note::HeightLimit,
                 };
-                lp.show(&stitcher, lost, mode, note);
+                lp.show(&stitcher, lost, mode, if stitcher.is_capped() { Note::HeightLimit } else { note });
                 if state == DONE || stitcher.is_capped() {
+                    break;
+                }
+                if matches!(note, Note::Capturing | Note::AboveStart | Note::ScrollSlower | Note::SizeChanged) || stitcher.frames_used() <= 1 {
+                    last_move = page.now();
+                } else if page.now().saturating_sub(last_move) >= IDLE_FINISH {
                     break;
                 }
                 // Sleep in short slices so that Done and Cancel react at once.
@@ -467,7 +483,7 @@ pub fn run(page: &mut dyn Page, area_w: u32, area_h: u32, mode: Mode, stop: &Ato
                     Push::First => note = Note::ScrollingForYou,
                     Push::Capped => note = Note::HeightLimit,
                 }
-                lp.show(&stitcher, lost, mode, note);
+                lp.show(&stitcher, lost, mode, if stitcher.is_capped() { Note::HeightLimit } else { note });
                 if stitcher.is_capped() {
                     break;
                 }
@@ -560,4 +576,402 @@ pub fn screens() -> Vec<R> {
 #[cfg(not(target_os = "macos"))]
 pub fn screens() -> Vec<R> {
     vec![R { x0: 0.0, y0: 0.0, x1: 1440.0, y1: 900.0 }]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::Rgba;
+    use std::sync::atomic::AtomicU32;
+
+    fn hash(a: u32, b: u32, c: u32) -> u32 {
+        let mut x = a.wrapping_mul(0x9e37_79b1) ^ b.wrapping_mul(0x85eb_ca6b) ^ c.wrapping_mul(0xc2b2_ae35);
+        x ^= x >> 15;
+        x = x.wrapping_mul(0x2c1b_3c6d);
+        x ^= x >> 12;
+        x
+    }
+
+    /// A mail-list-like page: look-alike rows (same checkbox, star and separator) with different words.
+    fn inbox(w: u32, rows: u32, row_h: u32) -> RgbaImage {
+        let mut img = RgbaImage::from_pixel(w, rows * row_h, Rgba([255, 255, 255, 255]));
+        for r in 0..rows {
+            let y0 = r * row_h;
+            for x in 0..w {
+                img.put_pixel(x, y0 + row_h - 1, Rgba([225, 228, 232, 255]));
+            }
+            for (x0, x1) in [(10, 20), (30, 40)] {
+                for y in y0 + row_h / 2 - 5..y0 + row_h / 2 + 5 {
+                    for x in x0..x1 {
+                        img.put_pixel(x, y, Rgba([150, 150, 156, 255]));
+                    }
+                }
+            }
+            let mut x = 56;
+            let mut k = 0;
+            while x + 8 < w - 10 {
+                let word = 10 + hash(1, r, k) % 36;
+                for xx in x..(x + word).min(w - 10) {
+                    for yy in y0 + row_h / 2 - 4..y0 + row_h / 2 + 4 {
+                        if hash(2, xx / 2 + r * 977, yy) % 100 < 58 {
+                            img.put_pixel(xx, yy, Rgba([40, 40, 48, 255]));
+                        }
+                    }
+                }
+                x += word + 7;
+                k += 1;
+            }
+        }
+        img
+    }
+
+    /// A page behind an area, scrolled by wheel events. Time is virtual: it moves with `sleep` and with each grab.
+    struct FakePage {
+        page: RgbaImage,
+        area_h: u32,
+        pos: i32,
+        /// Where a smooth-scrolling page is heading; it covers `ease` of the distance per look.
+        target: i32,
+        ease: f32,
+        /// The page has this many rows fixed at the top of the area (a sticky header).
+        header: Option<RgbaImage>,
+        grabs: u32,
+        clock: Duration,
+        /// Scroll events do nothing (no permission, or an app that ignores them).
+        deaf: bool,
+        /// Scripted positions for manual mode: the nth grab sees `script[n]` (the last one repeats).
+        script: Vec<i32>,
+        /// Press Done after this many grabs.
+        done_after: Option<(u32, Arc<AtomicU8>)>,
+        scrolls: Vec<i32>,
+    }
+
+    impl FakePage {
+        fn new(page: RgbaImage, area_h: u32) -> FakePage {
+            FakePage { page, area_h, pos: 0, target: 0, ease: 1.0, header: None, grabs: 0, clock: Duration::ZERO, deaf: false, script: vec![], done_after: None, scrolls: vec![] }
+        }
+
+        fn max_pos(&self) -> i32 {
+            (self.page.height() - self.area_h) as i32
+        }
+    }
+
+    impl Page for FakePage {
+        fn grab(&mut self) -> Result<RgbaImage, String> {
+            self.grabs += 1;
+            self.clock += Duration::from_millis(150);
+            if let Some((n, stop)) = &self.done_after {
+                if self.grabs >= *n {
+                    stop.store(DONE, Ordering::SeqCst);
+                }
+            }
+            if !self.script.is_empty() {
+                self.pos = self.script[(self.grabs as usize - 1).min(self.script.len() - 1)];
+            } else if self.pos != self.target {
+                let d = ((self.target - self.pos) as f32 * self.ease).round() as i32;
+                self.pos += if d == 0 { (self.target - self.pos).signum() } else { d };
+            }
+            let mut f = image::imageops::crop_imm(&self.page, 0, self.pos as u32, self.page.width(), self.area_h).to_image();
+            if let Some(h) = &self.header {
+                image::imageops::replace(&mut f, h, 0, 0);
+            }
+            Ok(f)
+        }
+
+        fn scroll(&mut self, dy: i32) -> Result<(), String> {
+            self.scrolls.push(dy);
+            if !self.deaf {
+                self.target = (self.target + dy).clamp(0, self.max_pos());
+            }
+            Ok(())
+        }
+
+        fn sleep(&mut self, d: Duration) {
+            self.clock += d;
+        }
+
+        fn now(&self) -> Duration {
+            self.clock
+        }
+    }
+
+    fn progress(mode: Mode) -> Mutex<Progress> {
+        Mutex::new(Progress { height: 0, frames: 0, lost: 0, note: Note::ScrollingForYou, mode, esc_at: None })
+    }
+
+    fn capture(page: &mut FakePage, mode: Mode, stop: &AtomicU8) -> (Result<Option<Outcome>, String>, Mutex<Progress>) {
+        let p = progress(mode);
+        let (w, h) = (page.page.width(), page.area_h);
+        let repaints = AtomicU32::new(0);
+        let r = run(page, w, h, mode, stop, &p, &|| {
+            repaints.fetch_add(1, Ordering::SeqCst);
+        });
+        assert!(repaints.load(Ordering::SeqCst) > 0, "the control is told to repaint");
+        (r, p)
+    }
+
+    fn whole(page: &RgbaImage, h: u32) -> RgbaImage {
+        image::imageops::crop_imm(page, 0, 0, page.width(), h).to_image()
+    }
+
+    #[test]
+    fn auto_scrolling_captures_a_page_of_look_alike_rows_down_to_its_end() {
+        let page = inbox(300, 90, 40);
+        let mut fake = FakePage::new(page.clone(), 200);
+        let stop = AtomicU8::new(RUNNING);
+        let (r, p) = capture(&mut fake, Mode::Auto, &stop);
+        let o = r.unwrap().unwrap();
+        assert_eq!(o.lost, 0);
+        assert!(!o.capped);
+        assert_eq!(o.img.h, page.height());
+        assert_eq!(o.img.px.as_slice(), page.as_raw().as_slice(), "stitched image is the page");
+        assert_eq!(p.lock().unwrap().note, Note::EndOfPage);
+        // Steps are half the area, never more than 90%.
+        assert!(fake.scrolls.iter().all(|&s| s.abs() <= 180), "{:?}", fake.scrolls);
+        assert_eq!(fake.scrolls[0], step_points(200));
+    }
+
+    #[test]
+    fn auto_scrolling_waits_for_smooth_scrolling_to_settle() {
+        let page = inbox(300, 60, 40);
+        let mut fake = FakePage::new(page.clone(), 200);
+        fake.ease = 0.35;
+        let stop = AtomicU8::new(RUNNING);
+        let (r, _) = capture(&mut fake, Mode::Auto, &stop);
+        let o = r.unwrap().unwrap();
+        assert_eq!(o.img.px.as_slice(), page.as_raw().as_slice());
+    }
+
+    #[test]
+    fn auto_scrolling_keeps_a_sticky_header_once() {
+        let page = inbox(300, 80, 40);
+        let header = {
+            let mut h = RgbaImage::from_pixel(300, 36, Rgba([30, 90, 200, 255]));
+            for x in (0..300).step_by(7) {
+                for y in 0..36 {
+                    h.put_pixel(x, y, Rgba([255, 255, 255, 255]));
+                }
+            }
+            h
+        };
+        let mut fake = FakePage::new(page.clone(), 200);
+        fake.header = Some(header.clone());
+        let stop = AtomicU8::new(RUNNING);
+        let (r, _) = capture(&mut fake, Mode::Auto, &stop);
+        let o = r.unwrap().unwrap();
+        assert_eq!(o.lost, 0);
+        let mut expected = whole(&page, page.height());
+        image::imageops::replace(&mut expected, &header, 0, 0);
+        assert_eq!(o.img.h, page.height());
+        assert_eq!(o.img.px.as_slice(), expected.as_raw().as_slice());
+    }
+
+    #[test]
+    fn auto_scrolling_that_moves_nothing_hands_over_to_the_user() {
+        let mut fake = FakePage::new(inbox(300, 40, 40), 200);
+        fake.deaf = true;
+        let stop = Arc::new(AtomicU8::new(RUNNING));
+        fake.done_after = Some((40, stop.clone()));
+        let (r, p) = capture(&mut fake, Mode::Auto, &stop);
+        let o = r.unwrap().unwrap();
+        assert_eq!(o.frames, 1);
+        let p = p.lock().unwrap();
+        assert_eq!(p.mode, Mode::Manual);
+        assert!(matches!(p.note, Note::PageDidNotMove | Note::CheckScreenRecording | Note::ScrollYourself), "{:?}", p.note);
+    }
+
+    #[test]
+    fn auto_scrolling_stops_at_the_height_limit() {
+        // 40 rows of 10 px per screen: the page is much taller than the limit.
+        let page = inbox(120, 2200, 10);
+        let mut fake = FakePage::new(page, 200);
+        let stop = AtomicU8::new(RUNNING);
+        let (r, p) = capture(&mut fake, Mode::Auto, &stop);
+        let o = r.unwrap().unwrap();
+        assert!(o.capped);
+        assert!(o.img.h <= crate::stitch::MAX_HEIGHT);
+        assert!(o.img.h > crate::stitch::MAX_HEIGHT - 400);
+        assert_eq!(p.lock().unwrap().note, Note::HeightLimit);
+    }
+
+    #[test]
+    fn cancel_throws_the_capture_away() {
+        let mut fake = FakePage::new(inbox(300, 40, 40), 200);
+        let stop = AtomicU8::new(CANCEL);
+        let (r, _) = capture(&mut fake, Mode::Auto, &stop);
+        assert!(matches!(r, Ok(None)));
+    }
+
+    #[test]
+    fn done_keeps_what_was_captured() {
+        let page = inbox(300, 40, 40);
+        let mut fake = FakePage::new(page.clone(), 200);
+        let stop = Arc::new(AtomicU8::new(RUNNING));
+        fake.done_after = Some((12, stop.clone()));
+        let (r, _) = capture(&mut fake, Mode::Auto, &stop);
+        let o = r.unwrap().unwrap();
+        assert!(o.frames >= 2 && o.img.h > 200);
+        assert_eq!(o.img.px.as_slice(), &page.as_raw()[..(o.img.w * o.img.h * 4) as usize]);
+    }
+
+    #[test]
+    fn manual_capture_ends_by_itself_three_seconds_after_the_page_stops_moving() {
+        let page = inbox(300, 40, 40);
+        let mut fake = FakePage::new(page.clone(), 200);
+        // The user scrolls for ten grabs, 60 rows each, then lets go.
+        fake.script = (0..10).map(|i| i * 60).collect();
+        let stop = AtomicU8::new(RUNNING);
+        let (r, p) = capture(&mut fake, Mode::Manual, &stop);
+        let o = r.unwrap().unwrap();
+        assert_eq!(o.img.h, 540 + 200);
+        assert_eq!(o.img.px.as_slice(), &page.as_raw()[..(o.img.w * o.img.h * 4) as usize]);
+        // Virtual time spent after the last movement: about the idle delay, not much more.
+        assert!(fake.clock >= Duration::from_millis(150 * 10) + IDLE_FINISH);
+        assert!(fake.clock <= Duration::from_millis(150 * 10) + IDLE_FINISH + Duration::from_secs(2), "{:?}", fake.clock);
+        assert_eq!(p.lock().unwrap().mode, Mode::Manual);
+    }
+
+    #[test]
+    fn manual_capture_that_never_moved_waits_for_the_user() {
+        let mut fake = FakePage::new(inbox(300, 40, 40), 200);
+        let stop = Arc::new(AtomicU8::new(RUNNING));
+        // 100 grabs is 15 s of virtual time: far more than the idle delay.
+        fake.done_after = Some((100, stop.clone()));
+        let (r, _) = capture(&mut fake, Mode::Manual, &stop);
+        let o = r.unwrap().unwrap();
+        assert_eq!(o.frames, 1);
+        assert!(fake.grabs >= 100);
+    }
+
+    #[test]
+    fn manual_scrolling_too_fast_says_so_and_keeps_the_rest() {
+        let page = inbox(300, 60, 40);
+        let mut fake = FakePage::new(page, 200);
+        // From 0 to 1500 in one jump: no overlap left to match.
+        fake.script = vec![0, 0, 60, 120, 1500, 1500, 1500];
+        let stop = Arc::new(AtomicU8::new(RUNNING));
+        fake.done_after = Some((7, stop.clone()));
+        let p = progress(Mode::Manual);
+        let r = run(&mut fake, 300, 200, Mode::Manual, &stop, &p, &|| {}).unwrap().unwrap();
+        assert!(r.lost > 0);
+        assert_eq!(p.lock().unwrap().note, Note::ScrollSlower);
+        assert_eq!(r.img.h, 120 + 200);
+    }
+
+    #[test]
+    fn escape_cancels_at_once_when_the_app_scrolls_and_asks_twice_when_the_user_does() {
+        let stop = AtomicU8::new(RUNNING);
+        let auto = progress(Mode::Auto);
+        press_escape(&stop, &auto);
+        assert_eq!(stop.load(Ordering::SeqCst), CANCEL);
+
+        let stop = AtomicU8::new(RUNNING);
+        let manual = progress(Mode::Manual);
+        manual.lock().unwrap().frames = 5;
+        press_escape(&stop, &manual);
+        assert_eq!(stop.load(Ordering::SeqCst), RUNNING, "first press only asks");
+        press_escape(&stop, &manual);
+        assert_eq!(stop.load(Ordering::SeqCst), CANCEL);
+
+        let stop = AtomicU8::new(RUNNING);
+        let empty = progress(Mode::Manual);
+        empty.lock().unwrap().frames = 1;
+        press_escape(&stop, &empty);
+        assert_eq!(stop.load(Ordering::SeqCst), CANCEL, "nothing to lose");
+    }
+
+    #[test]
+    fn the_scroll_step_is_half_the_area_within_bounds() {
+        assert_eq!(step_points(400), 200);
+        assert_eq!(step_points(20), STEP_MIN);
+        assert_eq!(step_points(5000), STEP_MAX);
+        for h in [48, 100, 400, 984, 3000] {
+            assert!(step_points(h) as f32 <= h as f32 * 0.9 || step_points(h) == STEP_MIN);
+        }
+    }
+
+    // Control placement.
+
+    const SCREEN: R = R { x0: 0.0, y0: 24.0, x1: 1512.0, y1: 944.0 };
+
+    fn area(x0: f32, y0: f32, x1: f32, y1: f32) -> R {
+        R { x0, y0, x1, y1 }
+    }
+
+    fn placed(a: &R, screens: &[R]) -> Option<R> {
+        control_position(a, CONTROL_SIZE, screens).map(|[x, y]| R { x0: x, y0: y, x1: x + CONTROL_SIZE[0], y1: y + CONTROL_SIZE[1] })
+    }
+
+    fn overlaps(a: &R, b: &R) -> bool {
+        a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1
+    }
+
+    #[test]
+    fn the_control_goes_below_the_area_centred_on_it() {
+        let a = area(200.0, 100.0, 800.0, 500.0);
+        let c = placed(&a, &[SCREEN]).unwrap();
+        assert_eq!(c.y0, a.y1 + GAP);
+        assert!((((c.x0 + c.x1) / 2.0) - 500.0).abs() < 0.01);
+        assert!(!overlaps(&c, &a));
+    }
+
+    #[test]
+    fn the_control_goes_above_when_there_is_no_room_below() {
+        let a = area(200.0, 300.0, 800.0, 930.0);
+        let c = placed(&a, &[SCREEN]).unwrap();
+        assert_eq!(c.y1, a.y0 - GAP);
+        assert!(!overlaps(&c, &a));
+    }
+
+    #[test]
+    fn the_control_goes_beside_a_full_height_area() {
+        let a = area(300.0, 24.0, 900.0, 944.0);
+        let c = placed(&a, &[SCREEN]).unwrap();
+        assert!(c.x0 >= a.x1 + GAP, "{c:?}");
+        assert!(c.y0 >= SCREEN.y0 && c.y1 <= SCREEN.y1);
+        let left = area(900.0, 24.0, 1500.0, 944.0);
+        let c = placed(&left, &[SCREEN]).unwrap();
+        assert!(c.x1 <= left.x0 - GAP, "{c:?}");
+    }
+
+    #[test]
+    fn the_control_stays_inside_the_screen_when_the_area_touches_an_edge() {
+        let a = area(0.0, 100.0, 120.0, 500.0);
+        let c = placed(&a, &[SCREEN]).unwrap();
+        assert!(c.x0 >= SCREEN.x0 && c.x1 <= SCREEN.x1);
+        let a = area(1400.0, 100.0, 1512.0, 500.0);
+        let c = placed(&a, &[SCREEN]).unwrap();
+        assert!(c.x0 >= SCREEN.x0 && c.x1 <= SCREEN.x1, "{c:?}");
+    }
+
+    #[test]
+    fn no_room_means_no_placement_instead_of_covering_the_area() {
+        assert!(placed(&SCREEN, &[SCREEN]).is_none());
+        let nearly = area(10.0, 30.0, 1500.0, 940.0);
+        let c = placed(&nearly, &[SCREEN]);
+        assert!(c.is_none_or(|c| !overlaps(&c, &nearly)));
+    }
+
+    #[test]
+    fn the_control_follows_the_display_the_area_is_on() {
+        let second = R { x0: 1512.0, y0: -200.0, x1: 3432.0, y1: 880.0 };
+        let screens = [SCREEN, second];
+        let a = area(2000.0, 100.0, 2600.0, 500.0);
+        let c = placed(&a, &screens).unwrap();
+        assert!(c.x0 >= second.x0 && c.x1 <= second.x1 && c.y0 >= second.y0 && c.y1 <= second.y1, "{c:?}");
+        assert!(!overlaps(&c, &a));
+        // A display to the left has negative coordinates.
+        let left = R { x0: -1920.0, y0: 0.0, x1: 0.0, y1: 1080.0 };
+        let a = area(-1500.0, 100.0, -600.0, 1000.0);
+        let c = placed(&a, &[SCREEN, left]).unwrap();
+        assert!(c.x0 >= left.x0 && c.x1 <= left.x1 && c.y1 <= left.y1, "{c:?}");
+        assert!(!overlaps(&c, &a));
+    }
+
+    #[test]
+    fn grab_rect_rounds_outwards_and_refuses_tiny_areas() {
+        let g = GrabRect::from_area(&area(10.4, 20.6, 110.2, 90.1)).unwrap();
+        assert_eq!(g, GrabRect { x: 10, y: 20, w: 101, h: 71 });
+        assert!(GrabRect::from_area(&area(0.0, 0.0, 30.0, 300.0)).is_none());
+    }
 }

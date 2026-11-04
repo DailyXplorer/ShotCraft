@@ -125,6 +125,7 @@ pub fn draw(ui: &mut Ui, v: &View) -> Click {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use eframe::egui::{Color32, Rect};
 
     #[test]
     fn one_frame_is_singular() {
@@ -169,5 +170,55 @@ mod tests {
     fn the_scroll_slower_hint_is_a_warning() {
         assert!(Note::ScrollSlower.is_warning());
         assert!(!Note::Capturing.is_warning());
+    }
+
+    /// Draws the control in each of its states over a page-like backdrop. With SHOTCRAFT_TEST_OUT set,
+    /// the pictures are written there; either way the pixels are checked.
+    #[test]
+    fn the_control_is_drawn_dark_with_readable_text_and_buttons_that_fit() {
+        let states = [
+            ("auto", View { height: 984, frames: 1, note: Note::ScrollingForYou, auto: true }),
+            ("auto-many", View { height: 12480, frames: 26, note: Note::ScrollingForYou, auto: true }),
+            ("manual-slower", View { height: 3120, frames: 7, note: Note::ScrollSlower, auto: false }),
+            ("needs-accessibility", View { height: 984, frames: 1, note: Note::NeedsAccessibility, auto: false }),
+        ];
+        let backdrop = Color32::from_rgb(236, 238, 241);
+        let ppp = 2.0;
+        let size = (CONTROL_SIZE[0] + 24.0, CONTROL_SIZE[1] + 24.0);
+        for (name, view) in states {
+            let img = crate::headless::with_rig(|rig| {
+                rig.render_ui(size, ppp, backdrop, |ui| {
+                    // The window is the control; draw it inset so that its edge is visible on the backdrop.
+                    let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(egui::pos2(12.0, 12.0), egui::vec2(CONTROL_SIZE[0], CONTROL_SIZE[1]))));
+                    draw(&mut inner, &view);
+                })
+            });
+            if let Some(dir) = std::env::var_os("SHOTCRAFT_TEST_OUT") {
+                crate::headless::save_png(&img, &std::path::PathBuf::from(dir).join(format!("scroll-control-{name}.png")));
+            }
+            let at = |x: f32, y: f32| {
+                let i = (((y * ppp) as u32 * img.w + (x * ppp) as u32) * 4) as usize;
+                [img.px[i], img.px[i + 1], img.px[i + 2]]
+            };
+            // Panel: dark. Done: blue-ish and darker than white text on it needs; Cancel: a subtle grey.
+            let panel = at(12.0 + 140.0, 12.0 + 62.0);
+            assert!(panel.iter().all(|&c| c < 80), "{name}: the panel is dark: {panel:?}");
+            let done = at(12.0 + 20.0, 12.0 + CONTROL_SIZE[1] - 14.0 - 6.0);
+            assert!(done[2] > done[0] + 60 && done[2] > 150, "{name}: Done is the accent colour: {done:?}");
+            let cancel = at(12.0 + CONTROL_SIZE[0] - 20.0, 12.0 + CONTROL_SIZE[1] - 14.0 - 6.0);
+            assert!(cancel.iter().all(|&c| c < 110), "{name}: Cancel is a subtle button: {cancel:?}");
+            // Corners are rounded: the backdrop shows at the very corner of the control.
+            let corner = at(12.5, 12.5);
+            assert!(corner.iter().all(|&c| c > 200), "{name}: rounded corner: {corner:?}");
+            // Some pixel inside the text rows is nearly white.
+            let mut brightest = 0u8;
+            for y in 12 * 2..(12 + 30) * 2 {
+                for x in 26 * 2..120 * 2 {
+                    let i = ((y as u32 * img.w + x as u32) * 4) as usize;
+                    brightest = brightest.max(img.px[i]);
+                }
+            }
+            assert!(brightest > 235, "{name}: the title is white: {brightest}");
+        }
     }
 }
