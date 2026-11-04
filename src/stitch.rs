@@ -50,6 +50,29 @@ const MIN_MOVING_COLUMNS: usize = 4;
 const HINT_TOLERANCE_DIV: usize = 20;
 const HINT_MIN_TOLERANCE: usize = 6;
 
+/// Which way the page grows while it is captured.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Direction {
+    /// The capture starts at the top of the page and scrolls down.
+    #[default]
+    Down,
+    /// The capture starts at the bottom of the page and scrolls up (a chat, a feed that loads older items).
+    /// The frames are turned upside down on the way in and the result on the way out, so that the
+    /// page is always followed in one direction: its rows are compared whole, which is the same
+    /// either way up. Offsets, hints and "above the start" then count in the direction of scrolling.
+    Up,
+}
+
+impl Direction {
+    /// The sign of a scroll in this direction: positive scrolls down.
+    pub fn sign(self) -> i32 {
+        match self {
+            Direction::Down => 1,
+            Direction::Up => -1,
+        }
+    }
+}
+
 /// What `Stitcher::push` did with a frame.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Push {
@@ -279,8 +302,9 @@ pub fn frames_match(a: &RgbaImage, b: &RgbaImage) -> bool {
     differ * 500 <= seen
 }
 
-/// Builds the image frame by frame. Feed it every captured frame in order, then call `finish`.
+/// Builds the image frame by frame (see `Direction` for scrolling up). Feed it every captured frame in order, then call `finish`.
 pub struct Stitcher {
+    direction: Direction,
     max_height: u32,
     size: Option<(u32, u32)>,
     /// The first frame, kept until a second one shows how far the page moved and which bands are fixed.
@@ -307,7 +331,12 @@ impl Stitcher {
     }
 
     pub fn with_max_height(max_height: u32) -> Stitcher {
+        Stitcher::with_direction(max_height, Direction::Down)
+    }
+
+    pub fn with_direction(max_height: u32, direction: Direction) -> Stitcher {
         Stitcher {
+            direction,
             max_height,
             size: None,
             first: vec![],
@@ -357,6 +386,13 @@ impl Stitcher {
     /// frame (positive = down). The hint only picks between shifts that fit the pixels equally well;
     /// it never makes a bad fit acceptable.
     pub fn push_hinted(&mut self, frame: &RgbaImage, hint: Option<i32>) -> Push {
+        match self.direction {
+            Direction::Down => self.push_down(frame, hint),
+            Direction::Up => self.push_down(&image::imageops::flip_vertical(frame), hint),
+        }
+    }
+
+    fn push_down(&mut self, frame: &RgbaImage, hint: Option<i32>) -> Push {
         if self.capped {
             return Push::Capped;
         }
@@ -471,6 +507,15 @@ impl Stitcher {
     /// The stitched image: the first frame with everything the page showed below it, the fixed header
     /// on top and the fixed footer at the bottom.
     pub fn finish(self) -> Result<RgbaImage, StitchError> {
+        let direction = self.direction;
+        let img = self.finish_down()?;
+        Ok(match direction {
+            Direction::Down => img,
+            Direction::Up => image::imageops::flip_vertical(&img),
+        })
+    }
+
+    fn finish_down(self) -> Result<RgbaImage, StitchError> {
         let Some((w, h)) = self.size else { return Err(StitchError::NoFrames) };
         if !self.bands_known {
             let rows = h.min(self.max_height);
@@ -1010,5 +1055,125 @@ mod tests {
         let per_frame = started.elapsed() / 20;
         assert_eq!(s.finish().unwrap(), crop(&page, 0, 19 * 180 + 1200));
         assert!(per_frame < std::time::Duration::from_millis(400), "{per_frame:?} per frame");
+    }
+
+    // Scrolling up: the capture starts at the bottom of the page and the page grows upwards.
+
+    fn up() -> Stitcher {
+        Stitcher::with_direction(MAX_HEIGHT, Direction::Up)
+    }
+
+    #[test]
+    fn scrolling_up_gives_the_original_page() {
+        let page = text_page(W, 1500, 21);
+        let ys = [1200, 1080, 960, 840, 720, 600, 480, 360, 240, 120, 0];
+        let mut s = up();
+        let pushes = feed(&mut s, &page, &ys, FRAME_H);
+        assert_eq!(pushes[0], Push::First);
+        for p in &pushes[1..] {
+            assert!(matches!(p, Push::Appended { rows: 120, offset: 120 }), "{p:?}");
+        }
+        let frames: Vec<RgbaImage> = ys.iter().map(|&y| crop(&page, y, FRAME_H)).collect();
+        let out = s.finish().unwrap();
+        assert_eq!(out, crop(&page, 0, 1500));
+        export_pngs("stitch-scroll-up", &frames[..4], &out);
+    }
+
+    #[test]
+    fn scrolling_up_by_varying_steps_stops_where_the_user_stopped() {
+        let page = text_page(W, 2200, 22);
+        let ys = [1900, 1897, 1860, 1859, 1710, 1700, 1570, 1569, 1565, 1340, 1339, 1200, 1198, 960, 800, 560];
+        let mut s = up();
+        let pushes = feed(&mut s, &page, &ys, FRAME_H);
+        assert!(pushes.iter().all(|p| !matches!(p, Push::Lost)), "{pushes:?}");
+        assert_eq!(s.height(), 1900 + FRAME_H - 560);
+        // The image is the part of the page between the top of the last frame and the bottom of the first.
+        assert_eq!(s.finish().unwrap(), crop(&page, 560, 1900 + FRAME_H - 560));
+    }
+
+    #[test]
+    fn scrolling_up_keeps_a_fixed_header_on_top_and_a_footer_at_the_bottom() {
+        let (header_h, footer_h) = (56, 40);
+        let page = text_page(W, 1800, 23);
+        let header = bar(W, header_h, [30, 90, 200]);
+        let footer = bar(W, footer_h, [200, 120, 30]);
+        let ys = [1500, 1410, 1300, 1170, 1050, 900, 760, 620, 500];
+        let mut s = up();
+        for &y in &ys {
+            let mut f = crop(&page, y, FRAME_H);
+            paste(&mut f, &header, 0);
+            paste(&mut f, &footer, FRAME_H - footer_h);
+            assert!(!matches!(s.push(&f), Push::Lost | Push::SizeMismatch));
+        }
+        let first = *ys.last().unwrap();
+        let mut expected = RgbaImage::new(W, header_h + (1500 + FRAME_H - footer_h - header_h - first) + footer_h);
+        paste(&mut expected, &header, 0);
+        paste(&mut expected, &rows(&page, first + header_h, 1500 + FRAME_H - footer_h), header_h);
+        let footer_y = expected.height() - footer_h;
+        paste(&mut expected, &footer, footer_y);
+        let out = s.finish().unwrap();
+        assert_eq!(out.dimensions(), expected.dimensions());
+        assert!(out == expected, "one header on top, one footer at the bottom");
+    }
+
+    #[test]
+    fn scrolling_up_adds_nothing_when_the_page_does_not_move_or_goes_back_down() {
+        let page = text_page(W, 1500, 24);
+        let mut s = up();
+        let pushes = feed(&mut s, &page, &[1000, 1000, 1000], FRAME_H);
+        assert_eq!(pushes, vec![Push::First, Push::Unchanged, Push::Unchanged]);
+        // Up, then back down past the start: that part is flagged and not added.
+        let more = feed(&mut s, &page, &[880, 760, 880, 1000, 1100, 1100, 1000, 880, 760, 640], FRAME_H);
+        assert!(matches!(more[0], Push::Appended { rows: 120, offset: 120 }), "{more:?}");
+        assert!(matches!(more[2], Push::Revisited { offset: -120 }), "{more:?}");
+        assert!(s.above_start(), "scrolled back below the first frame");
+        assert!(more[6..9].iter().all(|p| matches!(p, Push::Revisited { .. })), "{more:?}");
+        assert!(matches!(more[9], Push::Appended { rows: 120, offset: 120 }), "{more:?}");
+        assert_eq!(s.finish().unwrap(), crop(&page, 640, 1000 + FRAME_H - 640));
+    }
+
+    #[test]
+    fn scrolling_up_uses_the_hint_in_the_direction_of_scrolling() {
+        // Rows that repeat exactly: only the hint tells the real shift.
+        let page = inbox_page(W, 120, 40, 7, 2);
+        let (step, top) = (200u32, 7 * 200);
+        let mut s = up();
+        s.push(&crop(&page, top, 492));
+        for k in 1..8u32 {
+            let r = s.push_hinted(&crop(&page, top - k * step, 492), Some(step as i32));
+            assert!(matches!(r, Push::Appended { offset, .. } if offset == step as i32), "{k}: {r:?}");
+        }
+        assert_eq!(s.finish().unwrap(), crop(&page, 0, 7 * step + 492));
+    }
+
+    #[test]
+    fn scrolling_up_reports_a_jump_beyond_the_overlap_and_leaves_no_seam() {
+        let page = text_page(W, 1800, 27);
+        let mut s = up();
+        let pushes = feed(&mut s, &page, &[1500, 1400, 600, 500, 1350, 1250], FRAME_H);
+        assert!(matches!(pushes[2], Push::Lost), "{:?}", pushes[2]);
+        assert!(matches!(pushes[3], Push::Lost), "{:?}", pushes[3]);
+        // Coming back within reach of the last good frame picks the thread up again.
+        assert!(matches!(pushes[4], Push::Appended { rows: 50, offset: 50 }), "{:?}", pushes[4]);
+        assert!(matches!(pushes[5], Push::Appended { rows: 100, .. }), "{:?}", pushes[5]);
+        assert_eq!(s.finish().unwrap(), crop(&page, 1250, 250 + FRAME_H));
+    }
+
+    #[test]
+    fn an_upward_height_cap_keeps_the_bottom_of_the_page() {
+        let page = text_page(W, 1500, 28);
+        let mut s = Stitcher::with_direction(700, Direction::Up);
+        let pushes = feed(&mut s, &page, &[1200, 1080, 960, 840, 720, 600], FRAME_H);
+        assert!(s.is_capped());
+        assert!(matches!(pushes[5], Push::Appended { .. } | Push::Capped));
+        let out = s.finish().unwrap();
+        assert_eq!(out.height(), 700);
+        assert_eq!(out, crop(&page, 800, 700));
+    }
+
+    #[test]
+    fn the_direction_signs_scrolls() {
+        assert_eq!((Direction::Down.sign(), Direction::Up.sign()), (1, -1));
+        assert_eq!(Direction::default(), Direction::Down);
     }
 }

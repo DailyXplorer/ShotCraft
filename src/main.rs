@@ -74,6 +74,8 @@ pub enum Action {
     ThumbDo(ThumbAction),
     Captured(Result<Option<Captured>, String>),
     ScrollingCapture,
+    /// Scrolling capture that starts at the bottom of the page and goes up.
+    ScrollingCaptureUp,
     ScrollingCancel,
     ScrollingArea(Result<Option<model::R>, String>),
     ScrollingFinished(Result<Option<scroll::Outcome>, String>),
@@ -176,6 +178,8 @@ pub struct App {
     front_title: &'static str,
     front_focus: bool,
     scroll: Option<scroll::Session>,
+    /// Which way the scrolling capture being set up goes.
+    scroll_dir: scroll::Direction,
     ocr_running: bool,
     busy: bool,
     pub about_open: bool,
@@ -239,6 +243,7 @@ impl App {
             front_title: "",
             front_focus: true,
             scroll: None,
+            scroll_dir: scroll::Direction::Down,
             ocr_running: false,
             busy: false,
             about_open: false,
@@ -277,6 +282,7 @@ impl App {
             front_title: "",
             front_focus: true,
             scroll: None,
+            scroll_dir: scroll::Direction::Down,
             ocr_running: false,
             busy: false,
             about_open: false,
@@ -413,6 +419,8 @@ impl App {
             window_bg: self.settings.window_bg,
             solid_color: [solid[0], solid[1], solid[2]],
             scale: self.pixels_per_point(),
+            cursor: self.settings.capture_cursor,
+            delay_secs: self.settings.delay(),
             snapshot,
         };
         let q = self.queue.clone();
@@ -428,7 +436,7 @@ impl App {
     }
 
     /// Starts a scrolling capture, or ends the running one (the hotkey and the menu item act as Done).
-    fn start_scrolling(&mut self) {
+    fn start_scrolling(&mut self, dir: scroll::Direction) {
         if let Some(s) = &self.scroll {
             s.finish();
             return;
@@ -437,6 +445,7 @@ impl App {
             return;
         }
         self.busy = true;
+        self.scroll_dir = dir;
         let was_visible = !self.hidden;
         if was_visible {
             self.hide_window();
@@ -478,7 +487,7 @@ impl App {
         // Scrolling for the user needs the Accessibility permission; ask for it the first time. Without it
         // the capture still works, the user scrolls.
         let auto = autoscroll::trusted(true);
-        self.scroll = Some(scroll::Session::start(rect, pos, auto, self.queue.clone(), self.ctx.clone()));
+        self.scroll = Some(scroll::Session::start(rect, pos, auto, self.scroll_dir, self.queue.clone(), self.ctx.clone()));
         self.grab_escape(true);
         // The control is a new window and the app has no Dock icon: wake the UI pass that creates it
         // while the editor is hidden, and show it without taking the keyboard from the page.
@@ -489,6 +498,7 @@ impl App {
 
     fn scrolling_finished(&mut self, res: Result<Option<scroll::Outcome>, String>) {
         self.scroll = None;
+        let up = self.scroll_dir == scroll::Direction::Up;
         self.grab_escape(false);
         match res {
             Ok(Some(o)) => {
@@ -499,6 +509,8 @@ impl App {
                     self.say(format!("Stopped at the height limit of {} px", stitch::MAX_HEIGHT));
                 } else if frames <= 1 && lost > 0 {
                     self.say("Lost track while scrolling, so this is only the first view. Scroll slower and try again");
+                } else if frames <= 1 && up {
+                    self.say("The page didn't scroll up, so this is a regular screenshot. Scroll to the bottom of the page first");
                 } else if frames <= 1 {
                     self.say("The page didn't scroll, so this is a regular screenshot");
                 }
@@ -721,7 +733,8 @@ impl App {
                 }
             }
             Action::OcrDone(result) => self.ocr_done(result),
-            Action::ScrollingCapture => self.start_scrolling(),
+            Action::ScrollingCapture => self.start_scrolling(scroll::Direction::Down),
+            Action::ScrollingCaptureUp => self.start_scrolling(scroll::Direction::Up),
             Action::ScrollingCancel => {
                 if let Some(s) = &self.scroll {
                     s.press_escape();
