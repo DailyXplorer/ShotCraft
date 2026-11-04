@@ -535,6 +535,49 @@ pub fn recognize(_img: &Image) -> Result<OcrResult, String> {
     Err("Text recognition needs macOS".into())
 }
 
+/// Opens the system print panel for the image, laid out as `menu_model::print_layout` says: at its
+/// on-screen size, shrunk to fit the page, centred, in landscape when it is wider than tall. The
+/// panel is modal, like the file dialogs, and the call returns when it is closed.
+#[cfg(target_os = "macos")]
+pub fn print_image(img: &Image, scale: f32, title: &str) -> Result<(), String> {
+    use crate::menu_model::{print_landscape, print_layout};
+    use objc2::{AnyThread, MainThreadMarker};
+    use objc2_app_kit::{NSImage, NSImageScaling, NSImageView, NSPaperOrientation, NSPrintInfo, NSPrintOperation, NSPrintingPaginationMode};
+    use objc2_foundation::{NSData, NSPoint, NSRect, NSSize, NSString};
+    let mtm = MainThreadMarker::new().ok_or("Printing must start on the main thread")?;
+    let png = encode_png(img)?;
+    objc2::rc::autoreleasepool(|_| {
+        let data = NSData::with_bytes(&png);
+        let ns_image = NSImage::initWithData(NSImage::alloc(), &data).ok_or("Can't read the image for printing")?;
+        // The shared info belongs to the app's page setup; a copy keeps this job's orientation to itself.
+        let info: objc2::rc::Retained<NSPrintInfo> = unsafe { objc2::msg_send![&*NSPrintInfo::sharedPrintInfo(), copy] };
+        let px = (img.w as u32, img.h as u32);
+        info.setOrientation(if print_landscape(px) { NSPaperOrientation::Landscape } else { NSPaperOrientation::Portrait });
+        info.setHorizontallyCentered(true);
+        info.setVerticallyCentered(true);
+        info.setHorizontalPagination(NSPrintingPaginationMode::Fit);
+        info.setVerticalPagination(NSPrintingPaginationMode::Fit);
+        let paper = info.paperSize();
+        let margin = info.leftMargin().max(info.rightMargin()).max(info.topMargin()).max(info.bottomMargin());
+        let layout = print_layout(px, scale, (paper.width, paper.height), margin);
+        let view = NSImageView::initWithFrame(mtm.alloc::<NSImageView>(), NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(layout.width, layout.height)));
+        view.setImage(Some(&ns_image));
+        view.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
+        let op = NSPrintOperation::printOperationWithView_printInfo(&view, &info);
+        op.setJobTitle(Some(&NSString::from_str(title)));
+        op.setShowsPrintPanel(true);
+        crate::app_mode::activate();
+        // False when the user cancels as well as when printing fails: the two can't be told apart here.
+        op.runOperation();
+        Ok(())
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn print_image(_img: &Image, _scale: f32, _title: &str) -> Result<(), String> {
+    Err("Printing needs macOS".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

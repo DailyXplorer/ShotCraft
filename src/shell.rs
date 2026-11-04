@@ -3,9 +3,10 @@
 //! The app has no Dock icon, so macOS never shows its main menu: the status item menu is the one
 //! users see and has to carry every command that is not on screen in the editor. The main menu is
 //! still installed because its key equivalents keep working while the editor has focus.
-use crate::settings::{delayed_label, HotkeyAction, Settings};
-use crate::{Action, Queue};
+use crate::menu_model::{self, Entry, MenuState, Native};
 use crate::model::Tool;
+use crate::settings::{HotkeyAction, Settings};
+use crate::{Action, Queue};
 use crate::system::CaptureMode;
 use crate::updater::Updater;
 use global_hotkey::{hotkey::HotKey, GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
@@ -13,15 +14,21 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use tray_icon::menu::accelerator::{Accelerator, Code, Modifiers};
-use tray_icon::menu::{CheckMenuItem, ContextMenu, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
+use tray_icon::menu::{CheckMenuItem, ContextMenu, IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{TrayIcon, TrayIconBuilder};
 
 pub struct Shell {
     tray: Option<TrayIcon>,
     _menubar: Menu,
     autostart_item: CheckMenuItem,
-    delayed_item: MenuItem,
+    /// "Delayed Screenshot (Ns)": the wait is a setting.
+    delayed_item: Option<MenuItem>,
     auto_updates_item: CheckMenuItem,
+    /// Items whose enabled state follows the editor (see `menu_model::item_enabled`), by id.
+    stateful: Vec<(String, MenuItem)>,
+    /// Status menu items that show a global hotkey, kept to update when it changes.
+    hotkey_items: Vec<(HotkeyAction, MenuItem)>,
+    state: Option<MenuState>,
     updater: Option<Updater>,
     hotkeys: Option<GlobalHotKeyManager>,
     registered: Vec<HotKey>,
@@ -59,6 +66,8 @@ fn action_for(id: &str) -> Option<Action> {
         "saveas" => Action::SaveAs,
         "pin" => Action::Pin,
         "close" => Action::Close,
+        "closeall" => Action::CloseAll,
+        "print" => Action::Print,
         "undo" => Action::Undo,
         "redo" => Action::Redo,
         "resetcrop" => Action::ResetCrop,
@@ -73,15 +82,87 @@ fn action_for(id: &str) -> Option<Action> {
         "about" => Action::About,
         "shortcuts" => Action::Shortcuts,
         t if t.starts_with("tool:") => {
-            let name = &t[5..];
+            let name = &t[menu_model::TOOL_PREFIX.len()..];
             Action::Tool(*Tool::TOOLBAR.iter().find(|x| x.name() == name)?)
         }
         _ => return None,
     })
 }
 
-fn acc(m: Modifiers, c: Code) -> Option<Accelerator> {
-    Some(Accelerator::new(m, c))
+fn key_equivalent(k: menu_model::Key) -> Option<Accelerator> {
+    let mut m = Modifiers::empty();
+    for (bit, flag) in [(menu_model::CMD, Modifiers::META), (menu_model::SHIFT, Modifiers::SHIFT), (menu_model::ALT, Modifiers::ALT)] {
+        if k.mods & bit != 0 {
+            m |= flag;
+        }
+    }
+    Some(Accelerator::new(m, k.code.parse::<Code>().ok()?))
+}
+
+/// What building the native menus from `menu_model` leaves behind: the items that are changed later.
+#[derive(Default)]
+struct Parts {
+    updates_available: bool,
+    autostart: bool,
+    stateful: Vec<(String, MenuItem)>,
+    hotkey_items: Vec<(HotkeyAction, MenuItem)>,
+    delayed_item: Option<MenuItem>,
+    autostart_item: Option<CheckMenuItem>,
+    auto_updates_item: Option<CheckMenuItem>,
+    help: Option<Submenu>,
+}
+
+impl Parts {
+    fn build(&mut self, e: &Entry) -> Box<dyn IsMenuItem> {
+        match e {
+            Entry::Sep => Box::new(PredefinedMenuItem::separator()),
+            Entry::Item { id, title, key, enabled } => {
+                let on = *enabled && (id != "updates" || self.updates_available);
+                let item = MenuItem::with_id(id.as_str(), *title, on, key.and_then(key_equivalent));
+                if *enabled && menu_model::is_stateful(id) {
+                    self.stateful.push((id.clone(), item.clone()));
+                }
+                if id == "delayed" {
+                    self.delayed_item = Some(item.clone());
+                }
+                if let Some(a) = menu_model::hotkey_of_item(id) {
+                    self.hotkey_items.push((a, item.clone()));
+                }
+                Box::new(item)
+            }
+            Entry::Check { id, title, enabled } => {
+                let checked = id == "autostart" && self.autostart;
+                let item = CheckMenuItem::with_id(id.as_str(), *title, *enabled && (id != "autoupdates" || self.updates_available), checked, None);
+                match id.as_str() {
+                    "autostart" => self.autostart_item = Some(item.clone()),
+                    "autoupdates" => self.auto_updates_item = Some(item.clone()),
+                    _ => {}
+                }
+                Box::new(item)
+            }
+            Entry::Sub { title, items } => {
+                let children: Vec<Box<dyn IsMenuItem>> = items.iter().map(|c| self.build(c)).collect();
+                let sub = Submenu::with_items(*title, true, &children.iter().map(|b| &**b).collect::<Vec<_>>()).expect("menu");
+                if *title == "Help" {
+                    self.help = Some(sub.clone());
+                }
+                Box::new(sub)
+            }
+            Entry::Native { kind, title } => Box::new(match kind {
+                Native::Services => PredefinedMenuItem::services(*title),
+                Native::Hide => PredefinedMenuItem::hide(*title),
+                Native::HideOthers => PredefinedMenuItem::hide_others(*title),
+                Native::ShowAll => PredefinedMenuItem::show_all(*title),
+                Native::Cut => PredefinedMenuItem::cut(*title),
+                Native::Copy => PredefinedMenuItem::copy(*title),
+                Native::Paste => PredefinedMenuItem::paste(*title),
+                Native::PasteAndMatchStyle => PredefinedMenuItem::paste_and_match_style(*title),
+                Native::Delete => PredefinedMenuItem::delete(*title),
+                Native::SelectAll => PredefinedMenuItem::select_all(*title),
+                Native::FullScreen => PredefinedMenuItem::fullscreen(*title),
+            }),
+        }
+    }
 }
 
 /// SF Symbol shown before a menu item, as in Apple's own menus. Matched on the start of the title.
@@ -97,6 +178,11 @@ const MENU_SYMBOLS: &[(&str, &str)] = &[
     ("Services", "gearshape.2"),
     ("Launch at Startup", "power"),
     ("Area Capture", "rectangle.dashed"),
+    ("Capture Area", "rectangle.dashed"),
+    ("Capture Screen", "display"),
+    ("More", "ellipsis.circle"),
+    ("Print", "printer"),
+    ("Delete", "trash"),
     ("Fullscreen Screenshot", "display"),
     ("All Displays Screenshot", "display.2"),
     ("Repeat Area Capture", "arrow.clockwise"),
@@ -176,152 +262,24 @@ fn tray_icon_image() -> tray_icon::Icon {
 
 impl Shell {
     pub fn start(queue: Queue, ctx: eframe::egui::Context, settings: &Settings) -> Shell {
-        let cmd = Modifiers::META;
-        let cmd_shift = Modifiers::META | Modifiers::SHIFT;
         let updater = Updater::start();
-        let updates_item = MenuItem::with_id("updates", "Check for Updates…", updater.is_some(), None);
-        let auto_updates_item = CheckMenuItem::with_id("autoupdates", "Check for Updates Automatically", updater.is_some(), false, None);
+        let mut parts = Parts { updates_available: updater.is_some(), autostart: settings.autostart, ..Parts::default() };
+        let bar_items: Vec<Box<dyn IsMenuItem>> = menu_model::menu_bar().iter().map(|e| parts.build(e)).collect();
+        let menubar = Menu::with_items(&bar_items.iter().map(|b| &**b).collect::<Vec<_>>()).expect("menu");
+        add_menu_symbols(&menubar);
+        menubar.init_for_nsapp();
+        if let Some(help) = &parts.help {
+            help.set_as_help_menu_for_nsapp();
+        }
+        let mut stateful = std::mem::take(&mut parts.stateful);
+        let tray_items: Vec<Box<dyn IsMenuItem>> = menu_model::status_menu().iter().map(|e| parts.build(e)).collect();
+        let tray_menu = Menu::with_items(&tray_items.iter().map(|b| &**b).collect::<Vec<_>>()).expect("menu");
+        stateful.append(&mut parts.stateful);
+        let delayed_item = parts.delayed_item.take();
+        let (autostart_item, auto_updates_item, hotkey_items) = (parts.autostart_item.expect("autostart item"), parts.auto_updates_item.expect("updates item"), parts.hotkey_items);
         if let Some(updater) = &updater {
             auto_updates_item.set_checked(updater.checks_automatically());
         }
-
-        let app_menu = Submenu::with_items(
-            "ShotCraft",
-            true,
-            &[
-                &MenuItem::with_id("about", "About ShotCraft", true, None),
-                &PredefinedMenuItem::separator(),
-                &MenuItem::with_id("prefs", "Preferences…", true, acc(cmd, Code::Comma)),
-                &PredefinedMenuItem::separator(),
-                &PredefinedMenuItem::services(None),
-                &PredefinedMenuItem::separator(),
-                &PredefinedMenuItem::hide(Some("Hide ShotCraft")),
-                &PredefinedMenuItem::hide_others(None),
-                &PredefinedMenuItem::show_all(None),
-                &PredefinedMenuItem::separator(),
-                &MenuItem::with_id("quit", "Quit ShotCraft", true, acc(cmd, Code::KeyQ)),
-            ],
-        )
-        .expect("menu");
-        let file = Submenu::with_items(
-            "File",
-            true,
-            &[
-                &MenuItem::with_id("copy", "Copy Image", true, acc(cmd_shift, Code::KeyC)),
-                &MenuItem::with_id("save", "Save Image", true, acc(cmd, Code::KeyS)),
-                &MenuItem::with_id("saveas", "Save Image As", true, acc(cmd_shift, Code::KeyS)),
-                &MenuItem::with_id("pin", "Pin to Screen", true, acc(cmd, Code::KeyP)),
-                &PredefinedMenuItem::separator(),
-                &MenuItem::with_id("open", "Open File", true, acc(cmd_shift, Code::KeyO)),
-                &MenuItem::with_id("clipboard", "Open From Clipboard", true, acc(cmd_shift, Code::KeyV)),
-                &PredefinedMenuItem::separator(),
-                &MenuItem::with_id("close", "Close", true, acc(cmd, Code::KeyW)),
-            ],
-        )
-        .expect("menu");
-        let edit = Submenu::with_items(
-            "Edit",
-            true,
-            &[
-                &MenuItem::with_id("undo", "Undo", true, acc(cmd, Code::KeyZ)),
-                &MenuItem::with_id("redo", "Redo", true, acc(cmd_shift, Code::KeyZ)),
-                &MenuItem::with_id("resetcrop", "Reset Crop", true, None),
-                &MenuItem::with_id("rasterize", "Rasterize (Merge) Image", true, None),
-                &PredefinedMenuItem::separator(),
-                &PredefinedMenuItem::cut(None),
-                &PredefinedMenuItem::copy(None),
-                &PredefinedMenuItem::paste(None),
-                &PredefinedMenuItem::select_all(None),
-            ],
-        )
-        .expect("menu");
-        let draw = Submenu::new("Draw", true);
-        for t in [
-            Tool::Arrow,
-            Tool::Text,
-            Tool::Rectangle,
-            Tool::Freehand,
-            Tool::Magnifier,
-            Tool::Highlighter,
-            Tool::Blur,
-            Tool::Spotlight,
-            Tool::Counter,
-            Tool::Oval,
-            Tool::Line,
-            Tool::Ruler,
-            Tool::Backdrop,
-        ] {
-            let _ = draw.append(&MenuItem::with_id(format!("tool:{}", t.name()), t.tooltip(), true, None));
-        }
-        let zoom = Submenu::with_items(
-            "Zoom",
-            true,
-            &[
-                &MenuItem::with_id("zoomin", "Zoom In", true, acc(cmd, Code::Equal)),
-                &MenuItem::with_id("zoomout", "Zoom Out", true, acc(cmd, Code::Minus)),
-                &PredefinedMenuItem::separator(),
-                &MenuItem::with_id("zoomfit", "Zoom To Fit", true, acc(cmd, Code::Digit1)),
-                &MenuItem::with_id("zoom100", "Zoom To 100%", true, acc(cmd, Code::Digit0)),
-                &PredefinedMenuItem::separator(),
-                &MenuItem::with_id("zoomsel", "Zoom To Selection", true, acc(cmd, Code::Digit2)),
-                // Q and W work from the editor's own key handling: like the Draw items, these
-                // carry no menu key equivalent, which would also swallow letters typed into a text.
-                &MenuItem::with_id("seltl", "Selection Top Left", true, None),
-                &MenuItem::with_id("selbr", "Selection Bottom Right", true, None),
-                &PredefinedMenuItem::separator(),
-                &PredefinedMenuItem::fullscreen(Some("Enter Full Screen")),
-            ],
-        )
-        .expect("menu");
-        let help = Submenu::with_items("Help", true, &[&MenuItem::with_id("shortcuts", "Keyboard Shortcuts", true, None)]).expect("menu");
-        let menubar = Menu::with_items(&[&app_menu, &file, &edit, &draw, &zoom, &help]).expect("menu");
-        add_menu_symbols(&menubar);
-        menubar.init_for_nsapp();
-        help.set_as_help_menu_for_nsapp();
-
-        let autostart_item = CheckMenuItem::with_id("autostart", "Launch at Startup", true, settings.autostart, None);
-        let image = Submenu::with_items(
-            "Current Image",
-            true,
-            &[
-                &MenuItem::with_id("undo", "Undo", true, None),
-                &MenuItem::with_id("redo", "Redo", true, None),
-                &MenuItem::with_id("resetcrop", "Reset Crop", true, None),
-                &MenuItem::with_id("rasterize", "Rasterize (Merge) Image", true, None),
-                &MenuItem::with_id("saveas", "Save Image As", true, None),
-            ],
-        )
-        .expect("menu");
-        let delayed_item = MenuItem::with_id("delayed", delayed_label(settings.delay()), true, None);
-        let tray_menu = Menu::with_items(&[
-            &MenuItem::with_id("area", "Area Capture", true, None),
-            &MenuItem::with_id("fullscreen", "Fullscreen Screenshot", true, None),
-            &MenuItem::with_id("alldisplays", "All Displays Screenshot", true, None),
-            &MenuItem::with_id("repeat", "Repeat Area Capture", true, None),
-            &MenuItem::with_id("window", "Capture Any Window", true, None),
-            &MenuItem::with_id("activewindow", "Capture Active Window", true, None),
-            &MenuItem::with_id("scrolling", "Scrolling Capture", true, None),
-            &MenuItem::with_id("scrollingup", "Scrolling Capture (Up)", true, None),
-            &delayed_item,
-            &MenuItem::with_id("ocr", "Recognize Text/QR", true, None),
-            &MenuItem::with_id("clipboard", "Load From Clipboard", true, None),
-            &MenuItem::with_id("open", "Open File…", true, None),
-            &PredefinedMenuItem::separator(),
-            &MenuItem::with_id("show", "Show ShotCraft", true, None),
-            &image,
-            &PredefinedMenuItem::separator(),
-            &MenuItem::with_id("prefs", "Preferences…", true, None),
-            &autostart_item,
-            &PredefinedMenuItem::separator(),
-            &updates_item,
-            &auto_updates_item,
-            &PredefinedMenuItem::separator(),
-            &MenuItem::with_id("about", "About ShotCraft", true, None),
-            &MenuItem::with_id("shortcuts", "Keyboard Shortcuts", true, None),
-            &PredefinedMenuItem::separator(),
-            &MenuItem::with_id("quit", "Quit ShotCraft", true, None),
-        ])
-        .expect("menu");
         add_menu_symbols(&tray_menu);
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(tray_menu))
@@ -379,7 +337,7 @@ impl Shell {
             ctx.request_repaint();
         }));
 
-        let mut shell = Shell { tray, _menubar: menubar, autostart_item, delayed_item, auto_updates_item, updater, hotkeys: GlobalHotKeyManager::new().ok(), registered: vec![], show_hotkey_works: false, hotkey_map, escape: None, escape_id, enter: None, enter_id };
+        let mut shell = Shell { tray, _menubar: menubar, autostart_item, auto_updates_item, delayed_item, stateful, hotkey_items, state: None, updater, hotkeys: GlobalHotKeyManager::new().ok(), registered: vec![], show_hotkey_works: false, hotkey_map, escape: None, escape_id, enter: None, enter_id };
         shell.apply_hotkeys(settings);
         shell
     }
@@ -448,9 +406,27 @@ impl Shell {
         }
     }
 
+    /// Enables and disables the items that depend on the editor. Only talks to AppKit on a change.
+    pub fn set_state(&mut self, st: MenuState) {
+        if self.state == Some(st) {
+            return;
+        }
+        self.state = Some(st);
+        for (id, item) in &self.stateful {
+            item.set_enabled(menu_model::item_enabled(id, &st));
+        }
+    }
+
     pub fn sync(&self, settings: &Settings) {
+        // The status menu shows each global hotkey next to its item.
+        for (a, item) in &self.hotkey_items {
+            let accel = settings.hotkey(*a).and_then(|s| s.parse::<Accelerator>().ok());
+            let _ = item.set_accelerator(accel);
+        }
         self.autostart_item.set_checked(settings.autostart);
-        self.delayed_item.set_text(delayed_label(settings.delay()));
+        if let Some(item) = &self.delayed_item {
+            item.set_text(crate::settings::delayed_label(settings.delay()));
+        }
         self.refresh_updates();
         if let Some(t) = &self.tray {
             let _ = t.set_visible(settings.menubar_icon_visible(self.show_hotkey_works));
