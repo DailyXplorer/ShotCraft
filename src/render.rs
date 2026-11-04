@@ -1421,6 +1421,14 @@ pub fn autocrop_rect(pm: &Pixmap) -> R {
     R { x0: left as f32, y0: top as f32, x1: right as f32, y1: bottom as f32 }
 }
 
+/// How far the picture can be moved off-centre in each direction, in output pixels.
+pub fn backdrop_max_offset(cw: f32, ch: f32, bd: &Backdrop) -> (f32, f32) {
+    let mut flat = bd.clone();
+    flat.offset = [0.0, 0.0];
+    let (w, h, _, _, iw, ih) = backdrop_layout(cw, ch, &flat);
+    (((w as f32 - iw) / 2.0).max(0.0), ((h as f32 - ih) / 2.0).max(0.0))
+}
+
 /// The output size of a backdrop around a picture of `cw` × `ch`, and where the framed picture
 /// (inset included, `iw` × `ih`) sits in it.
 pub fn backdrop_layout(cw: f32, ch: f32, bd: &Backdrop) -> (u32, u32, f32, f32, f32, f32) {
@@ -1760,8 +1768,9 @@ mod tests {
         bd.offset = [500.0, -500.0];
         let (_, _, ox, oy, _, _) = backdrop_layout(100.0, 60.0, &bd);
         assert_eq!((ox, oy), (100.0, 0.0), "cannot leave the backdrop");
-        bd.ratio = Some(2.0);
         bd.offset = [0.0, 0.0];
+        assert_eq!(backdrop_max_offset(100.0, 60.0, &bd), (50.0, 50.0));
+        bd.ratio = Some(2.0);
         let (w, h, ..) = backdrop_layout(100.0, 60.0, &bd);
         assert_eq!((w, h), (320, 160), "ratio widens the canvas, picture stays centred");
     }

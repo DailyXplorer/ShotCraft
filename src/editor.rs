@@ -1141,7 +1141,8 @@ impl App {
         if cur != mode(&bd) {
             match cur {
                 0 | 1 | 2 => {
-                    bd.image = None;
+                    // The picture is forgotten, so it does not come back with the next backdrop.
+                    bd.forget_image();
                     bd.fill = [BackdropFill::Preset, BackdropFill::Custom, BackdropFill::Solid][cur];
                 }
                 _ => {
@@ -1247,6 +1248,7 @@ impl App {
                 self.settings.save();
             } else {
                 d.touch();
+                self.settings.backdrop = Some(bd.clone());
             }
             d.backdrop = Some(bd.clone());
         }
@@ -1481,8 +1483,13 @@ impl App {
                 }
                 if resp.dragged() {
                     let delta = resp.drag_delta() / self.ed.zoom;
+                    let (cw, ch) = match d.crop {
+                        Some(r) => (r.w(), r.h()),
+                        None => (d.base.w as f32, d.base.h as f32),
+                    };
                     if let Some(bd) = &mut d.backdrop {
-                        bd.offset = [bd.offset[0] + delta.x, bd.offset[1] + delta.y];
+                        let (mx, my) = backdrop_max_offset(cw, ch, bd);
+                        bd.offset = [(bd.offset[0] + delta.x).clamp(-mx, mx), (bd.offset[1] + delta.y).clamp(-my, my)];
                     }
                     d.touch();
                 }
