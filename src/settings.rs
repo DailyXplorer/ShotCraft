@@ -217,13 +217,47 @@ impl Default for Settings {
     }
 }
 
+/// Where an unreadable settings file is kept: `settings.json.bad` next to it.
+fn bad_copy_path(p: &std::path::Path) -> PathBuf {
+    let mut name = p.file_name().unwrap_or_default().to_os_string();
+    name.push(".bad");
+    p.with_file_name(name)
+}
+
 fn path() -> PathBuf {
     crate::system::home().join("Library/Application Support/ShotCraft/settings.json")
 }
 
 impl Settings {
     pub fn load() -> Settings {
-        std::fs::read(path()).ok().and_then(|b| serde_json::from_slice::<Settings>(&b).ok()).unwrap_or_default().migrated()
+        Settings::load_from(&path())
+    }
+
+    /// Reads the settings file. A missing file gives the defaults silently. A file that exists but
+    /// can't be read as settings (damaged, or written by another version with a value this one
+    /// doesn't know) is copied to `settings.json.bad` first, and the reason is logged: the next save
+    /// would overwrite it with the defaults, and the user's choices would be gone for good.
+    fn load_from(p: &std::path::Path) -> Settings {
+        let bytes = match std::fs::read(p) {
+            Ok(b) => b,
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!("settings: can't read {}: {e}; using the defaults", p.display());
+                }
+                return Settings::default();
+            }
+        };
+        match serde_json::from_slice::<Settings>(&bytes) {
+            Ok(s) => s.migrated(),
+            Err(e) => {
+                let bad = bad_copy_path(p);
+                match std::fs::write(&bad, &bytes) {
+                    Ok(()) => eprintln!("settings: {} is unreadable ({e}); kept a copy in {} and using the defaults", p.display(), bad.display()),
+                    Err(w) => eprintln!("settings: {} is unreadable ({e}) and the copy to {} failed ({w}); using the defaults", p.display(), bad.display()),
+                }
+                Settings::default()
+            }
+        }
     }
 
     /// Carries the old "Trim shadow" checkbox over to the window background mode.
@@ -527,5 +561,46 @@ mod tests {
             assert!(keys.parse::<global_hotkey::hotkey::HotKey>().is_ok(), "{keys}");
         }
         assert_eq!(pretty_hotkey(settings.hotkey(HotkeyAction::Ocr).unwrap()), "⌃⌥⌘O");
+    }
+}
+
+#[cfg(test)]
+mod load_tests {
+    use super::*;
+
+    fn dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("shotcraft-settings-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn a_missing_file_gives_the_defaults_and_no_backup() {
+        let d = dir("missing");
+        let s = Settings::load_from(&d.join("settings.json"));
+        assert_eq!(s.delay_secs, Settings::default().delay_secs);
+        assert!(!d.join("settings.json.bad").exists());
+    }
+
+    #[test]
+    fn an_unreadable_file_is_kept_as_bad_before_the_defaults_are_used() {
+        let d = dir("bad");
+        let file = d.join("settings.json");
+        // A value this version doesn't know (what a downgrade leaves behind) next to settings that matter.
+        let text = r#"{"after_show": "FromTheFuture", "folder": "/precious"}"#;
+        std::fs::write(&file, text).unwrap();
+        let s = Settings::load_from(&file);
+        assert_eq!(s.folder, Settings::default().folder, "falls back to the defaults");
+        assert_eq!(std::fs::read_to_string(d.join("settings.json.bad")).unwrap(), text, "the original is kept");
+    }
+
+    #[test]
+    fn a_good_file_is_loaded_and_leaves_no_backup() {
+        let d = dir("good");
+        let file = d.join("settings.json");
+        std::fs::write(&file, r#"{"folder": "/pics"}"#).unwrap();
+        assert_eq!(Settings::load_from(&file).folder, "/pics");
+        assert!(!d.join("settings.json.bad").exists());
     }
 }
