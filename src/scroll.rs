@@ -7,6 +7,7 @@
 use crate::autoscroll;
 use crate::model::{Image, R};
 use crate::stitch::{frames_match, Push, Stitcher};
+pub use crate::stitch::Direction;
 use crate::{system, Action, Queue};
 use eframe::egui::{Context, ViewportId};
 use image::RgbaImage;
@@ -156,6 +157,8 @@ pub enum Note {
     Capturing,
     /// The page was scrolled above the first frame.
     AboveStart,
+    /// Scrolling up: the page was scrolled back below the first frame.
+    BelowStart,
     /// The stitcher could not match a frame in manual mode.
     ScrollSlower,
     /// Automatic scrolling could not follow the page and handed over.
@@ -179,6 +182,7 @@ impl Note {
             Note::ScrollYourself => "Scroll the page",
             Note::Capturing => "Capturing",
             Note::AboveStart => "Above the start: not captured",
+            Note::BelowStart => "Below the start: not captured",
             Note::ScrollSlower => "Scroll a bit slower",
             Note::LostTrack => "Lost track: scroll by hand, slowly",
             Note::SizeChanged => "The area changed size",
@@ -244,7 +248,7 @@ pub struct Session {
 impl Session {
     /// Starts the capture thread. `auto` is whether ShotCraft may scroll the page (the Accessibility
     /// permission is granted).
-    pub fn start(rect: GrabRect, control_pos: [f32; 2], auto: bool, limits: Limits, queue: Queue, ctx: Context) -> Session {
+    pub fn start(rect: GrabRect, control_pos: [f32; 2], auto: bool, dir: Direction, limits: Limits, queue: Queue, ctx: Context) -> Session {
         let stop = Arc::new(AtomicU8::new(RUNNING));
         let (mode, note) = match (auto, limits.manual) {
             (true, _) => (Mode::Auto, Note::ScrollingForYou),
@@ -258,7 +262,7 @@ impl Session {
             let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let mut page = ScreenPage { rect, scroller: autoscroll::Scroller::new(rect), started: Instant::now(), limits };
                 let repaint = || ctx.request_repaint_of(control_id());
-                run_with(&mut page, rect.w, rect.h, mode, &limits, &s, &p, &repaint)
+                run_with(&mut page, rect.w, rect.h, mode, dir, &limits, &s, &p, &repaint)
             }))
             .unwrap_or_else(|_| Err("The scrolling capture stopped unexpectedly.".to_string()));
             queue.lock().unwrap().push(Action::ScrollingFinished(res));
@@ -409,19 +413,20 @@ fn settle(page: &mut dyn Page, lp: &Loop) -> Result<RgbaImage, String> {
     Ok(prev)
 }
 
-/// The capture loop. `area_w` is the area width in points, to know the display scale.
-pub fn run(page: &mut dyn Page, area_w: u32, area_h: u32, mode: Mode, stop: &AtomicU8, progress: &Mutex<Progress>, repaint: &dyn Fn()) -> Result<Option<Outcome>, String> {
-    run_with(page, area_w, area_h, mode, &Limits::default(), stop, progress, repaint)
+/// The capture loop. `area_w` is the area width in points, to know the display scale. Scrolling up
+/// (`dir`) starts at the bottom of the page: ShotCraft scrolls the other way and the page grows upwards.
+pub fn run(page: &mut dyn Page, area_w: u32, area_h: u32, mode: Mode, dir: Direction, stop: &AtomicU8, progress: &Mutex<Progress>, repaint: &dyn Fn()) -> Result<Option<Outcome>, String> {
+    run_with(page, area_w, area_h, mode, dir, &Limits::default(), stop, progress, repaint)
 }
 
 /// `run` with the limits from the settings.
-pub fn run_with(page: &mut dyn Page, area_w: u32, area_h: u32, mode: Mode, limits: &Limits, stop: &AtomicU8, progress: &Mutex<Progress>, repaint: &dyn Fn()) -> Result<Option<Outcome>, String> {
+pub fn run_with(page: &mut dyn Page, area_w: u32, area_h: u32, mode: Mode, dir: Direction, limits: &Limits, stop: &AtomicU8, progress: &Mutex<Progress>, repaint: &dyn Fn()) -> Result<Option<Outcome>, String> {
     let lp = Loop { stop, progress, repaint, limits: *limits };
     let mut mode = mode;
     let mut lost = 0u32;
     let first = grab_retrying(page)?;
     let max_height = limits.max_rows(first.width());
-    let mut stitcher = Stitcher::with_max_height(max_height);
+    let mut stitcher = Stitcher::with_direction(max_height, dir);
     let scale = (first.width() as f32 / area_w as f32).max(1.0);
     stitcher.push(&first);
     let start_note = if mode == Mode::Auto { Note::ScrollingForYou } else { lp.progress.lock().unwrap().note };
@@ -454,7 +459,7 @@ pub fn run_with(page: &mut dyn Page, area_w: u32, area_h: u32, mode: Mode, limit
                 };
                 note = match stitcher.push(&frame) {
                     Push::First | Push::Unchanged => Note::ScrollYourself,
-                    Push::Revisited { .. } if stitcher.above_start() => Note::AboveStart,
+                    Push::Revisited { .. } if stitcher.above_start() => if dir == Direction::Up { Note::BelowStart } else { Note::AboveStart },
                     Push::Appended { .. } | Push::Revisited { .. } => Note::Capturing,
                     Push::Lost => {
                         lost += 1;
@@ -472,7 +477,7 @@ pub fn run_with(page: &mut dyn Page, area_w: u32, area_h: u32, mode: Mode, limit
                 if state == DONE || stitcher.is_capped() {
                     break;
                 }
-                if matches!(note, Note::Capturing | Note::AboveStart | Note::ScrollSlower | Note::SizeChanged) || stitcher.frames_used() <= 1 {
+                if matches!(note, Note::Capturing | Note::AboveStart | Note::BelowStart | Note::ScrollSlower | Note::SizeChanged) || stitcher.frames_used() <= 1 {
                     last_move = page.now();
                 } else if page.now().saturating_sub(last_move) >= IDLE_FINISH {
                     break;
@@ -489,7 +494,7 @@ pub fn run_with(page: &mut dyn Page, area_w: u32, area_h: u32, mode: Mode, limit
                 if state == DONE {
                     break;
                 }
-                if page.scroll(step).is_err() {
+                if page.scroll(dir.sign() * step).is_err() {
                     // Cannot scroll (no permission, no events): leave it to the user.
                     mode = Mode::Manual;
                     last_move = page.now();
@@ -551,7 +556,7 @@ pub fn run_with(page: &mut dyn Page, area_w: u32, area_h: u32, mode: Mode, limit
                             continue;
                         }
                         // Step back to the last frame that matched and try a shorter step.
-                        let _ = page.scroll(-step);
+                        let _ = page.scroll(-dir.sign() * step);
                         step = (step / 2).max(STEP_MIN);
                         undid = true;
                         note = Note::ScrollingForYou;
@@ -712,6 +717,8 @@ mod tests {
         ease: f32,
         /// The page has this many rows fixed at the top of the area (a sticky header).
         header: Option<RgbaImage>,
+        /// The page has this many rows fixed at the bottom of the area (a sticky footer).
+        footer: Option<RgbaImage>,
         grabs: u32,
         clock: Duration,
         /// Scroll events do nothing (no permission, or an app that ignores them).
@@ -725,7 +732,14 @@ mod tests {
 
     impl FakePage {
         fn new(page: RgbaImage, area_h: u32) -> FakePage {
-            FakePage { page, area_h, pos: 0, target: 0, ease: 1.0, header: None, grabs: 0, clock: Duration::ZERO, deaf: false, script: vec![], done_after: None, scrolls: vec![] }
+            FakePage { page, area_h, pos: 0, target: 0, ease: 1.0, header: None, footer: None, grabs: 0, clock: Duration::ZERO, deaf: false, script: vec![], done_after: None, scrolls: vec![] }
+        }
+
+        /// The page is scrolled to its bottom, where a capture that goes up starts.
+        fn at_bottom(mut self) -> FakePage {
+            self.pos = self.max_pos();
+            self.target = self.pos;
+            self
         }
 
         fn max_pos(&self) -> i32 {
@@ -752,6 +766,9 @@ mod tests {
             if let Some(h) = &self.header {
                 image::imageops::replace(&mut f, h, 0, 0);
             }
+            if let Some(ft) = &self.footer {
+                image::imageops::replace(&mut f, ft, 0, (self.area_h - ft.height()) as i64);
+            }
             Ok(f)
         }
 
@@ -777,10 +794,14 @@ mod tests {
     }
 
     fn capture(page: &mut FakePage, mode: Mode, stop: &AtomicU8) -> (Result<Option<Outcome>, String>, Mutex<Progress>) {
+        capture_dir(page, mode, Direction::Down, stop)
+    }
+
+    fn capture_dir(page: &mut FakePage, mode: Mode, dir: Direction, stop: &AtomicU8) -> (Result<Option<Outcome>, String>, Mutex<Progress>) {
         let p = progress(mode);
         let (w, h) = (page.page.width(), page.area_h);
         let repaints = AtomicU32::new(0);
-        let r = run(page, w, h, mode, stop, &p, &|| {
+        let r = run(page, w, h, mode, dir, stop, &p, &|| {
             repaints.fetch_add(1, Ordering::SeqCst);
         });
         assert!(repaints.load(Ordering::SeqCst) > 0, "the control is told to repaint");
@@ -806,6 +827,108 @@ mod tests {
         // Steps are half the area, never more than 90%.
         assert!(fake.scrolls.iter().all(|&s| s.abs() <= 180), "{:?}", fake.scrolls);
         assert_eq!(fake.scrolls[0], step_points(200));
+    }
+
+    #[test]
+    fn auto_scrolling_up_captures_a_page_from_its_bottom_to_its_top() {
+        let page = inbox(300, 90, 40);
+        let mut fake = FakePage::new(page.clone(), 200).at_bottom();
+        let stop = AtomicU8::new(RUNNING);
+        let (r, p) = capture_dir(&mut fake, Mode::Auto, Direction::Up, &stop);
+        let o = r.unwrap().unwrap();
+        assert_eq!(o.lost, 0);
+        assert!(!o.capped);
+        assert_eq!(o.img.h, page.height());
+        assert_eq!(o.img.px.as_slice(), page.as_raw().as_slice(), "stitched image is the page");
+        assert_eq!(p.lock().unwrap().note, Note::EndOfPage);
+        // It scrolls up by half the area at a time.
+        assert!(fake.scrolls.iter().all(|&s| s < 0 && s.abs() <= 180), "{:?}", fake.scrolls);
+        assert_eq!(fake.scrolls[0], -step_points(200));
+    }
+
+    #[test]
+    fn auto_scrolling_up_waits_for_smooth_scrolling_and_keeps_a_sticky_footer_once() {
+        let page = inbox(300, 70, 40);
+        let footer = {
+            let mut f = RgbaImage::from_pixel(300, 36, Rgba([30, 90, 200, 255]));
+            for x in (0..300).step_by(7) {
+                for y in 0..36 {
+                    f.put_pixel(x, y, Rgba([255, 255, 255, 255]));
+                }
+            }
+            f
+        };
+        let mut fake = FakePage::new(page.clone(), 200).at_bottom();
+        fake.ease = 0.35;
+        fake.footer = Some(footer.clone());
+        let stop = AtomicU8::new(RUNNING);
+        let (r, _) = capture_dir(&mut fake, Mode::Auto, Direction::Up, &stop);
+        let o = r.unwrap().unwrap();
+        assert_eq!(o.lost, 0);
+        let mut expected = whole(&page, page.height());
+        image::imageops::replace(&mut expected, &footer, 0, page.height() as i64 - 36);
+        assert_eq!(o.img.h, page.height());
+        assert_eq!(o.img.px.as_slice(), expected.as_raw().as_slice());
+    }
+
+    #[test]
+    fn auto_scrolling_up_from_the_top_of_a_page_hands_over_to_the_user() {
+        // The page is already at its top: nothing moves when scrolled up.
+        let mut fake = FakePage::new(inbox(300, 40, 40), 200);
+        let stop = Arc::new(AtomicU8::new(RUNNING));
+        fake.done_after = Some((40, stop.clone()));
+        let (r, p) = capture_dir(&mut fake, Mode::Auto, Direction::Up, &stop);
+        let o = r.unwrap().unwrap();
+        assert_eq!(o.frames, 1);
+        assert_eq!(p.lock().unwrap().mode, Mode::Manual);
+        assert!(fake.scrolls.iter().all(|&s| s < 0), "{:?}", fake.scrolls);
+    }
+
+    #[test]
+    fn auto_scrolling_up_stops_at_the_height_limit_keeping_the_bottom() {
+        let page = inbox(120, 2200, 10);
+        let mut fake = FakePage::new(page.clone(), 200).at_bottom();
+        let stop = AtomicU8::new(RUNNING);
+        let (r, p) = capture_dir(&mut fake, Mode::Auto, Direction::Up, &stop);
+        let o = r.unwrap().unwrap();
+        assert!(o.capped);
+        assert!(o.img.h <= crate::stitch::MAX_HEIGHT && o.img.h > crate::stitch::MAX_HEIGHT - 400);
+        let from = (page.height() - o.img.h) as usize * 120 * 4;
+        assert_eq!(o.img.px.as_slice(), &page.as_raw()[from..], "the last rows of the page are kept");
+        assert_eq!(p.lock().unwrap().note, Note::HeightLimit);
+    }
+
+    #[test]
+    fn manual_capture_going_up_follows_the_user_and_ends_by_itself() {
+        let page = inbox(300, 40, 40);
+        let top = page.height() as i32 - 200;
+        let mut fake = FakePage::new(page.clone(), 200);
+        // The user scrolls up for ten grabs, 60 rows each, then lets go.
+        fake.script = (0..10).map(|i| top - i * 60).collect();
+        let stop = AtomicU8::new(RUNNING);
+        let (r, p) = capture_dir(&mut fake, Mode::Manual, Direction::Up, &stop);
+        let o = r.unwrap().unwrap();
+        assert_eq!(o.img.h, 540 + 200);
+        let from = (page.height() - o.img.h) as usize * 300 * 4;
+        assert_eq!(o.img.px.as_slice(), &page.as_raw()[from..]);
+        assert_eq!(p.lock().unwrap().mode, Mode::Manual);
+    }
+
+    #[test]
+    fn manual_capture_going_back_down_is_flagged() {
+        let page = inbox(300, 40, 40);
+        // Started in the middle of the page, not at its bottom: going down again leaves the captured part.
+        let start = page.height() as i32 - 600;
+        let mut fake = FakePage::new(page, 200);
+        fake.script = vec![start, start - 60, start - 120, start - 60, start + 60];
+        let stop = Arc::new(AtomicU8::new(RUNNING));
+        fake.done_after = Some((5, stop.clone()));
+        let p = progress(Mode::Manual);
+        let notes = Mutex::new(Vec::new());
+        let r = run(&mut fake, 300, 200, Mode::Manual, Direction::Up, &stop, &p, &|| notes.lock().unwrap().push(p.lock().unwrap().note)).unwrap().unwrap();
+        assert_eq!(r.img.h, 120 + 200);
+        assert!(notes.lock().unwrap().contains(&Note::BelowStart), "{:?}", notes.lock().unwrap());
+        assert_eq!(Note::BelowStart.text(), "Below the start: not captured");
     }
 
     #[test]
@@ -929,7 +1052,7 @@ mod tests {
         let stop = Arc::new(AtomicU8::new(RUNNING));
         fake.done_after = Some((7, stop.clone()));
         let p = progress(Mode::Manual);
-        let r = run(&mut fake, 300, 200, Mode::Manual, &stop, &p, &|| {}).unwrap().unwrap();
+        let r = run(&mut fake, 300, 200, Mode::Manual, Direction::Down, &stop, &p, &|| {}).unwrap().unwrap();
         assert!(r.lost > 0);
         assert_eq!(p.lock().unwrap().note, Note::ScrollSlower);
         assert_eq!(r.img.h, 120 + 200);
@@ -972,7 +1095,7 @@ mod tests {
     fn capture_with(page: &mut FakePage, mode: Mode, limits: &Limits, stop: &AtomicU8) -> Outcome {
         let p = progress(mode);
         let (w, h) = (page.page.width(), page.area_h);
-        run_with(page, w, h, mode, limits, stop, &p, &|| {}).unwrap().unwrap()
+        run_with(page, w, h, mode, Direction::Down, limits, stop, &p, &|| {}).unwrap().unwrap()
     }
 
     #[test]
