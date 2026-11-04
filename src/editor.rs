@@ -438,10 +438,17 @@ impl App {
         }
     }
 
-    /// For the menus: whether typed text goes to the canvas (the text tool), and whether plain C
-    /// copies the colour of the selected area, as `keyboard` does, rather than picking a tool.
-    pub fn editor_key_state(&self) -> (bool, bool) {
-        (self.ed.editing_text, self.ed.tool == Tool::Select && self.ed.selection.is_some())
+    /// For the menus: which plain keys the editor itself takes now, so the Draw items that share a
+    /// letter with them step aside. Mirrors the conditions in `keyboard`.
+    pub fn editor_key_state(&self) -> crate::menu_model::MenuState {
+        let area = self.ed.selection.is_some();
+        crate::menu_model::MenuState {
+            typing: self.ed.editing_text,
+            c_copies_colour: self.ed.tool == Tool::Select && area,
+            area_keys: self.ed.tool == Tool::Select && self.ed.selected.is_none() && area,
+            has_area: area,
+            ..Default::default()
+        }
     }
 
     fn set_tool(&mut self, t: Tool) {

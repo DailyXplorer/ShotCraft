@@ -812,8 +812,8 @@ impl App {
         #[cfg(target_os = "macos")]
         if self.shell.is_some() {
             let focused = self.ctx.input_for(ViewportId::ROOT, |i| i.viewport().focused.unwrap_or(false));
-            let (typing, c_copies_colour) = self.editor_key_state();
-            let st = menu_model::MenuState { has_image: self.doc.is_some(), editor_visible: !self.hidden, editor_focused: focused, typing: typing || self.ctx.egui_wants_keyboard_input(), c_copies_colour };
+            let keys = self.editor_key_state();
+            let st = menu_model::MenuState { has_image: self.doc.is_some(), editor_visible: !self.hidden, editor_focused: focused, typing: keys.typing || self.ctx.egui_wants_keyboard_input(), ..keys };
             if let Some(s) = &mut self.shell {
                 s.set_state(st);
             }

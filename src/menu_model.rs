@@ -266,6 +266,11 @@ pub struct MenuState {
     pub typing: bool,
     /// With an area selected, plain C copies its average colour instead of picking the counter.
     pub c_copies_colour: bool,
+    /// With an area selected and nothing else, plain A (smart select) and B (blur the area) act on
+    /// the area instead of picking a tool.
+    pub area_keys: bool,
+    /// An area is selected: Q and W go to its corners.
+    pub has_area: bool,
 }
 
 /// Whether an item is enabled. Commands on the current image need one; the Close command needs the
@@ -277,7 +282,9 @@ pub fn item_enabled(id: &str, st: &MenuState) -> bool {
         "copy" | "save" | "saveas" | "pin" | "print" | "undo" | "redo" | "resetcrop" | "rasterize" | "zoomin" | "zoomout" | "zoomfit" | "zoom100" | "zoomsel" => st.has_image,
         "close" => st.has_image && st.editor_visible,
         _ if is_plain_letter_item(id) => {
-            st.has_image && st.editor_visible && st.editor_focused && !st.typing && !(st.c_copies_colour && id == format!("{TOOL_PREFIX}{}", Tool::Counter.name()))
+            let tool = |t: Tool| id == format!("{TOOL_PREFIX}{}", t.name());
+            let taken = (st.c_copies_colour && tool(Tool::Counter)) || (st.area_keys && (tool(Tool::Arrow) || tool(Tool::Blur))) || (!st.has_area && matches!(id, "seltl" | "selbr"));
+            st.has_image && st.editor_visible && st.editor_focused && !st.typing && !taken
         }
         _ => true,
     }
@@ -492,7 +499,7 @@ mod tests {
 
     #[test]
     fn draw_keys_need_a_visible_focused_editor_with_an_image_and_no_typing() {
-        let ok = MenuState { has_image: true, editor_visible: true, editor_focused: true, typing: false, c_copies_colour: false };
+        let ok = MenuState { has_image: true, editor_visible: true, editor_focused: true, typing: false, ..Default::default() };
         let id = "tool:Arrow";
         assert!(item_enabled(id, &ok));
         assert!(!item_enabled(id, &MenuState { has_image: false, ..ok }));
@@ -503,18 +510,29 @@ mod tests {
 
     #[test]
     fn with_an_area_selected_c_keeps_copying_the_colour() {
-        let ok = MenuState { has_image: true, editor_visible: true, editor_focused: true, typing: false, c_copies_colour: true };
+        let ok = MenuState { has_image: true, editor_visible: true, editor_focused: true, typing: false, c_copies_colour: true, ..Default::default() };
         assert!(!item_enabled("tool:Counter", &ok));
         assert!(item_enabled("tool:Oval", &ok));
     }
 
     #[test]
-    fn selection_corner_letters_follow_the_draw_rule() {
-        let ok = MenuState { has_image: true, editor_visible: true, editor_focused: true, typing: false, c_copies_colour: false };
+    fn selection_corner_letters_need_an_area_and_follow_the_draw_rule() {
+        let ok = MenuState { has_image: true, editor_visible: true, editor_focused: true, has_area: true, ..Default::default() };
         for id in ["seltl", "selbr"] {
             assert!(item_enabled(id, &ok));
             assert!(!item_enabled(id, &MenuState { typing: true, ..ok }));
+            assert!(!item_enabled(id, &MenuState { has_area: false, ..ok }));
         }
+    }
+
+    #[test]
+    fn with_only_an_area_selected_a_and_b_act_on_it() {
+        let ok = MenuState { has_image: true, editor_visible: true, editor_focused: true, area_keys: true, has_area: true, ..Default::default() };
+        assert!(!item_enabled("tool:Arrow", &ok));
+        assert!(!item_enabled("tool:Blur/Erase", &ok));
+        assert!(item_enabled("tool:Rectangle", &ok));
+        assert!(item_enabled("tool:Counter", &ok));
+        assert!(item_enabled("tool:Arrow", &MenuState { area_keys: false, ..ok }));
     }
 
     #[test]
