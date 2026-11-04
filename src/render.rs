@@ -2,7 +2,7 @@ use crate::model::*;
 use ab_glyph::{Font, FontVec, OutlineCurve, ScaleFont};
 use std::sync::Arc;
 use tiny_skia::{
-    BlendMode, Color, FillRule, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap, PixmapPaint, Rect, Stroke, StrokeDash, Transform,
+    BlendMode, Color, FillRule, LineCap, LineJoin, Paint, Path, PathBuilder, PathSegment, Pixmap, PixmapPaint, Rect, Stroke, StrokeDash, Transform,
 };
 
 pub struct Fonts {
@@ -511,7 +511,7 @@ fn hand_arrow_shaft(a: P, b: P, line: f32, n: &[f32; 100]) -> Curve {
 /// What an arrow paints, shared by drawing, bounds and hit tests so they cannot disagree.
 enum ArrowGeometry {
     Solid { outline: [P; 7], edge: f32 },
-    /// The width painted at each shaft point; heads run wing, tip, wing.
+    /// Solid shafts paint `widths`, one per point, and dashed ones `line`; heads run wing, tip, wing.
     Lines { shaft: Vec<P>, widths: Vec<f32>, heads: Vec<[P; 3]>, line: f32 },
 }
 
@@ -552,8 +552,7 @@ fn arrow_geometry(a: P, b: P, seed: u64, st: &Style) -> Option<ArrowGeometry> {
             let line = ((ARROW_WIDTHS[st.size as usize] * ARROW_HAND_GAIN + ARROW_HAND_BASE) * st.scale).min(len / ARROW_HAND_DIVISOR);
             let shaft = flatten(&[hand_arrow_shaft(a, b, line, &noise(seed))], BRUSH_SPACING * st.scale);
             let last = (shaft.len() - 1).max(1) as f32;
-            let taper = |i: usize| if st.dashed { line } else { line * (ARROW_HAND_STOP + (ARROW_HAND_END - ARROW_HAND_STOP) * i as f32 / last) };
-            let widths = (0..shaft.len()).map(taper).collect();
+            let widths = (0..shaft.len()).map(|i| line * (ARROW_HAND_STOP + (ARROW_HAND_END - ARROW_HAND_STOP) * i as f32 / last)).collect();
             ArrowGeometry::Lines { shaft, widths, heads: vec![arrow_head(b, ux, uy, branch, spread)], line }
         }
         ArrowStyle::Line | ArrowStyle::Double => {
@@ -656,15 +655,41 @@ fn inside(polygon: &[P], q: P) -> bool {
     edges.filter(|(s, e)| (s.y > q.y) != (e.y > q.y) && q.x < s.x + (q.y - s.y) / (e.y - s.y) * (e.x - s.x)).count() % 2 == 1
 }
 
+/// The dashes of a shaft as segments, from the same dashing that paints them.
+fn dash_segments(shaft: &[P], dash: &StrokeDash) -> Vec<[P; 2]> {
+    let mut pb = PathBuilder::new();
+    polyline(&mut pb, shaft);
+    let Some(dashed) = pb.finish().and_then(|path| path.dash(dash, 1.0)) else { return vec![] };
+    let mut last = p(0.0, 0.0);
+    let mut out = vec![];
+    for segment in dashed.segments() {
+        match segment {
+            PathSegment::MoveTo(q) => last = p(q.x, q.y),
+            PathSegment::LineTo(q) => {
+                out.push([last, p(q.x, q.y)]);
+                last = p(q.x, q.y);
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 /// True on anything the arrow paints, within `tol`. An arrow too short to paint stays selectable.
 pub fn arrow_hit(a: P, b: P, seed: u64, st: &Style, q: P, tol: f32) -> bool {
+    // Antialiasing paints up to a pixel past the line, however far the editor is zoomed in.
+    let tol = tol.max(1.0);
     match arrow_geometry(a, b, seed, st) {
         None => seg_dist(q, a, b) <= st.width() + tol,
         Some(ArrowGeometry::Solid { outline, edge }) => {
             inside(&outline, q) || outline.iter().zip(outline.iter().cycle().skip(1)).any(|(s, e)| on_stroke(q, *s, *e, edge, tol))
         }
         Some(ArrowGeometry::Lines { shaft, widths, heads, line }) => {
-            shaft.windows(2).zip(&widths).any(|(s, w)| on_stroke(q, s[0], s[1], *w, tol))
+            let on_shaft = match stroke(line, st.dashed).dash {
+                Some(dash) => dash_segments(&shaft, &dash).iter().any(|s| on_stroke(q, s[0], s[1], line, tol)),
+                None => shaft.windows(2).zip(&widths).any(|(s, w)| on_stroke(q, s[0], s[1], *w, tol)),
+            };
+            on_shaft
                 || heads.iter().flat_map(|h| h.windows(2)).any(|s| on_stroke(q, s[0], s[1], line, tol))
         }
     }
@@ -1745,14 +1770,14 @@ mod tests {
         for style in ARROWS {
             for size in 0..=SIZE_MAX {
                 for (scale, dashed) in [(1.0, false), (2.0, false), (1.0, true), (2.0, true)] {
-                    for (a, b) in [(p(300.0, 300.0), p(330.0, 300.0)), (p(300.0, 500.0), p(900.0, 250.0)), (p(900.0, 300.0), p(300.0, 400.0))] {
+                    for (a, b) in [(p(300.25, 300.25), p(330.25, 300.25)), (p(300.0, 500.0), p(900.0, 250.0)), (p(900.0, 300.0), p(300.0, 400.0))] {
                         let st = Style { size, scale, dashed, arrow: style, ..Style::default() };
                         let obj = arrow(a, b, st);
                         let area = bounds(&obj, &fonts);
                         for (x, y) in ink(&painted(&obj, &fonts, 1200, 800)) {
                             let q = p(x as f32 + 0.5, y as f32 + 0.5);
                             assert!(area.contains(q), "{style:?} size {size} scale {scale}: {x},{y} outside {area:?}");
-                            assert!(arrow_hit(a, b, 7, &st, q, 1.0), "{style:?} size {size} scale {scale}: {x},{y} cannot be clicked");
+                            assert!(arrow_hit(a, b, 7, &st, q, 0.05), "{style:?} size {size} scale {scale}: {x},{y} cannot be clicked");
                         }
                         let len = a.dist(b);
                         let beside = p((a.x + b.x) / 2.0 - (b.y - a.y) / len * 200.0, (a.y + b.y) / 2.0 + (b.x - a.x) / len * 200.0);
@@ -1770,6 +1795,34 @@ mod tests {
         let line = arrow_line(a.dist(b), &st);
         assert!(arrow_hit(a, b, 7, &st, p(1000.0, 500.0 + line / 2.0 + 10.0), 12.0), "inside the tolerance");
         assert!(!arrow_hit(a, b, 7, &st, p(1000.0, 500.0 + line / 2.0 + 13.0), 12.0), "past the line and the tolerance");
+    }
+
+    #[test]
+    fn clicks_in_a_wide_dash_gap_reach_what_is_behind() {
+        let st = Style { size: 7, scale: 2.0, dashed: true, arrow: ArrowStyle::Line, ..Style::default() };
+        let (a, b) = (p(100.0, 180.0), p(2100.0, 180.0));
+        assert!(arrow_hit(a, b, 7, &st, p(150.5, 180.5), 12.0), "on the first dash");
+        assert!(!arrow_hit(a, b, 7, &st, p(314.5, 180.5), 12.0), "in the first gap");
+    }
+
+    #[test]
+    fn thin_dashed_arrows_can_be_clicked_along_their_whole_length() {
+        for style in [ArrowStyle::Line, ArrowStyle::Double, ArrowStyle::HandDrawn] {
+            for size in 0..=2 {
+                let st = Style { size, dashed: true, arrow: style, ..Style::default() };
+                let (a, b) = (p(100.0, 180.0), p(700.0, 180.0));
+                for x in 100..700 {
+                    assert!(arrow_hit(a, b, 7, &st, p(x as f32, 180.0), 6.0), "{style:?} size {size}: gap at {x}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn faint_edge_pixels_stay_clickable_at_high_zoom() {
+        let st = Style { size: 0, scale: 1.0, arrow: ArrowStyle::Line, ..Style::default() };
+        let (a, b) = (p(100.25, 180.25), p(300.25, 180.25));
+        assert!(arrow_hit(a, b, 7, &st, p(200.5, 179.5), 6.0 / 64.0));
     }
 
     #[test]
@@ -1810,7 +1863,7 @@ mod tests {
             for (i, (x, y)) in ink(&painted(&obj, &fonts, 6200, 1000)).into_iter().enumerate() {
                 let q = p(x as f32 + 0.5, y as f32 + 0.5);
                 assert!(area.contains(q), "seed {seed}: {x},{y} outside {area:?}");
-                assert!(i % 97 != 0 || arrow_hit(a, b, seed, &st, q, 1.0), "seed {seed} size {size} dashed {dashed}: {x},{y} cannot be clicked");
+                assert!(i % 97 != 0 || arrow_hit(a, b, seed, &st, q, 0.05), "seed {seed} size {size} dashed {dashed}: {x},{y} cannot be clicked");
             }
         }
     }
