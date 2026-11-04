@@ -19,10 +19,10 @@ ShotCraft is written in Rust. It is an early version (0.1.2).
 
 Scrolling capture limits:
 
-* Automatic scrolling moves the mouse pointer into the area and sends wheel events, so do not touch the mouse or keyboard until it stops. It stops at the end of the page, at the height limit, on Done, or on `Esc`. Some apps ignore synthetic wheel events (terminals, some sandboxed windows); then the control says the page did not move and you scroll by hand. The permission has to be granted again after an update if macOS forgets the app's signature.
+* Automatic scrolling moves the mouse pointer into the area and sends wheel events, so do not touch the mouse or keyboard until it stops. It stops at the end of the page, at the height limit, on Done or `Return` (keep the result), or on `Esc` (discard it; in manual mode with something captured, press it twice). Some apps ignore synthetic wheel events (terminals, some sandboxed windows); then the control says the page did not move and you scroll by hand. The permission has to be granted again after an update if macOS forgets the app's signature.
 * By hand, scroll steadily: if the page jumps further than about 90% of the area between two grabs, or the content is blank or strongly repetitive, that step is dropped and the control says "Scroll a bit slower".
 * Content that animates inside the area (video, ads, a blinking cursor beside the text) can confuse the match; small changes are tolerated.
-* The image only grows in the direction of the capture (down, or up for Scrolling Capture (Up)): content on the other side of the point where you started is not added (the control says so), and scrolling back over what is already captured changes nothing. A blank band at the very top of the page is treated like a fixed header, which is harmless. The control window needs room next to the area on the same display. Esc is taken from other apps while a capture runs; if another ShotCraft hotkey already uses Esc, use the Cancel button.
+* The image only grows in the direction of the capture (down, or up for Scrolling Capture (Up)): content on the other side of the point where you started is not added (the control says so), and scrolling back over what is already captured changes nothing. A blank band at the very top of the page is treated like a fixed header, which is harmless. The control window needs room next to the area on the same display. Esc and Return are taken from other apps while a capture runs (Return only ends the capture, it never starts one), and given back when it ends; if another ShotCraft hotkey already uses Esc, use the Cancel button.
 * If the screen can't be captured for a moment (screen locked, permission prompt), the capture ends with what was stitched so far.
 * Very tall images are shown in the editor as several textures, so they open at the width of the window; export and copy use the full-resolution image.
 
@@ -44,8 +44,8 @@ The preview thumbnail sits in the bottom-right corner of the screen. Hover it fo
   * Spotlight (dims everything outside the selected areas)
   * Backdrop (gradient background with padding, shadow, inset, corner radii and aspect ratios)
 * Blur tool with four modes: Blur, Blur Text, Erase and Erase Text. The text modes detect text with the macOS Vision framework and cover only those areas.
-* Ruler: measure sizes in pixels or points (toggle with `P`). Hold `2` (or left/right arrows) for the horizontal span of similar pixels under the cursor, `1` (or up/down arrows) for the vertical span. You can also add rulers around a selected area.
-* Color helper: press `Tab` over a pixel to copy its color, `Shift+Tab` to copy the darkest color within 20 px, or `C` with a selection to copy its average color. Eight formats are available: HEX with or without `#`, RGB (0-255 or 0-1), UIColor (Swift), CSS `rgba()`, C# Color and Android.
+* Ruler: measure sizes in pixels or points (toggle with `P`). Hold `2` (or left/right arrows) for the horizontal span of similar pixels under the cursor, `1` (or up/down arrows) for the vertical span. The arrows measure only when nothing is selected (with a selection they move it) and the digits are ruler keys except with the Spotlight tool, where they set the darkness. You can also add rulers around a selected area.
+* Color helper: press `Tab` over a pixel to copy its color, `Shift+Tab` to copy the darkest color within 20 px, or `C` with a selection to copy its average color. Nine formats are available: HEX with or without `#`, RGB (0-255 or 0-1), UIColor (Swift), CSS `rgba()`, C# Color, Android and OKLCH.
 * Crop, Cut Out (removes a horizontal or vertical band and joins the rest), and Resize (25%, 33%, 50%, 1x, 2x, 4x, or an exact width and height). Resize cannot be undone.
 * Text recognition (OCR) on a selected area, using the macOS Vision framework. It also reads QR codes and other barcodes. The result is copied to the clipboard, optionally without line breaks.
 * Eight preset colors per tool plus a custom color picker, ten sizes, solid or dashed strokes.
@@ -96,10 +96,13 @@ In the editor:
 | `A` `T` `R` `O` `L` | Arrow, Text, Rectangle, Oval, Line |
 | `D` `H` `B` `S` `C` `M` `K` | Freehand, Highlighter, Blur, Spotlight, Counter, Magnifier, Backdrop |
 | `Cmd+O` | Recognize text or QR in a selected area |
-| `Cmd+C`, `Cmd+S`, `Cmd+Shift+S`, `Cmd+P` | Copy, Save, Save As, Pin to Screen |
+| `Cmd+C` or `Cmd+Shift+C`, `Cmd+S`, `Cmd+Shift+S`, `Cmd+P` | Copy the image, Save, Save As, Pin to Screen |
+| `Cmd+Shift+P` | Print |
 | `Cmd+Z`, `Cmd+Shift+Z` | Undo, Redo |
 | `Cmd++`, `Cmd+-`, `Cmd+0`, `Cmd+1` | Zoom in, zoom out, 100%, fit |
-| `Cmd+W` | Hide the editor |
+| `Cmd+W`, `Cmd+Opt+W` | Hide the editor, Close All (the editor and every pin) |
+| `Cmd+Shift+O`, `Cmd+Shift+V` | Open a file, open the image on the clipboard |
+| `Cmd+,`, `Cmd+Q` | Preferences, Quit |
 | `Del` | Delete the selected object, or erase the selected area |
 | `Esc` | Deselect, then copy and hide (copy on Esc is on by default) |
 | `Space` + drag | Move around the picture |
@@ -118,7 +121,7 @@ In the editor:
 | `Opt+Up`, `Opt+Down` | Freehand: smoother, rougher strokes |
 | `1` to `9` | Spotlight tool: how dark the surroundings are (10 to 90 percent) |
 
-Keyboard Shortcuts in the menu bar icon menu lists them in the app. `Cmd+,` opens Preferences from the editor.
+Keyboard Shortcuts in the menu bar icon menu lists them in the app. The menu's shortcuts only act on the editor while the editor is the window in front: with Preferences or a pin in front, `Cmd+W` closes that window and `Cmd+Z`, `Cmd+C` and the others go to its own fields. While a hotkey is being recorded in Preferences, every other shortcut (the menu's, and ShotCraft's own global hotkeys) is off, so any combination can be recorded; `Esc` cancels and `Del` clears.
 
 ## Privacy
 

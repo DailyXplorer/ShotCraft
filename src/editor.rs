@@ -695,6 +695,8 @@ impl App {
                             text.push_str(s);
                             d.version = next_version();
                         }
+                        // Cmd+C: the whole text (there is no text selection to copy from).
+                        egui::Event::Copy => crate::system::copy_text(text),
                         _ => {}
                     }
                 }
@@ -705,6 +707,12 @@ impl App {
             return;
         }
         for e in &events {
+            // Cmd+C reaches egui as `Event::Copy` and never as a key (egui-winit swallows the key event),
+            // so this is the only place the shortcut is seen.
+            if matches!(e, egui::Event::Copy) {
+                self.push(Action::Copy);
+                continue;
+            }
             let egui::Event::Key { key, pressed: true, modifiers, repeat, .. } = e else { continue };
             let (cmd, shift, alt) = (modifiers.command, modifiers.shift, modifiers.alt);
             let plain = !cmd && !modifiers.ctrl && !alt;
@@ -713,21 +721,20 @@ impl App {
             match key {
                 Key::Z if cmd && shift => self.push(Action::Redo),
                 Key::Z if cmd => self.push(Action::Undo),
-                Key::C if cmd => self.push(Action::Copy),
                 Key::S if cmd && shift => self.push(Action::SaveAs),
                 Key::S if cmd => self.push(Action::Save),
-                Key::P if cmd => self.push(Action::Pin),
+                Key::P if cmd && !shift && !alt => self.push(Action::Pin),
                 Key::O if cmd && !shift => self.set_tool(Tool::Ocr),
                 Key::Equals | Key::Plus if cmd => self.push(Action::ZoomIn),
                 Key::Minus if cmd => self.push(Action::ZoomOut),
-                Key::Num0 if cmd => self.push(Action::Zoom100),
-                Key::Num1 if cmd => self.push(Action::ZoomFit),
-                Key::Num2 if cmd => self.push(Action::ZoomSelection),
+                Key::Num0 if cmd && !shift && !alt => self.push(Action::Zoom100),
+                Key::Num1 if cmd && !shift && !alt => self.push(Action::ZoomFit),
+                Key::Num2 if cmd && !shift && !alt => self.push(Action::ZoomSelection),
                 Key::Q if plain && self.ed.selection.is_some() => self.push(Action::SelectionTopLeft),
                 Key::W if plain && self.ed.selection.is_some() => self.push(Action::SelectionBottomRight),
                 Key::A if plain && sel_keys => self.smart_select(),
                 Key::B if plain && sel_keys => self.blur_selection(),
-                Key::W if cmd => self.push(Action::Close),
+                Key::W if cmd && !shift && !alt => self.push(Action::Close),
                 Key::Tab => {
                     if let (Some(q), Some(d)) = (self.ed.hover, &self.doc) {
                         let c = if shift { render::darkest_near(&d.base, q) } else { self.ed.hover_color };
@@ -1853,16 +1860,22 @@ impl App {
     }
 
     /// Ruler keys: 2 and ←→ measure across, 1 and ↑↓ measure down.
-    /// `Some(true)` is horizontal. Arrows keep moving a selected object.
+    /// `Some(true)` is horizontal.
     fn ruler_axis(&self, ui: &Ui) -> Option<bool> {
         if self.ed.editing_text {
             return None;
         }
-        let arrows = self.ed.selected.is_none();
+        // Keys that already do something else are not ruler keys: the arrows move a selected object, a
+        // selected area or the crop frame; 1-9 set the Spotlight darkness; Cmd+1 and Cmd+2 are zoom.
+        let moves_something = self.ed.selected.is_some() || self.ed.selection.is_some() || (self.ed.tool == Tool::Crop && self.ed.crop_draft.is_some());
+        let digits = self.context_tool() != Tool::Spotlight;
         ui.input(|i| {
-            if i.key_down(Key::Num2) || (arrows && (i.key_down(Key::ArrowLeft) || i.key_down(Key::ArrowRight))) {
+            let m = i.modifiers;
+            let digits = digits && !m.command && !m.alt && !m.ctrl;
+            let arrows = !moves_something && !m.alt;
+            if (digits && i.key_down(Key::Num2)) || (arrows && (i.key_down(Key::ArrowLeft) || i.key_down(Key::ArrowRight))) {
                 Some(true)
-            } else if i.key_down(Key::Num1) || (arrows && (i.key_down(Key::ArrowUp) || i.key_down(Key::ArrowDown))) {
+            } else if (digits && i.key_down(Key::Num1)) || (arrows && (i.key_down(Key::ArrowUp) || i.key_down(Key::ArrowDown))) {
                 Some(false)
             } else {
                 None
@@ -2341,16 +2354,22 @@ impl App {
         if self.shortcuts_open {
             let mut open = true;
             egui::Window::new("Keyboard Shortcuts").open(&mut open).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
-                egui::Grid::new("keys").num_columns(2).spacing([24.0, 4.0]).show(ui, |ui| {
+                // The list is long: a small window scrolls it instead of cutting it off.
+                let room = (ctx.viewport_rect().height() - 90.0).max(120.0);
+                egui::ScrollArea::vertical().max_height(room).show(ui, |ui| egui::Grid::new("keys").num_columns(2).spacing([24.0, 4.0]).show(ui, |ui| {
                     for (k, v) in [
                         ("A T R O L", "Arrow, Text, Rectangle, Oval, Line"),
                         ("D H B S C M K", "Freehand, Highlighter, Blur, Spotlight, Counter, Magnifier, Backdrop"),
-                        ("Hold 2 or ←→ / 1 or ↑↓", "Ruler: horizontal / vertical span under the cursor"),
+                        ("Hold 2 or ←→ / 1 or ↑↓", "Ruler: horizontal / vertical span under the cursor (arrows: nothing selected)"),
                         ("Tab / ⇧Tab", "Copy pixel colour / darkest nearby colour"),
                         ("C (with a selection)", "Copy the average colour"),
                         ("Del", "Delete object or erase the selection"),
                         ("Esc", "Deselect, or copy and close"),
-                        ("⌘C  ⌘S  ⌘P", "Copy, Save, Pin to Screen"),
+                        ("⌘C  ⌘⇧C  ⌘S  ⌘⇧S  ⌘P", "Copy, Copy Image, Save, Save As, Pin to Screen"),
+                        ("⌘⇧P", "Print"),
+                        ("⌘W  ⌘⌥W", "Hide the editor, Close All"),
+                        ("⌘⇧O  ⌘⇧V", "Open a file, open the clipboard image"),
+                        ("⌘,  ⌘Q", "Preferences, Quit"),
                         ("⌘O", "Recognize Text or QR"),
                         ("⌘Z  ⌘⇧Z", "Undo, Redo"),
                         ("⌘+  ⌘-  ⌘0  ⌘1", "Zoom in, out, 100%, fit"),
@@ -2373,7 +2392,7 @@ impl App {
                         ui.label(v);
                         ui.end_row();
                     }
-                });
+                }));
             });
             self.shortcuts_open = open;
         }
@@ -2887,5 +2906,123 @@ mod style_memory_tests {
             // And a new launch reads it back.
             assert_eq!(Editor::from_settings(&app.settings).style_for(Tool::Rectangle).size, 3);
         });
+    }
+}
+
+#[cfg(test)]
+mod audit_integration {
+    use super::*;
+    use egui::{Event, Modifiers};
+    use std::sync::Arc;
+
+    fn rgba(w: u32, h: u32) -> Image {
+        Image { w, h, px: Arc::new(vec![255; (w * h * 4) as usize]) }
+    }
+
+    /// One frame; returns what the editor queued (not drained) and the ruler axis it sees.
+    fn frame(app: &mut App, ctx: &egui::Context, t: &mut f64, events: Vec<Event>, mods: Modifiers) -> (Vec<Action>, Option<bool>) {
+        *t += 0.05;
+        let mut input = egui::RawInput::default();
+        input.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, vec2(1100.0, 760.0)));
+        input.time = Some(*t);
+        input.events = vec![Event::ModifiersChanged(mods)];
+        input.events.extend(events);
+        let mut axis = None;
+        let mut out = ctx.run_ui(input, |ui| {
+            app.editor_ui(ui);
+            axis = app.ruler_axis(ui);
+        });
+        out.textures_delta.clear();
+        (std::mem::take(&mut *app.queue.lock().unwrap()), axis)
+    }
+
+    fn rig() -> (App, egui::Context, f64) {
+        let ctx = egui::Context::default();
+        crate::setup_fonts(&ctx);
+        ctx.set_pixels_per_point(2.0);
+        let mut app = App::headless(ctx.clone());
+        app.doc = Some(Doc::new(rgba(400, 300), 2.0));
+        let mut t = 0.0;
+        for _ in 0..3 {
+            frame(&mut app, &ctx, &mut t, vec![], Modifiers::NONE);
+        }
+        (app, ctx, t)
+    }
+
+    fn key(key: Key, pressed: bool, modifiers: Modifiers) -> Event {
+        Event::Key { key, physical_key: Some(key), pressed, repeat: false, modifiers }
+    }
+
+    /// AUDIT: egui-winit 0.36 turns Cmd+C into Event::Copy and drops the Key event, so `Key::C if cmd` is never reached on a Mac.
+    #[test]
+    fn audit_cmd_c_arrives_as_event_copy_and_copies_the_image() {
+        let (mut app, ctx, mut t) = rig();
+        let (queued, _) = frame(&mut app, &ctx, &mut t, vec![Event::Copy], Modifiers::COMMAND);
+        assert!(queued.iter().any(|a| matches!(a, Action::Copy)), "Event::Copy (what Cmd+C becomes under egui-winit) copies nothing");
+    }
+
+    /// AUDIT: the editor's own fallback maps Cmd+Shift+P to Pin although the menu says Print.
+    #[test]
+    fn audit_cmd_shift_p_is_print_not_pin() {
+        let (mut app, ctx, mut t) = rig();
+        let m = Modifiers { command: true, shift: true, mac_cmd: true, ..Modifiers::NONE };
+        let (queued, _) = frame(&mut app, &ctx, &mut t, vec![key(Key::P, true, m)], m);
+        assert!(!queued.iter().any(|a| matches!(a, Action::Pin)), "Cmd+Shift+P queued Pin");
+    }
+
+    /// AUDIT: Cmd+Opt+W (Close All) reaches the Close handler of the editor.
+    #[test]
+    fn audit_cmd_alt_w_is_not_plain_close() {
+        let (mut app, ctx, mut t) = rig();
+        let m = Modifiers { command: true, alt: true, mac_cmd: true, ..Modifiers::NONE };
+        let (queued, _) = frame(&mut app, &ctx, &mut t, vec![key(Key::W, true, m)], m);
+        assert!(!queued.iter().any(|a| matches!(a, Action::Close)), "Cmd+Opt+W queued Close");
+    }
+
+    /// AUDIT: arrows move the selection (#16) and also hold the ruler (#14-era code).
+    #[test]
+    fn audit_arrow_on_selection_does_not_also_measure() {
+        let (mut app, ctx, mut t) = rig();
+        app.ed.selection = Some(R { x0: 50.0, y0: 50.0, x1: 150.0, y1: 150.0 });
+        let (_, axis) = frame(&mut app, &ctx, &mut t, vec![key(Key::ArrowRight, true, Modifiers::NONE)], Modifiers::NONE);
+        assert_eq!(app.ed.selection.unwrap().x0, 51.0, "the arrow moved the selection");
+        assert_eq!(axis, None, "and the same key shows the horizontal ruler");
+    }
+
+    /// AUDIT: Cmd+1 (zoom to fit) / Cmd+2 (zoom to selection) also hold the ruler.
+    #[test]
+    fn audit_cmd_digits_do_not_hold_the_ruler() {
+        let (mut app, ctx, mut t) = rig();
+        let m = Modifiers { command: true, mac_cmd: true, ..Modifiers::NONE };
+        let (_, axis) = frame(&mut app, &ctx, &mut t, vec![key(Key::Num1, true, m)], m);
+        assert_eq!(axis, None, "Cmd+1 held shows the vertical ruler");
+    }
+
+    /// AUDIT: Spotlight's 1-9 keys (#16) are also the ruler keys.
+    #[test]
+    fn audit_spotlight_digits_do_not_hold_the_ruler() {
+        let (mut app, ctx, mut t) = rig();
+        app.set_tool(Tool::Spotlight);
+        let (_, axis) = frame(&mut app, &ctx, &mut t, vec![key(Key::Num2, true, Modifiers::NONE)], Modifiers::NONE);
+        assert_eq!(axis, None, "'2' sets the spotlight darkness and also shows the horizontal ruler");
+    }
+}
+
+#[cfg(test)]
+mod shortcuts_window_tests {
+    /// The Keyboard Shortcuts window (every menu shortcut is in it) is drawn; with SHOTCRAFT_SHOTS set
+    /// the picture is written there to look at.
+    #[test]
+    fn the_shortcuts_window_lists_the_menu_shortcuts_and_fits_a_small_editor() {
+        let size = (1100.0, 480.0);
+        let img = crate::headless::with_rig(|rig| {
+            let mut app = rig.app();
+            app.shortcuts_open = true;
+            rig.render_editor(&mut app, size, 2.0, true)
+        });
+        if let Ok(dir) = std::env::var("SHOTCRAFT_SHOTS") {
+            crate::headless::save_png(&img, &std::path::Path::new(&dir).join("shortcuts-window.png"));
+        }
+        assert_eq!((img.w, img.h), (2200, 960));
     }
 }

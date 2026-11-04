@@ -77,6 +77,8 @@ pub enum Action {
     /// Scrolling capture that starts at the bottom of the page and goes up.
     ScrollingCaptureUp,
     ScrollingCancel,
+    /// Return during a scrolling capture: ends it. Unlike `ScrollingCapture` it never starts one.
+    ScrollingFinish,
     ScrollingArea(Result<Option<model::R>, String>),
     ScrollingFinished(Result<Option<scroll::Outcome>, String>),
     OcrCaptured(Result<Option<Captured>, String>),
@@ -164,6 +166,8 @@ pub struct App {
     open_at_start: Option<PathBuf>,
     started: bool,
     quitting: bool,
+    /// A hotkey is being recorded in Preferences: menu key equivalents and global hotkeys are off.
+    keys_suspended: bool,
     /// The editor window is not on screen. True from launch until the user asks for it.
     pub hidden: bool,
     /// The editor is on screen, transparent, and will be hidden again: eframe's first paint shows it.
@@ -235,6 +239,7 @@ impl App {
             open_at_start: None,
             started: true,
             quitting: false,
+            keys_suspended: false,
             hidden: false,
             startup_hide: false,
             waking: false,
@@ -274,6 +279,7 @@ impl App {
             open_at_start,
             started: false,
             quitting: false,
+            keys_suspended: false,
             hidden: !show_at_start,
             startup_hide: false,
             waking: false,
@@ -495,6 +501,23 @@ impl App {
         self.wake_ui();
         self.show_without_focus(scroll::CONTROL_TITLE);
         self.ctx.request_repaint();
+    }
+
+    /// Return: ends the running scrolling capture and gives Return back at once. With no capture
+    /// running (a press that was already queued when the capture ended, or a double press) nothing
+    /// happens: it must never open the area picker of a new capture.
+    fn finish_scrolling(&mut self) {
+        if let Some(s) = &self.scroll {
+            s.finish();
+        }
+        self.release_enter();
+    }
+
+    fn release_enter(&mut self) {
+        #[cfg(target_os = "macos")]
+        if let Some(s) = &mut self.shell {
+            s.release_enter();
+        }
     }
 
     fn scrolling_finished(&mut self, res: Result<Option<scroll::Outcome>, String>) {
@@ -745,6 +768,7 @@ impl App {
                     s.press_escape();
                 }
             }
+            Action::ScrollingFinish => self.finish_scrolling(),
             Action::ScrollingArea(res) => self.scrolling_area(res),
             Action::ScrollingFinished(res) => self.scrolling_finished(res),
             Action::OpenClipboard => match system::clipboard_image() {
@@ -848,6 +872,22 @@ impl App {
         #[cfg(target_os = "macos")]
         if let Some(s) = &mut self.shell {
             s.sync(&self.settings);
+        }
+    }
+
+    /// Switches the menu key equivalents and the global hotkeys off while Preferences records a
+    /// shortcut, and back on afterwards.
+    pub fn set_keys_suspended(&mut self, on: bool) {
+        if self.keys_suspended == on {
+            return;
+        }
+        self.keys_suspended = on;
+        #[cfg(target_os = "macos")]
+        if let Some(s) = &mut self.shell {
+            let refused = s.suspend_keys(on, &self.settings);
+            if !on {
+                self.prefs.lock().unwrap().set_refused(refused);
+            }
         }
     }
 
@@ -1122,7 +1162,7 @@ fn pin_window(ui: &mut egui::Ui, pin: &mut Pin, queue: &Queue) {
     if resp.double_clicked() {
         send(&ctx, queue, Action::PinEdit(img.clone(), scale));
     }
-    if close || ui.input(|i| i.viewport().close_requested() || i.key_pressed(egui::Key::Escape)) {
+    if close || ui.input(|i| i.viewport().close_requested() || i.key_pressed(egui::Key::Escape) || (i.modifiers.command && i.key_pressed(egui::Key::W))) {
         pin.open = false;
         ctx.request_repaint_of(ViewportId::ROOT);
     }
@@ -1284,4 +1324,21 @@ fn main() -> eframe::Result {
     #[cfg(target_os = "macos")]
     let options = eframe::NativeOptions { event_loop_builder: Some(app_mode::event_loop_hook(show_at_start)), ..options };
     eframe::run_native("ShotCraft", options, Box::new(move |cc| Ok(Box::new(App::new(cc, screenshot, show_at_start, open)))))
+}
+
+#[cfg(test)]
+mod return_key_tests {
+    use super::*;
+
+    /// Return is a global hotkey for the length of a scrolling capture. A press that is processed
+    /// after the capture ended (it was queued before, or Return was pressed twice) must not open
+    /// the area picker of a new capture.
+    #[test]
+    fn return_without_a_running_capture_starts_nothing() {
+        let mut app = App::headless(egui::Context::default());
+        assert!(app.scroll.is_none());
+        app.handle(Action::ScrollingFinish);
+        assert!(!app.busy, "a new scrolling capture was started");
+        assert!(app.scroll.is_none());
+    }
 }

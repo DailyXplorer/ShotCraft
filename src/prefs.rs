@@ -29,6 +29,12 @@ pub struct PrefsState {
 }
 
 impl PrefsState {
+    /// The hotkeys macOS refused the last time they were registered.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn set_refused(&mut self, refused: Vec<HotkeyAction>) {
+        self.refused = refused;
+    }
+
     pub fn shared(settings: Settings, queue: Queue) -> Arc<Mutex<PrefsState>> {
         Arc::new(Mutex::new(PrefsState {
             open: false,
@@ -43,6 +49,53 @@ impl PrefsState {
             confirm_reset: false,
         }))
     }
+}
+
+/// What a frame of input means while a shortcut is being recorded.
+#[derive(Debug, PartialEq)]
+enum Recorded {
+    Cancel,
+    Clear,
+    Set(String),
+}
+
+/// The first thing in `events` that ends the recording. `modifiers` are the ones held now: the
+/// copy, cut and paste events carry none of their own. On a Mac egui-winit turns Cmd+C, Cmd+X and
+/// Cmd+V into those events and sends no key event, so they are read back as C, X and V.
+fn recorded(events: &[egui::Event], modifiers: egui::Modifiers) -> Option<Recorded> {
+    for e in events {
+        let (key, modifiers) = match e {
+            egui::Event::Key { key, pressed: true, modifiers, .. } => (*key, *modifiers),
+            egui::Event::Copy => (Key::C, modifiers),
+            egui::Event::Cut => (Key::X, modifiers),
+            egui::Event::Paste(_) => (Key::V, modifiers),
+            _ => continue,
+        };
+        if key == Key::Escape {
+            return Some(Recorded::Cancel);
+        }
+        if key == Key::Backspace || key == Key::Delete {
+            return Some(Recorded::Clear);
+        }
+        let Some(code) = key_code(key) else { continue };
+        let mut parts = vec![];
+        if modifiers.ctrl {
+            parts.push("ctrl");
+        }
+        if modifiers.alt {
+            parts.push("alt");
+        }
+        if modifiers.shift {
+            parts.push("shift");
+        }
+        if modifiers.mac_cmd || modifiers.command {
+            parts.push("super");
+        }
+        if !parts.is_empty() {
+            return Some(Recorded::Set(format!("{}+{}", parts.join("+"), code)));
+        }
+    }
+    None
 }
 
 fn key_code(k: Key) -> Option<String> {
@@ -79,14 +132,16 @@ fn row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
 
 impl App {
     pub fn prefs_ui(&mut self, ctx: &egui::Context) {
-        let (edited, open, focus) = {
+        let (edited, open, focus, recording) = {
             let mut p = self.prefs.lock().unwrap();
             let edited = std::mem::take(&mut p.edited).then(|| p.settings.clone());
             if edited.is_none() {
                 p.settings = self.settings.clone();
             }
-            (edited, p.open, std::mem::take(&mut p.focus))
+            (edited, p.open, std::mem::take(&mut p.focus), p.open && p.recording.is_some())
         };
+        // While a shortcut is recorded, the menus' key equivalents and the global hotkeys would eat it.
+        self.set_keys_suspended(recording);
         if let Some(new) = edited {
             self.apply_settings(new);
         }
@@ -102,12 +157,25 @@ impl App {
         let shared = self.prefs.clone();
         crate::show_window(ctx, vid, builder, move |ui| {
             let mut p = shared.lock().unwrap();
+            let was_recording = p.recording.is_some();
             if ui.input(|i| i.viewport().close_requested()) {
                 p.open = false;
                 p.recording = None;
                 ui.ctx().request_repaint_of(ViewportId::ROOT);
             }
+            // Recording ends when the window loses the keyboard: the keys would go somewhere else.
+            if ui.input(|i| i.viewport().focused == Some(false)) {
+                p.recording = None;
+            }
+            if ui.input(|i| i.modifiers.command && i.key_pressed(Key::W)) && !was_recording {
+                p.open = false;
+                ui.ctx().request_repaint_of(ViewportId::ROOT);
+            }
             p.body(ui);
+            if p.recording.is_some() != was_recording {
+                // The app switches its key equivalents and hotkeys from its own update.
+                ui.ctx().request_repaint_of(ViewportId::ROOT);
+            }
         });
     }
 
@@ -280,35 +348,18 @@ impl PrefsState {
 
     fn prefs_hotkeys(&mut self, ui: &mut Ui, dim: Color32) {
         if let Some(a) = self.recording {
-            let events = ui.input(|i| i.events.clone());
-            for e in events {
-                if let egui::Event::Key { key, pressed: true, modifiers, .. } = e {
-                    if key == Key::Escape {
-                        self.recording = None;
-                    } else if key == Key::Backspace || key == Key::Delete {
-                        self.settings.set_hotkey(a, None);
-                        self.recording = None;
-                    } else if let Some(code) = key_code(key) {
-                        let mut parts = vec![];
-                        if modifiers.ctrl {
-                            parts.push("ctrl");
-                        }
-                        if modifiers.alt {
-                            parts.push("alt");
-                        }
-                        if modifiers.shift {
-                            parts.push("shift");
-                        }
-                        if modifiers.mac_cmd || modifiers.command {
-                            parts.push("super");
-                        }
-                        if !parts.is_empty() {
-                            let s = format!("{}+{}", parts.join("+"), code);
-                            self.settings.set_hotkey(a, Some(s));
-                            self.recording = None;
-                        }
-                    }
+            let (events, modifiers) = ui.input(|i| (i.events.clone(), i.modifiers));
+            match recorded(&events, modifiers) {
+                Some(Recorded::Cancel) => self.recording = None,
+                Some(Recorded::Clear) => {
+                    self.settings.set_hotkey(a, None);
+                    self.recording = None;
                 }
+                Some(Recorded::Set(keys)) => {
+                    self.settings.set_hotkey(a, Some(keys));
+                    self.recording = None;
+                }
+                None => {}
             }
         }
         ui.label(egui::RichText::new("Reassign default shortcuts").strong().size(12.0));
@@ -471,6 +522,32 @@ mod tests {
         let tabs = render_tabs("prefs", state());
         assert!(tabs.iter().all(|t| t.px.iter().any(|&b| b != tabs[0].px[0])));
         assert!(tabs[0].px != tabs[1].px && tabs[1].px != tabs[2].px);
+    }
+
+    fn key(key: Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key { key, physical_key: Some(key), pressed: true, repeat: false, modifiers }
+    }
+
+    fn cmd() -> egui::Modifiers {
+        egui::Modifiers { command: true, mac_cmd: true, ..egui::Modifiers::NONE }
+    }
+
+    #[test]
+    fn a_key_with_modifiers_is_recorded() {
+        let m = egui::Modifiers { shift: true, ..cmd() };
+        assert_eq!(recorded(&[key(Key::Num2, m)], m), Some(Recorded::Set("shift+super+Digit2".into())));
+        assert_eq!(recorded(&[key(Key::A, egui::Modifiers::NONE)], egui::Modifiers::NONE), None, "a bare letter is no hotkey");
+        assert_eq!(recorded(&[key(Key::Escape, egui::Modifiers::NONE)], egui::Modifiers::NONE), Some(Recorded::Cancel));
+        assert_eq!(recorded(&[key(Key::Backspace, egui::Modifiers::NONE)], egui::Modifiers::NONE), Some(Recorded::Clear));
+    }
+
+    /// egui-winit sends Cmd+C / Cmd+X / Cmd+V as copy, cut and paste events and no key event.
+    #[test]
+    fn cmd_c_x_v_arrive_as_clipboard_events_and_are_still_recorded() {
+        let shift = egui::Modifiers { shift: true, ..cmd() };
+        assert_eq!(recorded(&[egui::Event::Copy], cmd()), Some(Recorded::Set("super+KeyC".into())));
+        assert_eq!(recorded(&[egui::Event::Cut], shift), Some(Recorded::Set("shift+super+KeyX".into())));
+        assert_eq!(recorded(&[egui::Event::Paste("x".into())], cmd()), Some(Recorded::Set("super+KeyV".into())));
     }
 
     #[test]

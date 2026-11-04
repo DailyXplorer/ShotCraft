@@ -27,12 +27,6 @@ pub enum Native {
     Hide,
     HideOthers,
     ShowAll,
-    Cut,
-    Copy,
-    Paste,
-    PasteAndMatchStyle,
-    Delete,
-    SelectAll,
     FullScreen,
 }
 
@@ -129,12 +123,17 @@ fn edit_menu() -> Entry {
             item("resetcrop", "Reset Crop", None),
             item("rasterize", "Rasterize (Merge) Image", None),
             Entry::Sep,
-            native(Native::Cut),
-            native(Native::Copy),
-            native(Native::Paste),
-            native(Native::PasteAndMatchStyle),
-            native(Native::Delete),
-            native(Native::SelectAll),
+            // Cut, Copy, Paste, Paste and Match Style, Delete and Select All are ordinary items, not
+            // AppKit's predefined ones. Those send `copy:`, `paste:`... down the responder chain, the
+            // window's view answers none of them, and their ⌘C / ⌘X / ⌘V / ⌘A would be eaten by the menu
+            // before egui ever sees the key. Copy copies the image; the others have nothing to act on
+            // in the editor, so they stay off and leave their keys to the text fields.
+            item("cut", "Cut", None),
+            item("editcopy", "Copy", key(CMD, "KeyC")),
+            item("paste", "Paste", None),
+            item("pastestyle", "Paste and Match Style", None),
+            item("editdelete", "Delete", None),
+            item("selectall", "Select All", None),
         ],
     }
 }
@@ -252,7 +251,7 @@ pub fn hotkey_of_item(id: &str) -> Option<HotkeyAction> {
 
 /// Whether the state of the editor decides if an item is enabled (see `item_enabled`).
 pub fn is_stateful(id: &str) -> bool {
-    is_plain_letter_item(id) || matches!(id, "zoomsel" | "copy" | "save" | "saveas" | "pin" | "print" | "undo" | "redo" | "resetcrop" | "rasterize" | "zoomin" | "zoomout" | "zoomfit" | "zoom100" | "close")
+    is_plain_letter_item(id) || matches!(id, "zoomsel" | "copy" | "editcopy" | "cut" | "paste" | "pastestyle" | "editdelete" | "selectall" | "save" | "saveas" | "pin" | "print" | "undo" | "redo" | "resetcrop" | "rasterize" | "zoomin" | "zoomout" | "zoomfit" | "zoom100" | "close")
 }
 
 /// What decides which menu items can act.
@@ -274,19 +273,35 @@ pub struct MenuState {
     pub has_area: bool,
 }
 
-/// Whether an item is enabled. Commands on the current image need one; the Close command needs the
-/// editor on screen. The Draw items carry plain letters and AppKit runs a key equivalent before the
-/// window sees the key, so they are switched off unless the editor has the keyboard and nothing is
-/// taking text, and the letters reach whoever is typing. A disabled item lets the key through.
+/// Whether an item of the menu bar is enabled. The menu bar is there for its key equivalents, and
+/// AppKit runs those before the window sees the key, whichever of the app's windows has the keyboard.
+/// So a command on the current image is enabled only while the editor itself is the key window:
+/// with Preferences, a pin or the thumbnail in front, ⌘W, ⌘Z and the others must reach that window,
+/// not the picture behind it. The Draw items carry plain letters, so they also step aside while
+/// something takes typed text, and Copy (⌘C) does too: the text field copies its own text, which
+/// arrives as a copy event. A disabled item lets the key through.
 pub fn item_enabled(id: &str, st: &MenuState) -> bool {
+    let editor_key = st.has_image && st.editor_visible && st.editor_focused;
     match id {
-        "copy" | "save" | "saveas" | "pin" | "print" | "undo" | "redo" | "resetcrop" | "rasterize" | "zoomin" | "zoomout" | "zoomfit" | "zoom100" | "zoomsel" => st.has_image,
-        "close" => st.has_image && st.editor_visible,
+        "copy" | "save" | "saveas" | "pin" | "print" | "undo" | "redo" | "resetcrop" | "rasterize" | "zoomin" | "zoomout" | "zoomfit" | "zoom100" | "zoomsel" | "close" => editor_key,
+        "editcopy" => editor_key && !st.typing,
+        // Nothing in the editor to cut, paste or select: the keys belong to the text fields.
+        "cut" | "paste" | "pastestyle" | "editdelete" | "selectall" => false,
         _ if is_plain_letter_item(id) => {
             let tool = |t: Tool| id == format!("{TOOL_PREFIX}{}", t.name());
             let taken = (st.c_copies_colour && tool(Tool::Counter)) || (st.area_keys && (tool(Tool::Arrow) || tool(Tool::Blur))) || (!st.has_area && matches!(id, "seltl" | "selbr"));
-            st.has_image && st.editor_visible && st.editor_focused && !st.typing && !taken
+            editor_key && !st.typing && !taken
         }
+        _ => true,
+    }
+}
+
+/// Whether an item of the status menu is enabled. It is clicked, not typed, and clicking it takes
+/// the keyboard away from the editor, so only the image and the window being on screen count.
+pub fn tray_item_enabled(id: &str, st: &MenuState) -> bool {
+    match id {
+        "close" => st.has_image && st.editor_visible,
+        _ if is_stateful(id) => item_enabled(id, &MenuState { editor_visible: true, editor_focused: true, typing: false, ..*st }),
         _ => true,
     }
 }
@@ -355,7 +370,7 @@ mod tests {
         let expected = [
             "ShotCraft [About ShotCraft | - | Preferences… | - | Services | - | Hide ShotCraft | HideOthers | ShowAll | - | Quit ShotCraft]",
             "File [Copy Image | Save Image | Save Image As | Pin to Screen | Print… | - | Open File | Open From Clipboard | - | Close | Close All]",
-            "Edit [Undo | Redo | Reset Crop | Rasterize (Merge) Image | - | Cut | Copy | Paste | PasteAndMatchStyle | Delete | SelectAll]",
+            "Edit [Undo | Redo | Reset Crop | Rasterize (Merge) Image | - | Cut | Copy | Paste | Paste and Match Style | Delete | Select All]",
             "Draw [Arrow | Text | Rectangle | Freehand Drawing | Magnifier | Highlighter | Blur | Spotlight | Counter | Oval | Line | Add Capture | - | Snap to Objects | Snap to Similar Objects]",
             "Zoom [Zoom In | Zoom Out | - | Zoom To Fit | Zoom To 100% | - | Zoom To Selection | Selection Top Left | Selection Bottom Right | - | Enter Full Screen]",
             "Help [Keyboard Shortcuts]",
@@ -477,11 +492,13 @@ mod tests {
         }
     }
 
+    const CURRENT_IMAGE: [&str; 15] = ["copy", "editcopy", "save", "saveas", "pin", "print", "undo", "redo", "resetcrop", "rasterize", "zoomin", "zoomout", "zoomfit", "zoom100", "zoomsel"];
+
     #[test]
     fn current_image_commands_need_an_image() {
-        let none = MenuState::default();
-        let img = MenuState { has_image: true, ..Default::default() };
-        for id in ["copy", "save", "saveas", "pin", "print", "undo", "redo", "resetcrop", "rasterize", "zoomin", "zoomfit"] {
+        let none = MenuState { editor_visible: true, editor_focused: true, ..Default::default() };
+        let img = MenuState { has_image: true, ..none };
+        for id in CURRENT_IMAGE.into_iter().chain(["close"]) {
             assert!(!item_enabled(id, &none), "{id}");
             assert!(item_enabled(id, &img), "{id}");
         }
@@ -490,12 +507,62 @@ mod tests {
         }
     }
 
+    /// With Preferences, a pin or the thumbnail in front, the menu's keys (Cmd+W, Cmd+Z...) must pass
+    /// through to that window instead of acting on the picture in the editor behind it.
     #[test]
-    fn close_needs_the_editor_on_screen() {
-        let hidden = MenuState { has_image: true, ..Default::default() };
-        assert!(!item_enabled("close", &hidden));
-        assert!(item_enabled("close", &MenuState { editor_visible: true, ..hidden }));
-        assert!(!item_enabled("close", &MenuState { editor_visible: true, has_image: false, ..hidden }));
+    fn current_image_commands_need_the_editor_to_be_the_key_window() {
+        let editor = MenuState { has_image: true, editor_visible: true, editor_focused: true, ..Default::default() };
+        let other_window = MenuState { editor_focused: false, ..editor };
+        let hidden = MenuState { editor_visible: false, editor_focused: false, ..editor };
+        for id in CURRENT_IMAGE.into_iter().chain(["close"]) {
+            assert!(item_enabled(id, &editor), "{id}");
+            assert!(!item_enabled(id, &other_window), "{id} acts on the editor while another window has the keyboard");
+            assert!(!item_enabled(id, &hidden), "{id}");
+        }
+        // The app-wide commands stay.
+        for id in ["quit", "prefs", "open", "clipboard", "closeall"] {
+            assert!(item_enabled(id, &other_window), "{id}");
+        }
+    }
+
+    /// Cmd+C while a text is typed is the text's own copy; the menu must not take the key.
+    #[test]
+    fn edit_copy_steps_aside_while_typing_and_the_dead_edit_items_stay_off() {
+        let editor = MenuState { has_image: true, editor_visible: true, editor_focused: true, ..Default::default() };
+        assert!(item_enabled("editcopy", &editor));
+        assert!(!item_enabled("editcopy", &MenuState { typing: true, ..editor }));
+        for id in ["cut", "paste", "pastestyle", "editdelete", "selectall"] {
+            assert!(!item_enabled(id, &editor), "{id}: its key must reach the text fields");
+            assert!(is_stateful(id));
+        }
+        let keys: Vec<_> = {
+            fn walk(items: &[Entry], out: &mut Vec<String>) {
+                for e in items {
+                    match e {
+                        Entry::Item { id, key: Some(_), .. } => out.push(id.clone()),
+                        Entry::Sub { items, .. } => walk(items, out),
+                        _ => {}
+                    }
+                }
+            }
+            let mut v = vec![];
+            walk(&menu_bar(), &mut v);
+            v
+        };
+        assert!(keys.contains(&"editcopy".to_string()));
+        assert!(!keys.iter().any(|k| ["cut", "paste", "pastestyle", "editdelete", "selectall"].contains(&k.as_str())));
+    }
+
+    #[test]
+    fn the_status_menu_commands_follow_the_image_not_the_keyboard() {
+        let st = MenuState { has_image: true, ..Default::default() };
+        for id in ["undo", "redo", "resetcrop", "rasterize", "saveas", "print"] {
+            assert!(tray_item_enabled(id, &st), "{id}");
+            assert!(!tray_item_enabled(id, &MenuState::default()), "{id}");
+        }
+        assert!(!tray_item_enabled("close", &st));
+        assert!(tray_item_enabled("close", &MenuState { editor_visible: true, ..st }));
+        assert!(tray_item_enabled("area", &MenuState::default()));
     }
 
     #[test]
@@ -571,5 +638,65 @@ mod tests {
     #[test]
     fn page_orientation_in_the_paper_size_does_not_matter() {
         assert_eq!(print_layout((2400, 1200), 2.0, (842.0, 595.0), 36.0), print_layout((2400, 1200), 2.0, A4, 36.0));
+    }
+}
+
+#[cfg(test)]
+mod audit_integration {
+    use super::*;
+
+    fn walk(items: &[Entry], out: &mut Vec<(String, Key)>) {
+        for e in items {
+            match e {
+                Entry::Item { id, key: Some(k), .. } => out.push((id.clone(), *k)),
+                Entry::Sub { items, .. } => walk(items, out),
+                _ => {}
+            }
+        }
+    }
+
+    fn pretty(k: Key) -> String {
+        let mut s = String::new();
+        if k.mods & CMD != 0 { s += "Cmd+"; }
+        if k.mods & ALT != 0 { s += "Opt+"; }
+        if k.mods & SHIFT != 0 { s += "Shift+"; }
+        s + k.code.trim_start_matches("Key").trim_start_matches("Digit")
+    }
+
+    /// AUDIT: no two menu items share a key equivalent.
+    #[test]
+    fn audit_no_duplicate_key_equivalents() {
+        let mut all = vec![];
+        walk(&menu_bar(), &mut all);
+        let mut seen: std::collections::HashMap<(u8, &str), String> = Default::default();
+        let mut dup = vec![];
+        for (id, k) in &all {
+            if let Some(prev) = seen.insert((k.mods, k.code), id.clone()) {
+                dup.push(format!("{prev} and {id}: {}", pretty(*k)));
+            }
+        }
+        assert!(dup.is_empty(), "{dup:?}");
+    }
+
+    /// AUDIT: README documents every menu shortcut.
+    #[test]
+    fn audit_readme_lists_menu_shortcuts() {
+        let readme = include_str!("../README.md");
+        let mut all = vec![];
+        walk(&menu_bar(), &mut all);
+        let missing: Vec<_> = all
+            .iter()
+            .filter(|(id, k)| k.mods != 0 && !readme.contains(&pretty(*k).replace("Equal", "+").replace("Comma", ",").replace("Minus", "-")) && !id.starts_with("tool:"))
+            .map(|(id, k)| format!("{id} {}", pretty(*k)))
+            .collect();
+        assert!(missing.is_empty(), "menu shortcuts missing from README: {missing:?}");
+        assert!(readme.contains("Print") && readme.contains("Close All"), "README has no Print / Close All");
+    }
+
+    /// AUDIT: README says eight colour formats.
+    #[test]
+    fn audit_readme_colour_format_count() {
+        let readme = include_str!("../README.md");
+        assert!(readme.contains("Nine formats") || readme.contains("OKLCH"), "README says 'Eight formats' but COLOR_FORMATS has {}", crate::color::COLOR_FORMATS.len());
     }
 }
