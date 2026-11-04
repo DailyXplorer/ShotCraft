@@ -1,5 +1,7 @@
 mod app_mode;
 mod editor;
+#[cfg(test)]
+mod headless;
 mod icons;
 mod model;
 mod prefs;
@@ -189,6 +191,43 @@ fn setup_fonts(ctx: &egui::Context) {
 }
 
 impl App {
+    /// An app with no window, for tests that draw the editor.
+    #[cfg(test)]
+    pub fn headless(ctx: egui::Context) -> App {
+        let settings = Settings::default();
+        let queue = Queue::default();
+        App {
+            prefs: prefs::PrefsState::shared(settings.clone(), queue.clone()),
+            queue,
+            fonts: Arc::new(Fonts::load()),
+            #[cfg(target_os = "macos")]
+            shell: None,
+            doc: None,
+            ed: editor::Editor::default(),
+            pins: vec![],
+            next_pin: 1,
+            thumb: None,
+            toast: None,
+            screenshot: None,
+            open_at_start: None,
+            started: true,
+            quitting: false,
+            hidden: false,
+            startup_hide: false,
+            waking: false,
+            woke_at: Instant::now(),
+            front_until: None,
+            front_title: "",
+            scroll: None,
+            ocr_running: false,
+            busy: false,
+            about_open: false,
+            shortcuts_open: false,
+            ctx,
+            settings,
+        }
+    }
+
     fn new(cc: &eframe::CreationContext<'_>, screenshot: Option<PathBuf>, show_at_start: bool, open_at_start: Option<PathBuf>) -> App {
         setup_fonts(&cc.egui_ctx);
         let settings = Settings::load();

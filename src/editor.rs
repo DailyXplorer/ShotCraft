@@ -135,6 +135,8 @@ pub struct Editor {
     ruler_sensitivity: f32,
     wheel_acc: f32,
     checker: Option<(bool, egui::TextureHandle)>,
+    /// Whether the picture has see-through pixels, for the document version in the first field.
+    alpha: Option<(u64, bool)>,
 }
 
 impl Default for Editor {
@@ -173,6 +175,7 @@ impl Default for Editor {
             ruler_sensitivity: RULER_SENSITIVITY,
             wheel_acc: 0.0,
             checker: None,
+            alpha: None,
         }
     }
 }
@@ -206,7 +209,7 @@ impl Editor {
         p(v.x, v.y)
     }
 
-    fn rect_screen(&self, r: &R) -> Rect {
+    pub(crate) fn rect_screen(&self, r: &R) -> Rect {
         Rect::from_min_max(self.to_screen(p(r.x0, r.y0)), self.to_screen(p(r.x1, r.y1)))
     }
 
@@ -1178,7 +1181,6 @@ impl App {
         let rect = ui.max_rect();
         self.ed.canvas = rect;
         let resp = ui.allocate_rect(rect, Sense::click_and_drag());
-        self.paint_checker(ui, rect);
         if self.doc.is_none() {
             self.empty_state(ui, rect, t);
             return;
@@ -1227,10 +1229,19 @@ impl App {
         }
 
         let view_screen = self.ed.rect_screen(&view);
+        // The canvas is a plain colour. A checkerboard shows only behind the picture itself, and
+        // only when the picture has see-through pixels (a window with its shadow, a logo): there it
+        // is what tells transparent from white. An opaque picture covers it and gets an outline.
+        let see_through = self.picture_has_alpha();
+        if see_through {
+            self.paint_checker(ui, view_screen.intersect(rect), view_screen.min);
+        }
         if let Some(c) = &self.ed.comp {
             c.tex.paint(&painter, &view, |r| self.ed.rect_screen(r), Color32::WHITE);
         }
-        painter.rect_stroke(view_screen, 0.0, Stroke::new(1.0, t.line), StrokeKind::Outside);
+        if !see_through {
+            painter.rect_stroke(view_screen, 0.0, Stroke::new(1.0, t.line), StrokeKind::Outside);
+        }
         let clip = painter.with_clip_rect(view_screen.intersect(rect));
         if let Some(o) = &self.ed.overlay {
             o.tex.paint_in(&clip, self.ed.rect_screen(&o.rect), Color32::WHITE);
@@ -1259,8 +1270,25 @@ impl App {
         }
     }
 
-    /// Checkerboard layer: a repeating tile of two greys behind the picture.
-    fn paint_checker(&mut self, ui: &mut Ui, rect: Rect) {
+    /// Whether the open picture has any see-through pixel. Cached per document version, since
+    /// the scan reads every pixel.
+    fn picture_has_alpha(&mut self) -> bool {
+        let Some(d) = &self.doc else { return false };
+        match self.ed.alpha {
+            Some((v, a)) if v == d.version => a,
+            _ => {
+                let a = d.base.has_alpha();
+                self.ed.alpha = Some((d.version, a));
+                a
+            }
+        }
+    }
+
+    /// Fills `area` with a checkerboard of two greys whose squares start at `origin`.
+    fn paint_checker(&mut self, ui: &mut Ui, area: Rect, origin: Pos2) {
+        if area.width() <= 0.0 || area.height() <= 0.0 {
+            return;
+        }
         let dark = ui.visuals().dark_mode;
         if self.ed.checker.as_ref().map_or(true, |c| c.0 != dark) {
             let (base, square) = if dark { CHECKER_DARK } else { CHECKER_LIGHT };
@@ -1270,8 +1298,9 @@ impl App {
             self.ed.checker = Some((dark, ui.ctx().load_texture("checker", img, options)));
         }
         if let Some((_, tex)) = &self.ed.checker {
-            let uv = Rect::from_min_size(pos2(0.0, 0.0), rect.size() / (CHECKER_SQUARE * 2.0));
-            ui.painter().image(tex.id(), rect, uv, Color32::WHITE);
+            let tile = CHECKER_SQUARE * 2.0;
+            let uv = Rect::from_min_size(pos2((area.min.x - origin.x) / tile, (area.min.y - origin.y) / tile), area.size() / tile);
+            ui.painter().image(tex.id(), area, uv, Color32::WHITE);
         }
     }
 
