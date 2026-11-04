@@ -656,6 +656,11 @@ pub struct Image {
 }
 
 impl Image {
+    /// True when any pixel is not fully opaque.
+    pub fn has_alpha(&self) -> bool {
+        self.px.chunks_exact(4).any(|p| p[3] != 255)
+    }
+
     pub fn get(&self, x: i32, y: i32) -> Rgba {
         let x = x.clamp(0, self.w as i32 - 1) as usize;
         let y = y.clamp(0, self.h as i32 - 1) as usize;

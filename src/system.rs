@@ -259,7 +259,11 @@ pub fn encode_png(img: &Image) -> Result<Vec<u8>, String> {
 }
 
 /// "Auto (PNG/JPEG)" keeps PNG for flat screenshots and switches to JPEG for photo-like images.
+/// A picture with see-through pixels (a window with its shadow) stays PNG: JPEG has no alpha.
 pub fn looks_like_photo(img: &Image) -> bool {
+    if img.has_alpha() {
+        return false;
+    }
     let mut seen = std::collections::HashSet::new();
     for s in img.px.chunks_exact(4).step_by(7) {
         seen.insert([s[0] & 0xF8, s[1] & 0xF8, s[2] & 0xF8]);
@@ -271,14 +275,17 @@ pub fn looks_like_photo(img: &Image) -> bool {
 }
 
 pub fn save_image(img: &Image, path: &Path) -> Result<(), String> {
-    let rgba = image::RgbaImage::from_raw(img.w, img.h, img.px.to_vec()).ok_or("bad image")?;
     let is_jpeg = path.extension().map(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg")).unwrap_or(false);
     if is_jpeg {
-        let rgb = image::DynamicImage::ImageRgba8(rgba).to_rgb8();
+        // JPEG has no alpha: lay the picture on white, or transparent pixels (stored as black) come out black.
+        let flat = flatten_on(img, [255, 255, 255, 255]);
+        let flat = image::RgbaImage::from_raw(flat.w, flat.h, flat.px.to_vec()).ok_or("bad image")?;
+        let rgb = image::DynamicImage::ImageRgba8(flat).to_rgb8();
         let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
         let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::BufWriter::new(file), 90);
         enc.encode_image(&rgb).map_err(|e| e.to_string())
     } else {
+        let rgba = image::RgbaImage::from_raw(img.w, img.h, img.px.to_vec()).ok_or("bad image")?;
         rgba.save_with_format(path, image::ImageFormat::Png).map_err(|e| e.to_string())
     }
 }
@@ -494,5 +501,63 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&dir);
         assert!(failures.is_empty(), "formats offered by the Open dialog that do not open:\n{}", failures.join("\n"));
+    }
+
+    /// A window capture with its shadow has far more than 6,000 colours once it holds real content,
+    /// but JPEG has no alpha: "Auto" must keep it PNG, and a JPEG save must not turn the transparent
+    /// margin black.
+    #[test]
+    fn a_picture_with_alpha_is_never_saved_as_a_black_jpeg() {
+        let win = crate::headless::window_capture(640, 380, 2);
+        // Add noise to the body so the colour count alone would call it a photo.
+        let mut px = win.px.to_vec();
+        let mut seed = 12345u32;
+        for p in px.chunks_exact_mut(4) {
+            if p[3] == 255 {
+                for c in &mut p[..3] {
+                    seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                    *c = c.wrapping_add((seed >> 24) as u8);
+                }
+            }
+        }
+        let noisy = Image {
+            w: win.w,
+            h: win.h,
+            px: Arc::new(px),
+        };
+        assert!(
+            !looks_like_photo(&noisy),
+            "Auto keeps a see-through picture as PNG"
+        );
+        let mut opaque = noisy.clone();
+        opaque.px = Arc::new(
+            noisy
+                .px
+                .chunks_exact(4)
+                .flat_map(|p| [p[0], p[1], p[2], 255])
+                .collect(),
+        );
+        assert!(
+            looks_like_photo(&opaque),
+            "the same pixels without alpha are photo-like"
+        );
+
+        let dir = std::env::temp_dir().join(format!("shotcraft-alpha-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (jpg, png) = (dir.join("w.jpg"), dir.join("w.png"));
+        save_image(&win, &jpg).unwrap();
+        save_image(&win, &png).unwrap();
+        let (j, p) = (
+            load_image_file(&jpg).unwrap(),
+            load_image_file(&png).unwrap(),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let corner = j.get(2, 2);
+        assert!(
+            corner[0] > 245 && corner[1] > 245 && corner[2] > 245,
+            "the transparent corner is white in a JPEG, got {corner:?}"
+        );
+        assert_eq!(p.get(2, 2)[3], 0, "a PNG keeps the transparent corner");
+        assert_eq!(p.get(360, 340), win.get(360, 340), "and the opaque body");
     }
 }
