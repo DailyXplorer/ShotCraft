@@ -167,7 +167,7 @@ impl App {
             if ui.input(|i| i.viewport().focused == Some(false)) {
                 p.recording = None;
             }
-            if ui.input(|i| i.modifiers.command && i.key_pressed(Key::W)) && !was_recording {
+            if ui.input(|i| i.modifiers.command && !i.modifiers.shift && !i.modifiers.alt && i.key_pressed(Key::W)) && !was_recording {
                 p.open = false;
                 ui.ctx().request_repaint_of(ViewportId::ROOT);
             }
