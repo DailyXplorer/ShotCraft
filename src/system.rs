@@ -1,4 +1,5 @@
 use crate::model::{Image, R};
+use crate::targets::{self, Snapshot, Target};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -9,6 +10,8 @@ pub enum CaptureMode {
     Area,
     RepeatArea,
     Window,
+    ActiveWindow,
+    AllDisplays,
     Delayed,
 }
 
@@ -58,52 +61,98 @@ pub struct CaptureOptions {
     pub trim_shadow: bool,
     pub solid_bg: Option<[u8; 4]>,
     pub scale: f32,
+    /// What the screen looked like when the capture was asked for.
+    pub snapshot: Snapshot,
 }
 
-pub fn capture(mode: CaptureMode, opt: &CaptureOptions) -> Result<Option<Captured>, String> {
+/// Runs `screencapture` with `args` and reads the picture back. `Ok(None)` means the user cancelled.
+/// `from_file` runs while the file still exists, for what macOS stores on it.
+fn shoot<T>(args: &[String], from_file: impl FnOnce(&Path) -> T) -> Result<Option<(Image, T)>, String> {
     let path = temp_png("capture");
-    let mut cmd = Command::new("/usr/sbin/screencapture");
-    cmd.arg("-x");
-    match mode {
-        CaptureMode::Fullscreen => {
-            cmd.arg("-m");
-        }
-        CaptureMode::Delayed => {
-            cmd.args(["-m", "-T", "3"]);
-        }
-        CaptureMode::Area => {
-            cmd.args(["-i", "-s"]);
-        }
-        CaptureMode::RepeatArea => {
-            let Some(r) = opt.last_area else {
-                return Err("No area to repeat. Repeat Area Capture takes a screenshot of the previously captured area. You need to perform the area capture first.".into());
-            };
-            cmd.arg(format!("-R{},{},{},{}", r.x0, r.y0, r.w(), r.h()));
-        }
-        CaptureMode::Window => {
-            cmd.args(["-i", "-w"]);
-            if opt.trim_shadow {
-                cmd.arg("-o");
-            }
-        }
-    }
-    cmd.arg(&path);
-    let status = cmd.status().map_err(|e| format!("Can't take a screenshot: {e}"))?;
+    let status = Command::new("/usr/sbin/screencapture").args(args).arg(&path).status().map_err(|e| format!("Can't take a screenshot: {e}"))?;
     if !path.exists() {
         if status.success() {
             return Ok(None);
         }
         return Err("Can't take a screenshot. ShotCraft needs the Screen Recording permission: System Settings → Privacy & Security → Screen Recording.".into());
     }
-    let area = if mode == CaptureMode::Area { capture_rect(&path) } else { opt.last_area.filter(|_| mode == CaptureMode::RepeatArea) };
-    let mut img = load_image_file(&path)?;
+    let extra = from_file(&path);
+    let img = load_image_file(&path);
     let _ = std::fs::remove_file(&path);
-    if mode == CaptureMode::Window {
-        if let Some(bg) = opt.solid_bg {
-            img = flatten_on(&img, bg);
+    Ok(Some((img?, extra)))
+}
+
+/// Arguments for the modes that are not resolved to a target: the user selects, or the area is known.
+fn selection_args(mode: CaptureMode, opt: &CaptureOptions) -> Result<Vec<String>, String> {
+    let mut a = vec!["-x".to_string()];
+    match mode {
+        CaptureMode::Area => a.extend(["-i".into(), "-s".into()]),
+        CaptureMode::RepeatArea => {
+            let Some(r) = opt.last_area else {
+                return Err("No area to repeat. Repeat Area Capture takes a screenshot of the previously captured area. You need to perform the area capture first.".into());
+            };
+            a.push(format!("-R{},{},{},{}", r.x0, r.y0, r.w(), r.h()));
         }
+        CaptureMode::Window => return Ok(pick_window_args(opt)),
+        _ => return Err("This capture needs no selection.".into()),
     }
-    Ok(Some(Captured { img, scale: opt.scale, area, mode }))
+    Ok(a)
+}
+
+/// The interactive window picker.
+fn pick_window_args(opt: &CaptureOptions) -> Vec<String> {
+    let mut a = vec!["-x".to_string(), "-i".into(), "-w".into()];
+    if opt.trim_shadow {
+        a.push("-o".into());
+    }
+    a
+}
+
+/// Non-interactive capture of a resolved target, with the picture's pixels per point.
+fn capture_target(target: Target, opt: &CaptureOptions) -> Result<Option<(Image, f32)>, String> {
+    let scale = opt.scale;
+    Ok(match target {
+        Target::Window(id, px_per_point) => shoot(&targets::window_args(id, opt.trim_shadow), |_| ())?.map(|(img, _)| (img, px_per_point as f32)),
+        Target::PickWindow => shoot(&pick_window_args(opt), |_| ())?.map(|(img, _)| (img, scale)),
+        Target::MainDisplay => shoot(&["-x".to_string(), "-m".to_string()], |_| ())?.map(|(img, _)| (img, scale)),
+        Target::Displays(displays) => {
+            let mut shots = Vec::new();
+            for d in &displays {
+                let Some((img, _)) = shoot(&targets::display_args(*d), |_| ())? else { return Ok(None) };
+                shots.push(img);
+            }
+            let snap = &opt.snapshot;
+            let px_per_point = displays.iter().map(|d| targets::scale_at(&snap.displays, &snap.scales, *d) as f32).fold(1.0, f32::max);
+            if shots.len() == 1 {
+                return Ok(Some((shots.remove(0), px_per_point)));
+            }
+            let canvas = targets::compose(&displays, &shots).ok_or("Can't put the displays together in one picture.")?;
+            Some((canvas, px_per_point))
+        }
+    })
+}
+
+pub fn capture(mode: CaptureMode, opt: &CaptureOptions) -> Result<Option<Captured>, String> {
+    let (img, scale, area) = match targets::resolve(mode, &opt.snapshot) {
+        Some(target) => {
+            if mode == CaptureMode::Delayed {
+                std::thread::sleep(std::time::Duration::from_secs(3));
+            }
+            let Some((img, scale)) = capture_target(target, opt)? else { return Ok(None) };
+            (img, scale, None)
+        }
+        None => {
+            let args = selection_args(mode, opt)?;
+            let Some((img, area)) = shoot(&args, |p| if mode == CaptureMode::Area { capture_rect(p) } else { opt.last_area.filter(|_| mode == CaptureMode::RepeatArea) })? else { return Ok(None) };
+            (img, opt.scale, area)
+        }
+    };
+    let flatten = matches!(mode, CaptureMode::Window | CaptureMode::ActiveWindow);
+    let img = match opt.solid_bg {
+        Some(bg) if flatten => flatten_on(&img, bg),
+        _ => img,
+    };
+    Ok(Some(Captured { img, scale, area, mode }))
 }
 
 fn flatten_on(img: &Image, bg: [u8; 4]) -> Image {
@@ -116,6 +165,72 @@ fn flatten_on(img: &Image, bg: [u8; 4]) -> Image {
         out.push(255);
     }
     Image { w: img.w, h: img.h, px: Arc::new(out) }
+}
+
+/// Reads the displays, the mouse and the frontmost app. Call it on the main thread.
+#[cfg(target_os = "macos")]
+pub fn snapshot(mode: CaptureMode) -> Snapshot {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSEvent, NSScreen, NSWorkspace};
+    use targets::Rect;
+    let own_pid = std::process::id() as i32;
+    let frontmost_pid = NSWorkspace::sharedWorkspace().frontmostApplication().map(|a| a.processIdentifier());
+    let windows = if mode == CaptureMode::ActiveWindow { window_infos() } else { Vec::new() };
+    let Some(mtm) = MainThreadMarker::new() else { return Snapshot { own_pid, frontmost_pid, windows, ..Snapshot::default() } };
+    let screens = NSScreen::screens(mtm);
+    let rect = |f: objc2_foundation::NSRect| Rect::new(f.origin.x, f.origin.y, f.size.width, f.size.height);
+    // The first screen is the one with the menu bar; every frame is relative to its bottom left corner.
+    let primary_h = screens.iter().next().map_or(0.0, |s| s.frame().size.height);
+    let displays = screens.iter().map(|s| targets::flip_frame(rect(s.frame()), primary_h)).collect();
+    let m = NSEvent::mouseLocation();
+    let scales = screens.iter().map(|s| s.backingScaleFactor()).collect();
+    Snapshot { own_pid, frontmost_pid, displays, scales, mouse: Some(targets::flip_point((m.x, m.y), primary_h)), windows }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn snapshot(_mode: CaptureMode) -> Snapshot {
+    Snapshot { own_pid: std::process::id() as i32, ..Snapshot::default() }
+}
+
+/// On-screen windows, front to back.
+#[cfg(target_os = "macos")]
+fn window_infos() -> Vec<targets::WindowInfo> {
+    use targets::{Rect, WindowInfo};
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2_core_foundation::{CFArray, CFString};
+    use objc2_core_graphics::{kCGWindowAlpha, kCGWindowBounds, kCGWindowLayer, kCGWindowNumber, kCGWindowOwnerPID, CGWindowListCopyWindowInfo, CGWindowListOption};
+    use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString};
+    type Dict = NSDictionary<NSString, AnyObject>;
+    let opts = CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements;
+    let Some(list) = CGWindowListCopyWindowInfo(opts, 0) else { return Vec::new() };
+    // Core Foundation arrays and dictionaries are the same objects as their Foundation counterparts.
+    let list: &NSArray<Dict> = unsafe { &*(&*list as *const CFArray as *const NSArray<Dict>) };
+    let key = |k: &CFString| -> &NSString { unsafe { &*(k as *const CFString as *const NSString) } };
+    let number = |d: &Dict, k: &NSString| -> Option<f64> {
+        let v: Retained<AnyObject> = d.objectForKey(k)?;
+        v.downcast_ref::<NSNumber>().map(|n| n.as_f64())
+    };
+    unsafe {
+        list.iter()
+            .filter_map(|d| {
+                let bounds = d.objectForKey(key(kCGWindowBounds))?;
+                let is_dict: bool = objc2::msg_send![&*bounds, isKindOfClass: <NSDictionary as objc2::ClassType>::class()];
+                if !is_dict {
+                    return None;
+                }
+                let b: &Dict = &*(&*bounds as *const AnyObject as *const Dict);
+                let side = |name: &str| number(b, &NSString::from_str(name));
+                Some(WindowInfo {
+                    id: number(&d, key(kCGWindowNumber))? as u32,
+                    pid: number(&d, key(kCGWindowOwnerPID))? as i32,
+                    layer: number(&d, key(kCGWindowLayer))? as i32,
+                    alpha: number(&d, key(kCGWindowAlpha)).unwrap_or(1.0),
+                    bounds: Rect::new(side("X")?, side("Y")?, side("Width")?, side("Height")?),
+                })
+            })
+            .collect()
+    }
 }
 
 pub fn copy_image(img: &Image) -> Result<(), String> {

@@ -8,7 +8,9 @@ ShotCraft is written in Rust. It is an early version (0.1.0).
 
 ### Capture
 
-* Area, any window, full screen (main display), repeat the last area, and a 3-second delayed full-screen capture.
+* Area, any window, repeat the last area, and full-screen captures. Fullscreen captures the display the mouse pointer is on, and All Displays puts every display in one picture laid out like your desk.
+* Active Window captures the frontmost window of the app you are using, without clicking. Use it from a hotkey, or from the menu bar icon menu, which targets the app that was in front before you opened it. When that app has no capturable window, you pick a window instead.
+* A 3-second delayed capture of the display the mouse was on when you started it.
 * Window captures can keep a transparent background or use a solid color, and can trim the window shadow.
 * Instant text and QR recognition: select an area and the recognized text goes straight to the clipboard, with no editor.
 * Open an existing image from a file or from the clipboard. The file picker and the command line open PNG, JPEG, GIF, BMP, TIFF and WebP files; saving writes PNG or JPEG. Animated GIFs open as their first frame.
@@ -54,7 +56,7 @@ A pinned image is a borderless window that stays above other windows. Drag it an
 ### Preferences
 
 * General: what happens after a screenshot (editor, thumbnail or nothing; copy; save), thumbnail auto-close, launch at startup, screenshots folder, save format, Retina downscale, window screenshot background and shadow.
-* Hotkeys: record or clear a shortcut for each of the six actions listed under Keyboard shortcuts. ShotCraft flags a shortcut that macOS refuses because another app uses it.
+* Hotkeys: record or clear a shortcut for each of the eight actions listed under Keyboard shortcuts. ShotCraft flags a shortcut that macOS refuses because another app uses it.
 * Advanced: OCR line breaks, hide the menu bar icon, keep the main window on top, zoom direction, default zoom level, what Esc does when hiding the editor (copy and/or save), and confirmation style (custom notification, system notification or none).
 
 Settings are stored in `~/Library/Application Support/ShotCraft/settings.json`.
@@ -65,11 +67,13 @@ Global hotkeys (editable in Preferences, Hotkeys):
 
 | Action | Default |
 | --- | --- |
-| Fullscreen screenshot | `Cmd+Shift+1` |
+| Fullscreen screenshot (display under the mouse) | `Cmd+Shift+1` |
+| All displays screenshot | not set |
 | Area screenshot | `Cmd+Shift+2` |
 | Any window screenshot | not set |
+| Active window screenshot | `Ctrl+Opt+Cmd+W` |
 | Repeat area screenshot | not set |
-| Instant Text/QR Recognition | not set |
+| Instant Text/QR Recognition | `Ctrl+Opt+Cmd+O` |
 | Show ShotCraft | not set |
 
 In the editor:
