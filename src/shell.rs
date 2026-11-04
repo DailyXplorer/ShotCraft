@@ -69,7 +69,7 @@ fn acc(m: Modifiers, c: Code) -> Option<Accelerator> {
 const MENU_SYMBOLS: &[(&str, &str)] = &[
     ("Preferences", "gearshape"),
     ("About", "info.circle"),
-    ("Check for Updates", "arrow.triangle.2.circlepath"),
+    ("Check for Updates…", "arrow.triangle.2.circlepath"),
     ("Quit", "rectangle.portrait.and.arrow.right"),
     ("Show ShotCraft", "eye"),
     ("Show All", "eye"),
@@ -117,13 +117,19 @@ const MENU_SYMBOLS: &[(&str, &str)] = &[
     ("Select All", "selection.pin.in.out"),
 ];
 
+/// The symbol for a menu title. Titles may continue after the listed text ("Zoom To 100%"), so the
+/// entries are prefixes; "Check for Updates…" ends in its ellipsis to leave out "Check for Updates Automatically".
+fn menu_symbol(title: &str) -> Option<&'static str> {
+    MENU_SYMBOLS.iter().find(|(prefix, _)| title.starts_with(prefix)).map(|(_, name)| *name)
+}
+
 fn add_menu_symbols(menu: &dyn ContextMenu) {
     use objc2_app_kit::{NSImage, NSMenu};
     use objc2_foundation::NSString;
     fn walk(menu: &NSMenu) {
         for item in menu.itemArray().iter() {
             let title = item.title().to_string();
-            if let Some((_, name)) = MENU_SYMBOLS.iter().find(|(prefix, _)| title.starts_with(prefix)) {
+            if let Some(name) = menu_symbol(&title) {
                 item.setImage(NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str(name), None).as_deref());
             }
             if let Some(sub) = item.submenu() {
@@ -175,8 +181,10 @@ impl Shell {
         let cmd_shift = Modifiers::META | Modifiers::SHIFT;
         let updater = Updater::start();
         let updates_item = MenuItem::with_id("updates", "Check for Updates…", updater.is_some(), None);
-        let automatic = updater.as_ref().is_some_and(Updater::checks_automatically);
-        let auto_updates_item = CheckMenuItem::with_id("autoupdates", "Check for Updates Automatically", updater.is_some(), automatic, None);
+        let auto_updates_item = CheckMenuItem::with_id("autoupdates", "Check for Updates Automatically", updater.is_some(), false, None);
+        if let Some(updater) = &updater {
+            auto_updates_item.set_checked(updater.checks_automatically());
+        }
 
         let app_menu = Submenu::with_items(
             "ShotCraft",
@@ -358,17 +366,39 @@ impl Shell {
         }
     }
 
-    /// The menu has already flipped its check mark, so it holds what the user asked for.
-    pub fn apply_auto_updates(&self) {
+    /// Flips Sparkle's own setting, which also changes from its first-launch question, and shows the
+    /// result. The check mark is not trusted here: it may have been stale when muda flipped it.
+    pub fn toggle_auto_updates(&self) {
         if let Some(updater) = &self.updater {
-            updater.set_checks_automatically(self.auto_updates_item.is_checked());
+            updater.set_checks_automatically(!updater.checks_automatically());
+        }
+        self.refresh_updates();
+    }
+
+    /// Shows what Sparkle holds, so the check mark follows changes made outside this menu.
+    pub fn refresh_updates(&self) {
+        if let Some(updater) = &self.updater {
+            self.auto_updates_item.set_checked(updater.checks_automatically());
         }
     }
 
     pub fn sync(&self, settings: &Settings) {
         self.autostart_item.set_checked(settings.autostart);
+        self.refresh_updates();
         if let Some(t) = &self.tray {
             let _ = t.set_visible(!settings.hide_menubar_icon);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::menu_symbol;
+
+    #[test]
+    fn updates_symbol_is_only_for_the_check_item() {
+        assert!(menu_symbol("Check for Updates…").is_some());
+        assert_eq!(menu_symbol("Check for Updates Automatically"), None);
+        assert!(menu_symbol("Zoom To 100%").is_some());
     }
 }

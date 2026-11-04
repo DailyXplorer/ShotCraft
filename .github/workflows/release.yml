@@ -19,9 +19,15 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Check out
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
+
+      # The update signing key goes to this step and the signing one only, not to the build (cargo, build.rs).
+      - name: Check the update key matches the app
+        env:
+          SPARKLE_ED_KEY: ${{ secrets.SPARKLE_ED_KEY }}
+        run: scripts/package-release.sh check-key
 
       - name: Install Rust targets
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
@@ -51,14 +57,17 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" > /dev/null
           security list-keychains -d user -s "$keychain" "$HOME/Library/Keychains/login.keychain-db"
 
-      - name: Package
+      - name: Build and sign the app
+        run: scripts/package-release.sh app
+
+      - name: Sign the update
         env:
           SPARKLE_ED_KEY: ${{ secrets.SPARKLE_ED_KEY }}
-        run: scripts/package-release.sh
+        run: scripts/package-release.sh update
 
       - name: Keep the release files
         if: github.event_name == 'push'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release
           path: target/dist/
@@ -72,7 +81,7 @@ jobs:
       contents: write
     steps:
       - name: Fetch the release files
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release
           path: dist

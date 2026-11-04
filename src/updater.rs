@@ -25,12 +25,21 @@ pub struct Updater {
 impl Updater {
     /// Starts Sparkle, which asks the user about automatic checks on the second launch.
     pub fn start() -> Option<Updater> {
-        let class = controller_class().ok()?;
+        let class = match controller_class() {
+            Ok(class) => class,
+            Err(e) => {
+                eprintln!("Updates are off, Sparkle did not load: {e}");
+                return None;
+            }
+        };
         let nil: *const AnyObject = std::ptr::null();
         let controller: Option<Retained<AnyObject>> = unsafe {
             let new: Allocated<AnyObject> = msg_send![class, alloc];
             msg_send![new, initWithStartingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil]
         };
+        if controller.is_none() {
+            eprintln!("Updates are off, Sparkle did not start");
+        }
         controller.map(|controller| Updater { controller })
     }
 

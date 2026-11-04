@@ -483,7 +483,7 @@ impl App {
             Action::ToggleAutoUpdates => {
                 #[cfg(target_os = "macos")]
                 if let Some(s) = &self.shell {
-                    s.apply_auto_updates();
+                    s.toggle_auto_updates();
                 }
             }
             Action::ToggleAutostart => {
@@ -785,6 +785,10 @@ fn thumb_window(ui: &mut egui::Ui, th: &mut Thumb, queue: &Queue) {
 impl eframe::App for App {
     fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain();
+        #[cfg(target_os = "macos")]
+        if let Some(s) = &self.shell {
+            s.refresh_updates();
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
