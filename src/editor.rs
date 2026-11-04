@@ -431,6 +431,12 @@ impl App {
         }
     }
 
+    /// For the menus: whether typed text goes to the canvas (the text tool), and whether plain C
+    /// copies the colour of the selected area, as `keyboard` does, rather than picking a tool.
+    pub fn editor_key_state(&self) -> (bool, bool) {
+        (self.ed.editing_text, self.ed.tool == Tool::Select && self.ed.selection.is_some())
+    }
+
     fn set_tool(&mut self, t: Tool) {
         self.finish_text();
         self.ed.selected = None;

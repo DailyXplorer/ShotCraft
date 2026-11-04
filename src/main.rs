@@ -3,6 +3,8 @@ mod editor;
 #[cfg(test)]
 mod headless;
 mod icons;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod menu_model;
 mod model;
 mod prefs;
 mod render;
@@ -44,7 +46,9 @@ pub enum Action {
     Save,
     SaveAs,
     Pin,
+    Print,
     Close,
+    CloseAll,
     Undo,
     Redo,
     ResetCrop,
@@ -315,6 +319,7 @@ impl App {
         self.hidden = true;
         self.ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Visible(false));
         self.ctx.request_repaint();
+        self.sync_menu_state();
     }
 
     /// Activates the app and puts its windows in front over the next few frames, the window with
@@ -583,6 +588,26 @@ impl App {
         }
     }
 
+    /// Opens the system print panel for the current image, with its annotations.
+    pub fn print(&mut self) {
+        let Some(img) = self.export() else { return };
+        let scale = self.doc.as_ref().map(|d| d.scale_factor).unwrap_or(1.0);
+        if let Err(e) = system::print_image(&img, scale, "ShotCraft") {
+            self.error(format!("Can't print: {e}"));
+        }
+    }
+
+    /// Closes every window the app shows for screenshots: the pins and the thumbnail go, and the
+    /// editor hides to the menu bar. Preferences stay, and the app keeps running.
+    pub fn close_all(&mut self) {
+        for p in &self.pins {
+            p.lock().unwrap().open = false;
+        }
+        self.pins.clear();
+        self.thumb = None;
+        self.hide_window();
+    }
+
     pub fn pin(&mut self, img: Image, scale: f32) {
         let id = self.next_pin;
         self.next_pin += 1;
@@ -739,7 +764,9 @@ impl App {
             Action::Save => self.save(),
             Action::SaveAs => self.save_as(),
             Action::Pin => self.pin_current(),
+            Action::Print => self.print(),
             Action::Close => self.hide_window(),
+            Action::CloseAll => self.close_all(),
             Action::About => {
                 self.show_window();
                 self.about_open = true
@@ -771,6 +798,20 @@ impl App {
         drop(p);
         self.wake_ui();
         self.bring_to_front("Preferences");
+    }
+
+    /// Tells the menus what the editor allows now (an image, the keyboard, a text being typed). Run
+    /// every frame, it only reaches AppKit when something changed.
+    fn sync_menu_state(&mut self) {
+        #[cfg(target_os = "macos")]
+        if self.shell.is_some() {
+            let focused = self.ctx.input_for(ViewportId::ROOT, |i| i.viewport().focused.unwrap_or(false));
+            let (typing, c_copies_colour) = self.editor_key_state();
+            let st = menu_model::MenuState { has_image: self.doc.is_some(), editor_visible: !self.hidden, editor_focused: focused, typing: typing || self.ctx.egui_wants_keyboard_input(), c_copies_colour };
+            if let Some(s) = &mut self.shell {
+                s.set_state(st);
+            }
+        }
     }
 
     pub fn sync_shell(&mut self) {
@@ -1081,6 +1122,7 @@ impl eframe::App for App {
             }
         }
         self.drain();
+        self.sync_menu_state();
         if ui.input(|i| i.viewport().close_requested()) && !self.quitting {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             self.hide_window();
