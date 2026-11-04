@@ -272,6 +272,36 @@ impl Rig {
             px: Arc::new(bytes),
         }
     }
+
+    /// Draws any UI (a floating panel, say) over a flat `backdrop` colour, as it looks at `ppp`.
+    pub fn render_ui(&mut self, size: (f32, f32), ppp: f32, backdrop: Color32, mut ui_fn: impl FnMut(&mut egui::Ui)) -> Image {
+        self.ctx.set_pixels_per_point(ppp);
+        let mut last = None;
+        for _ in 0..4 {
+            let mut input = RawInput::default();
+            input.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(size.0, size.1)));
+            self.frame += 1;
+            input.time = Some(self.frame as f64 * 0.05);
+            input.viewport_id = ViewportId::ROOT;
+            let mut out = self.ctx.run_ui(input, |ui| ui_fn(ui));
+            self.soft.apply(&out.textures_delta);
+            out.textures_delta.clear();
+            last = Some((out.shapes, out.pixels_per_point));
+        }
+        let (shapes, ppp) = last.unwrap();
+        let prims = self.ctx.tessellate(shapes, ppp);
+        let (w, h) = ((size.0 * ppp) as usize, (size.1 * ppp) as usize);
+        let mut fb = vec![0.0f32; w * h * 4];
+        for px in fb.chunks_exact_mut(4) {
+            px.copy_from_slice(&[backdrop.r() as f32 / 255.0, backdrop.g() as f32 / 255.0, backdrop.b() as f32 / 255.0, 1.0]);
+        }
+        self.soft.paint(&mut fb, w, h, ppp, &prims);
+        for id in std::mem::take(&mut self.soft.freed) {
+            self.soft.textures.remove(&id);
+        }
+        let bytes = fb.iter().map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8).collect();
+        Image { w: w as u32, h: h as u32, px: Arc::new(bytes) }
+    }
 }
 
 pub fn save_png(img: &Image, path: &std::path::Path) {
