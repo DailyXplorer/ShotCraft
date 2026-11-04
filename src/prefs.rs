@@ -202,7 +202,7 @@ impl PrefsState {
                 ui.radio_value(&mut s.window_bg, WindowBg::Wallpaper, "Wallpaper").on_hover_text("The window and its shadow on your desktop picture");
                 ui.radio_value(&mut s.window_bg, WindowBg::Transparent, "Transparent").on_hover_text("The window and its shadow on a see-through background");
                 ui.radio_value(&mut s.window_bg, WindowBg::Solid, "Solid Color").on_hover_text("The window and its shadow on a colour");
-                if s.window_bg == WindowBg::Solid {
+                if matches!(s.window_bg, WindowBg::Solid | WindowBg::Wallpaper) {
                     let c = crate::model::hex(&s.window_solid);
                     let mut col = Color32::from_rgb(c[0], c[1], c[2]);
                     if ui.color_edit_button_srgba(&mut col).changed() {
