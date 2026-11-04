@@ -476,7 +476,10 @@ pub fn recognize_in(img: &Image, language: &str) -> Result<OcrResult, String> {
         text.setRecognitionLevel(VNRequestTextRecognitionLevel::Accurate);
         text.setUsesLanguageCorrection(true);
         if ocr_languages().iter().any(|(code, _)| code == language) {
-            text.setRecognitionLanguages(&NSArray::from_retained_slice(&[NSString::from_str(language)]));
+            // The chosen language first, the others after it, so mixed text is still read.
+            let mut order = vec![NSString::from_str(language)];
+            order.extend(ocr_languages().iter().filter(|(code, _)| code != language).map(|(code, _)| NSString::from_str(code)));
+            text.setRecognitionLanguages(&NSArray::from_retained_slice(&order));
         }
         let codes = VNDetectBarcodesRequest::new();
         let a: &VNRequest = &text;

@@ -91,6 +91,7 @@ impl App {
             self.apply_settings(new);
         }
         if !open {
+            self.prefs.lock().unwrap().height_text = None;
             return;
         }
         let vid = ViewportId::from_hash_of("prefs");

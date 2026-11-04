@@ -280,6 +280,8 @@ pub struct Stamp {
 }
 
 const NAME_MAX: usize = 120;
+/// File names are limited in bytes too (255 on macOS, and the extension and a `-N` suffix come after).
+const NAME_MAX_BYTES: usize = 200;
 
 /// The name of a saved screenshot (no extension) from `template` and the time. Tokens: `%Y` year,
 /// `%y` two-digit year, `%m` month, `%d` day, `%H` hour, `%M` minute, `%S` second, `%t` the time as
@@ -312,7 +314,7 @@ pub fn file_stem(template: &str, now: &Stamp) -> String {
             }
         }
         let clean: String = out.chars().map(|c| if matches!(c, '/' | '\\' | ':') || c.is_control() { '-' } else { c }).collect();
-        clean.trim().trim_start_matches('.').chars().take(NAME_MAX).collect::<String>().trim_end().to_string()
+        clean.trim().trim_start_matches('.').chars().scan(0usize, |bytes, c| { *bytes += c.len_utf8(); (*bytes <= NAME_MAX_BYTES).then_some(c) }).take(NAME_MAX).collect::<String>().trim_end().to_string()
     };
     let name = render(template);
     if name.is_empty() {
@@ -446,6 +448,8 @@ mod preference_tests {
         assert_eq!(file_stem("", &NOW), "ShotCraft-20261105-090703");
         assert_eq!(file_stem("   ", &NOW), "ShotCraft-20261105-090703");
         assert_eq!(file_stem(&"x".repeat(500), &NOW).len(), 120);
+        let wide = file_stem(&"名".repeat(500), &NOW);
+        assert!(wide.len() <= 200 && wide.chars().all(|c| c == '名'), "{}", wide.len());
     }
 }
 
