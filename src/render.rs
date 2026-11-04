@@ -1524,30 +1524,7 @@ pub fn average(img: &Image, r: &R) -> Rgba {
     [(acc[0] / n) as u8, (acc[1] / n) as u8, (acc[2] / n) as u8, 255]
 }
 
-pub fn format_color(c: Rgba, fmt: usize) -> String {
-    let f = |v: u8| v as f32 / 255.0;
-    match fmt {
-        1 => format!("{:02X}{:02X}{:02X}", c[0], c[1], c[2]),
-        2 => format!("{}, {}, {}", c[0], c[1], c[2]),
-        3 => format!("({:.2}, {:.2}, {:.2})", f(c[0]), f(c[1]), f(c[2])),
-        4 => format!("UIColor(red: {:.2}, green: {:.2}, blue: {:.2}, alpha: 1)", f(c[0]), f(c[1]), f(c[2])),
-        5 => format!("rgba({}, {}, {}, 1)", c[0], c[1], c[2]),
-        6 => format!("Color.FromArgb({}, {}, {});", c[0], c[1], c[2]),
-        7 => format!("0xFF{:02X}{:02X}{:02X}", c[0], c[1], c[2]),
-        _ => format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2]),
-    }
-}
-
-pub const COLOR_FORMATS: [&str; 8] = [
-    "HEX #FFC200",
-    "HEX FFC200",
-    "RGB 255, 194, 0",
-    "RGB (1.00, 0.76, 0.00)",
-    "UIColor (Swift)",
-    "CSS rgba()",
-    "C# Color",
-    "Android 0xFFFFC200",
-];
+pub use crate::color::{format_color, COLOR_FORMATS};
 
 #[cfg(test)]
 mod tests {

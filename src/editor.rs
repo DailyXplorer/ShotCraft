@@ -121,7 +121,7 @@ pub struct Editor {
     drag: Drag,
     pub selection: Option<R>,
     hover: Option<P>,
-    hover_color: Rgba,
+    pub(crate) hover_color: Rgba,
     comp: Option<Comp>,
     overlay: Option<Overlay>,
     preview: Option<(u64, (u32, u32), TiledTexture)>,
@@ -1076,11 +1076,13 @@ impl App {
             ui.painter().line_segment([pos2(*x + 2.0, rect.top() + 6.0), pos2(*x + 2.0, rect.bottom() - 6.0)], Stroke::new(1.0, t.line));
             *x += 6.0;
         };
-        let (r, resp) = cell(ui, &mut x, 140.0, "st-color");
+        let txt = render::format_color(self.ed.hover_color, self.settings.color_format);
+        // Some formats (OKLCH, UIColor) are wider than the default cell.
+        let txt_w = ui.painter().layout_no_wrap(txt.clone(), value.clone(), t.text).size().x;
+        let (r, resp) = cell(ui, &mut x, (txt_w + 44.0).max(140.0), "st-color");
         let sw = Rect::from_min_size(pos2(r.left() + 6.0, r.center().y - 9.0), vec2(18.0, 18.0));
         ui.painter().rect_filled(sw, 4.0, c32(self.ed.hover_color));
         ui.painter().rect_stroke(sw, 4.0, Stroke::new(1.0, t.line), StrokeKind::Inside);
-        let txt = render::format_color(self.ed.hover_color, self.settings.color_format);
         ui.painter().text(pos2(r.left() + 30.0, r.top() + 4.0), Align2::LEFT_TOP, txt, value.clone(), t.text);
         ui.painter().text(pos2(r.left() + 30.0, r.bottom() - 4.0), Align2::LEFT_BOTTOM, "Tab to copy", small.clone(), t.dim);
         if resp.clicked() {
@@ -1101,6 +1103,45 @@ impl App {
             self.ed.popover = if matches!(self.ed.popover, Popover::Size(_)) { Popover::None } else { Popover::Size(r) };
         }
         sep(ui, &mut x);
+        // Contrast of the selection box: text colour against background colour.
+        if let (Some(br), Some(d)) = (self.ed.selection.or(self.ed.crop_draft), &self.doc) {
+            let key = (d.version, [br.x0.to_bits(), br.y0.to_bits(), br.x1.to_bits(), br.y1.to_bits()]);
+            let cache_id = ui.id().with("st-contrast-cache");
+            let cached = ui.data(|dd| dd.get_temp::<((u64, [u32; 4]), Option<(Rgba, Rgba)>)>(cache_id));
+            let pair = match cached {
+                Some((k, p)) if k == key => p,
+                _ => {
+                    let p = crate::color::contrast_pair(&d.base, &br);
+                    ui.data_mut(|dd| dd.insert_temp(cache_id, (key, p)));
+                    p
+                }
+            };
+            if let Some((fg, bg)) = pair {
+                let (wcag, apca) = (crate::color::contrast_wcag(fg, bg), crate::color::contrast_apca(fg, bg));
+                let apca_first = self.settings.contrast_type == crate::color::ContrastType::Apca;
+                let (val, cap) = if apca_first { (format!("Lc {apca:.1}"), "APCA Contrast") } else { (format!("{wcag:.2}:1"), "WCAG 2.0 Contrast") };
+                let (r, resp) = cell(ui, &mut x, 136.0, "st-contrast");
+                let sw = |ui: &mut Ui, c: Rgba, at: Pos2| {
+                    let b = Rect::from_min_size(at, vec2(8.0, 8.0));
+                    ui.painter().rect_filled(b, 2.0, c32(c));
+                    ui.painter().rect_stroke(b, 2.0, Stroke::new(1.0, t.line), StrokeKind::Inside);
+                };
+                sw(ui, fg, pos2(r.right() - 18.0, r.top() + 6.0));
+                sw(ui, bg, pos2(r.right() - 18.0, r.top() + 17.0));
+                ui.painter().text(pos2(r.left() + 8.0, r.top() + 4.0), Align2::LEFT_TOP, val, value.clone(), t.text);
+                ui.painter().text(pos2(r.left() + 8.0, r.bottom() - 4.0), Align2::LEFT_BOTTOM, cap, small.clone(), t.dim);
+                let tip = format!(
+                    "WCAG 2.0 Contrast Ratio: {wcag:.2}\nAPCA Contrast: Lc {apca:.1}\n\nWCAG recommends a ratio of at least 4.5 for regular text and 3.0 for large text and UI elements.\nOption+click switches the measure shown here."
+                );
+                let alt = ui.input(|i| i.modifiers.alt);
+                resp.clone().on_hover_text(tip);
+                if resp.clicked() && alt {
+                    self.settings.contrast_type = self.settings.contrast_type.toggled();
+                    self.settings.save();
+                }
+                sep(ui, &mut x);
+            }
+        }
         let ppp = ui.ctx().pixels_per_point();
         let (r, resp) = cell(ui, &mut x, 64.0, "st-zoom");
         let zt = if self.doc.is_some() { format!("{}%", (self.ed.zoom * ppp * 100.0).round()) } else { "—".into() };
@@ -1780,7 +1821,7 @@ impl App {
         ui.horizontal(|ui| {
             ui.label("Color Format");
             let cur = self.settings.color_format;
-            crate::icons::combo("colorfmt").width(170.0).selected_text(render::COLOR_FORMATS[cur]).show_ui(ui, |ui| {
+            crate::icons::combo("colorfmt").width(170.0).selected_text(render::COLOR_FORMATS[cur.min(render::COLOR_FORMATS.len() - 1)]).show_ui(ui, |ui| {
                 for (i, name) in render::COLOR_FORMATS.iter().enumerate() {
                     if ui.selectable_label(cur == i, *name).clicked() {
                         self.settings.color_format = i;
