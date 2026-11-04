@@ -63,6 +63,8 @@ mod mac {
         let Some(mtm) = MainThreadMarker::new() else { return };
         for w in windows(mtm).iter().filter(|w| w.title().to_string() == EDITOR_TITLE) {
             w.setAlphaValue(alpha);
+            // A transparent window must not swallow clicks meant for what is behind it.
+            w.setIgnoresMouseEvents(alpha <= 0.0);
         }
     }
 
@@ -74,11 +76,9 @@ mod mac {
         let Some(mtm) = MainThreadMarker::new() else { return false };
         activate();
         let shown: Vec<_> = windows(mtm).into_iter().filter(|w| w.isVisible() && w.alphaValue() > 0.0 && w.canBecomeKeyWindow()).collect();
-        for w in &shown {
-            w.orderFrontRegardless();
-        }
         let target = shown.iter().find(|w| w.title().to_string() == key);
         if let Some(w) = target {
+            w.orderFrontRegardless();
             w.makeKeyWindow();
         }
         target.is_some() && NSApplication::sharedApplication(mtm).isActive()

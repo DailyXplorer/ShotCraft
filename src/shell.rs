@@ -23,6 +23,7 @@ pub struct Shell {
     updater: Option<Updater>,
     hotkeys: Option<GlobalHotKeyManager>,
     registered: Vec<HotKey>,
+    show_hotkey_works: bool,
     hotkey_map: Arc<Mutex<HashMap<u32, HotkeyAction>>>,
 }
 
@@ -326,7 +327,7 @@ impl Shell {
             .build()
             .ok();
         if let Some(t) = &tray {
-            let _ = t.set_visible(settings.menubar_icon_visible());
+            let _ = t.set_visible(settings.menubar_icon_visible(false));
         }
 
         let q = queue.clone();
@@ -357,7 +358,7 @@ impl Shell {
             ctx.request_repaint();
         }));
 
-        let mut shell = Shell { tray, _menubar: menubar, autostart_item, auto_updates_item, updater, hotkeys: GlobalHotKeyManager::new().ok(), registered: vec![], hotkey_map };
+        let mut shell = Shell { tray, _menubar: menubar, autostart_item, auto_updates_item, updater, hotkeys: GlobalHotKeyManager::new().ok(), registered: vec![], show_hotkey_works: false, hotkey_map };
         shell.apply_hotkeys(settings);
         shell
     }
@@ -380,6 +381,8 @@ impl Shell {
                 _ => failed.push(a),
             }
         }
+        self.show_hotkey_works = settings.hotkey(HotkeyAction::Show).is_some() && !failed.contains(&HotkeyAction::Show);
+        self.sync(settings);
         failed
     }
 
@@ -409,7 +412,7 @@ impl Shell {
         self.autostart_item.set_checked(settings.autostart);
         self.refresh_updates();
         if let Some(t) = &self.tray {
-            let _ = t.set_visible(settings.menubar_icon_visible());
+            let _ = t.set_visible(settings.menubar_icon_visible(self.show_hotkey_works));
         }
     }
 }

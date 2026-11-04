@@ -14,6 +14,6 @@ Why: a capture tool runs all day and must not take over the screen at login.
 
 * There is no main menu bar. Every command that used to live only there is in the menu bar icon menu.
 * Every window that opens activates the app and comes to the front, since the system does not do it for an accessory app. This includes Sparkle's dialogs.
-* Editor shortcuts must keep working without a main menu. Anything bound to a menu key equivalent has to be handled in the editor as well.
+* The main menu is still installed, because its key equivalents (Cmd+, Cmd+P, Cmd+W, Cmd+Q) keep working while a ShotCraft window has focus even though the menu is not drawn. The other editor shortcuts (Cmd+C, Cmd+S, Cmd+Z, ...) are handled by the editor itself. Check a new shortcut with the Dock icon off.
 * The app has no Cmd+Tab entry. This is accepted.
-* The menu bar icon can be hidden only while the Show ShotCraft hotkey is set, so the app always stays reachable.
+* The menu bar icon can be hidden only while the Show ShotCraft hotkey is set and registered, so the app always stays reachable.

@@ -85,6 +85,9 @@ fn send(ctx: &egui::Context, queue: &Queue, action: Action) {
 /// Title of the editor window; the other windows have their own.
 pub const EDITOR_TITLE: &str = "ShotCraft";
 
+/// How long the editor stays on screen, transparent, before it is hidden again.
+const HIDE_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+
 const WINDOW_MARGIN: f32 = 48.0;
 const WINDOW_MIN_HEIGHT_RATIO: f32 = 0.9;
 
@@ -127,11 +130,13 @@ pub struct App {
     quitting: bool,
     /// The editor window is not on screen. True from launch until the user asks for it.
     pub hidden: bool,
-    /// Passes left before the editor window is hidden again after eframe's first paint shows it.
-    startup_hide: u8,
-    /// Passes left of a brief invisible show of the editor, so that eframe runs the pass that
+    /// The editor is on screen, transparent, and will be hidden again: eframe's first paint shows it.
+    startup_hide: bool,
+    /// A brief invisible show of the editor is under way, so that eframe runs the pass that
     /// creates a new window (see `wake_ui`).
-    waking: u8,
+    waking: bool,
+    /// When the editor was last made invisible-but-on-screen (startup or `wake_ui`).
+    woke_at: Instant,
     /// Passes left in which the app and its windows are brought to the front.
     front_until: Option<Instant>,
     front_title: &'static str,
@@ -191,8 +196,9 @@ impl App {
             started: false,
             quitting: false,
             hidden: !show_at_start,
-            startup_hide: 0,
-            waking: 0,
+            startup_hide: false,
+            waking: false,
+            woke_at: Instant::now(),
             front_until: None,
             front_title: "",
             ocr_running: false,
@@ -237,8 +243,8 @@ impl App {
 
     fn show_window(&mut self) {
         self.hidden = false;
-        self.waking = 0;
-        self.startup_hide = 0;
+        self.waking = false;
+        self.startup_hide = false;
         app_mode::set_editor_alpha(1.0);
         self.ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Visible(true));
         self.ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Focus);
@@ -269,7 +275,8 @@ impl App {
             return;
         }
         app_mode::set_editor_alpha(0.0);
-        self.waking = 4;
+        self.waking = true;
+        self.woke_at = Instant::now();
         self.ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Visible(true));
         self.ctx.request_repaint();
     }
@@ -284,18 +291,18 @@ impl App {
                 self.ctx.request_repaint_after(std::time::Duration::from_millis(40));
             }
         }
-        let hide = |n: &mut u8| {
-            *n = n.saturating_sub(1);
-            *n == 0
-        };
-        if self.startup_hide > 0 && hide(&mut self.startup_hide) {
-            self.hide_window();
-        }
-        if self.waking > 0 && hide(&mut self.waking) && self.hidden {
-            self.hide_window();
-        }
-        if self.startup_hide > 0 || self.waking > 0 {
-            self.ctx.request_repaint();
+        // The editor stays up, transparent, for a minimum time, so that eframe has shown it (at
+        // startup) or created the new window (see `wake_ui`) before it is hidden.
+        if self.startup_hide || self.waking {
+            if self.woke_at.elapsed() >= HIDE_DELAY {
+                self.startup_hide = false;
+                self.waking = false;
+                if self.hidden {
+                    self.hide_window();
+                }
+            } else {
+                self.ctx.request_repaint_after(std::time::Duration::from_millis(30));
+            }
         }
     }
 
@@ -456,6 +463,11 @@ impl App {
     }
 
     fn handle(&mut self, a: Action) {
+        // These come from the status item menu too. They change the current image, so the editor
+        // is shown to make the change visible.
+        if self.hidden && self.doc.is_some() && matches!(a, Action::Undo | Action::Redo | Action::ResetCrop | Action::Rasterize | Action::SaveAs) {
+            self.show_window();
+        }
         match a {
             Action::Capture(m) => self.start_capture(m, false),
             Action::InstantOcr => self.start_capture(CaptureMode::Area, true),
@@ -859,7 +871,8 @@ impl eframe::App for App {
                 // eframe shows the window once it has painted a first frame. Keep it transparent
                 // until the next one, then hide it: nothing appears on screen.
                 app_mode::set_editor_alpha(0.0);
-                self.startup_hide = 2;
+                self.startup_hide = true;
+                self.woke_at = Instant::now();
             }
             if let Some(path) = self.open_at_start.take() {
                 match system::load_image_file(&path) {

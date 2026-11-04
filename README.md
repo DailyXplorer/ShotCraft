@@ -55,7 +55,7 @@ A pinned image is a borderless window that stays above other windows. Drag it an
 
 * General: what happens after a screenshot (editor, thumbnail or nothing; copy; save), thumbnail auto-close, launch at startup, screenshots folder, save format, Retina downscale, window screenshot background and shadow.
 * Hotkeys: record or clear a shortcut for each of the six actions listed under Keyboard shortcuts. ShotCraft flags a shortcut that macOS refuses because another app uses it.
-* Advanced: OCR line breaks, hide the menu bar icon (only while a Show ShotCraft hotkey is set, since the icon is the way back into the app), keep the main window on top, zoom direction, default zoom level, what Esc does when hiding the editor (copy and/or save), and confirmation style (custom notification, system notification or none).
+* Advanced: OCR line breaks, hide the menu bar icon (only while a Show ShotCraft hotkey is set and registered, since the icon is the way back into the app), keep the main window on top, zoom direction, default zoom level, what Esc does when hiding the editor (copy and/or save), and confirmation style (custom notification, system notification or none).
 
 Settings are stored in `~/Library/Application Support/ShotCraft/settings.json`.
 
