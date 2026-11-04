@@ -73,6 +73,9 @@ fn action_for(id: &str) -> Option<Action> {
         "zoomout" => Action::ZoomOut,
         "zoomfit" => Action::ZoomFit,
         "zoom100" => Action::Zoom100,
+        "zoomsel" => Action::ZoomSelection,
+        "seltl" => Action::SelectionTopLeft,
+        "selbr" => Action::SelectionBottomRight,
         "about" => Action::About,
         "shortcuts" => Action::Shortcuts,
         t if t.starts_with("tool:") => {

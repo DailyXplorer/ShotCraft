@@ -77,6 +77,11 @@ pub fn is_draw_item(id: &str) -> bool {
     id.starts_with(TOOL_PREFIX)
 }
 
+/// The selection corner items carry plain letters too (Q and W) and follow the same rule as the Draw items.
+fn is_plain_letter_item(id: &str) -> bool {
+    is_draw_item(id) || matches!(id, "seltl" | "selbr")
+}
+
 fn app_menu() -> Entry {
     Entry::Sub {
         title: "ShotCraft",
@@ -154,6 +159,10 @@ fn zoom_menu() -> Entry {
             Entry::Sep,
             item("zoomfit", "Zoom To Fit", key(CMD, "Digit1")),
             item("zoom100", "Zoom To 100%", key(CMD, "Digit0")),
+            Entry::Sep,
+            item("zoomsel", "Zoom To Selection", key(CMD, "Digit2")),
+            item("seltl", "Selection Top Left", key(0, "KeyQ")),
+            item("selbr", "Selection Bottom Right", key(0, "KeyW")),
             Entry::Sep,
             Entry::Native { kind: Native::FullScreen, title: Some("Enter Full Screen") },
         ],
@@ -242,7 +251,7 @@ pub fn hotkey_of_item(id: &str) -> Option<HotkeyAction> {
 
 /// Whether the state of the editor decides if an item is enabled (see `item_enabled`).
 pub fn is_stateful(id: &str) -> bool {
-    is_draw_item(id) || matches!(id, "copy" | "save" | "saveas" | "pin" | "print" | "undo" | "redo" | "resetcrop" | "rasterize" | "zoomin" | "zoomout" | "zoomfit" | "zoom100" | "close")
+    is_plain_letter_item(id) || matches!(id, "zoomsel" | "copy" | "save" | "saveas" | "pin" | "print" | "undo" | "redo" | "resetcrop" | "rasterize" | "zoomin" | "zoomout" | "zoomfit" | "zoom100" | "close")
 }
 
 /// What decides which menu items can act.
@@ -265,9 +274,9 @@ pub struct MenuState {
 /// taking text, and the letters reach whoever is typing. A disabled item lets the key through.
 pub fn item_enabled(id: &str, st: &MenuState) -> bool {
     match id {
-        "copy" | "save" | "saveas" | "pin" | "print" | "undo" | "redo" | "resetcrop" | "rasterize" | "zoomin" | "zoomout" | "zoomfit" | "zoom100" => st.has_image,
+        "copy" | "save" | "saveas" | "pin" | "print" | "undo" | "redo" | "resetcrop" | "rasterize" | "zoomin" | "zoomout" | "zoomfit" | "zoom100" | "zoomsel" => st.has_image,
         "close" => st.has_image && st.editor_visible,
-        _ if is_draw_item(id) => {
+        _ if is_plain_letter_item(id) => {
             st.has_image && st.editor_visible && st.editor_focused && !st.typing && !(st.c_copies_colour && id == format!("{TOOL_PREFIX}{}", Tool::Counter.name()))
         }
         _ => true,
@@ -340,7 +349,7 @@ mod tests {
             "File [Copy Image | Save Image | Save Image As | Pin to Screen | Print… | - | Open File | Open From Clipboard | - | Close | Close All]",
             "Edit [Undo | Redo | Reset Crop | Rasterize (Merge) Image | - | Cut | Copy | Paste | PasteAndMatchStyle | Delete | SelectAll]",
             "Draw [Arrow | Text | Rectangle | Freehand Drawing | Magnifier | Highlighter | Blur | Spotlight | Counter | Oval | Line | Add Capture | - | Snap to Objects | Snap to Similar Objects]",
-            "Zoom [Zoom In | Zoom Out | - | Zoom To Fit | Zoom To 100% | - | Enter Full Screen]",
+            "Zoom [Zoom In | Zoom Out | - | Zoom To Fit | Zoom To 100% | - | Zoom To Selection | Selection Top Left | Selection Bottom Right | - | Enter Full Screen]",
             "Help [Keyboard Shortcuts]",
         ];
         assert_eq!(names, expected);
@@ -497,6 +506,15 @@ mod tests {
         let ok = MenuState { has_image: true, editor_visible: true, editor_focused: true, typing: false, c_copies_colour: true };
         assert!(!item_enabled("tool:Counter", &ok));
         assert!(item_enabled("tool:Oval", &ok));
+    }
+
+    #[test]
+    fn selection_corner_letters_follow_the_draw_rule() {
+        let ok = MenuState { has_image: true, editor_visible: true, editor_focused: true, typing: false, c_copies_colour: false };
+        for id in ["seltl", "selbr"] {
+            assert!(item_enabled(id, &ok));
+            assert!(!item_enabled(id, &MenuState { typing: true, ..ok }));
+        }
     }
 
     #[test]

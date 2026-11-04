@@ -412,7 +412,28 @@ pub fn draw_obj(pm: &mut Pixmap, obj: &Obj, fonts: &Fonts, scale_factor: f32) {
             pm.stroke_path(&path, &paint(st.color, 1.0), &stroke(line, st.dashed), tf, None);
         }
         Kind::Freehand { pts } => {
+            if let [only] = pts.as_slice() {
+                // A single click draws a point.
+                let mut pb = PathBuilder::new();
+                pb.push_circle(only.x, only.y, w / 2.0);
+                if let Some(path) = pb.finish() {
+                    pm.fill_path(&path, &paint(st.color, 1.0), FillRule::Winding, tf, None);
+                }
+                return;
+            }
             if pts.len() < 2 {
+                return;
+            }
+            let pts = freehand_smooth(pts, st.smooth);
+            if st.vary > 0 && !st.dashed {
+                for (i, seg_w) in freehand_widths(&pts, w, st.vary, st.scale).into_iter().enumerate() {
+                    let mut pb = PathBuilder::new();
+                    pb.move_to(pts[i].x, pts[i].y);
+                    pb.line_to(pts[i + 1].x, pts[i + 1].y);
+                    if let Some(path) = pb.finish() {
+                        pm.stroke_path(&path, &paint(st.color, 1.0), &stroke(seg_w, false), tf, None);
+                    }
+                }
                 return;
             }
             let mut pb = PathBuilder::new();
@@ -434,12 +455,13 @@ pub fn draw_obj(pm: &mut Pixmap, obj: &Obj, fonts: &Fonts, scale_factor: f32) {
             if let Some(path) = pb.finish() {
                 let mut pt = paint(st.color, 1.0);
                 pt.blend_mode = BlendMode::Multiply;
-                let s = Stroke { width: st.highlight_size(), line_cap: LineCap::Butt, ..Default::default() };
+                let cap = if st.round_cap { LineCap::Round } else { LineCap::Butt };
+                let s = Stroke { width: st.highlight_size(), line_cap: cap, ..Default::default() };
                 pm.stroke_path(&path, &pt, &s, tf, None);
             }
         }
         Kind::Blur { r, text } => draw_blur(pm, r, text.as_deref(), st, scale_factor),
-        Kind::Spotlight { r } => draw_spotlight(pm, &[(*r, st.shape)]),
+        Kind::Spotlight { r } => draw_spotlight(pm, &[(*r, st.shape)], st.dim),
         Kind::Counter { at, n } => {
             let d = st.counter_size();
             let r = R { x0: at.x - d / 2.0, y0: at.y - d / 2.0, x1: at.x + d / 2.0, y1: at.y + d / 2.0 };
@@ -956,7 +978,7 @@ fn draw_blur(pm: &mut Pixmap, area: &R, text: Option<&[R]>, st: &Style, scale: f
     }
 }
 
-pub fn draw_spotlight(pm: &mut Pixmap, holes: &[(R, Shape)]) {
+pub fn draw_spotlight(pm: &mut Pixmap, holes: &[(R, Shape)], dim: f32) {
     let (w, h) = (pm.width() as f32, pm.height() as f32);
     let mut pb = PathBuilder::new();
     if let Some(full) = Rect::from_xywh(0.0, 0.0, w, h) {
@@ -971,7 +993,7 @@ pub fn draw_spotlight(pm: &mut Pixmap, holes: &[(R, Shape)]) {
         }
     }
     if let Some(path) = pb.finish() {
-        pm.fill_path(&path, &paint([0, 0, 0, 255], SPOTLIGHT_DIM), FillRule::EvenOdd, Transform::identity(), None);
+        pm.fill_path(&path, &paint([0, 0, 0, 255], dim), FillRule::EvenOdd, Transform::identity(), None);
     }
 }
 
@@ -1183,6 +1205,8 @@ pub fn compose(doc: &Doc, fonts: &Fonts, skip: Option<usize>) -> Pixmap {
         .filter(|(i, _)| Some(*i) != skip)
         .filter_map(|(_, o)| if let Kind::Spotlight { r } = o.kind { Some((r, o.style.shape)) } else { None })
         .collect();
+    // Every spotlight shares one dark layer, as dark as the newest spotlight says.
+    let dim = doc.objs.iter().enumerate().rev().find(|(i, o)| Some(*i) != skip && matches!(o.kind, Kind::Spotlight { .. })).map_or(SPOTLIGHT_DIM, |(_, o)| o.style.dim);
     let mut spot_done = false;
     for (i, o) in doc.objs.iter().enumerate() {
         if Some(i) == skip {
@@ -1190,7 +1214,7 @@ pub fn compose(doc: &Doc, fonts: &Fonts, skip: Option<usize>) -> Pixmap {
         }
         if let Kind::Spotlight { .. } = o.kind {
             if !spot_done {
-                draw_spotlight(&mut pm, &holes);
+                draw_spotlight(&mut pm, &holes, dim);
                 spot_done = true;
             }
             continue;
@@ -1524,30 +1548,7 @@ pub fn average(img: &Image, r: &R) -> Rgba {
     [(acc[0] / n) as u8, (acc[1] / n) as u8, (acc[2] / n) as u8, 255]
 }
 
-pub fn format_color(c: Rgba, fmt: usize) -> String {
-    let f = |v: u8| v as f32 / 255.0;
-    match fmt {
-        1 => format!("{:02X}{:02X}{:02X}", c[0], c[1], c[2]),
-        2 => format!("{}, {}, {}", c[0], c[1], c[2]),
-        3 => format!("({:.2}, {:.2}, {:.2})", f(c[0]), f(c[1]), f(c[2])),
-        4 => format!("UIColor(red: {:.2}, green: {:.2}, blue: {:.2}, alpha: 1)", f(c[0]), f(c[1]), f(c[2])),
-        5 => format!("rgba({}, {}, {}, 1)", c[0], c[1], c[2]),
-        6 => format!("Color.FromArgb({}, {}, {});", c[0], c[1], c[2]),
-        7 => format!("0xFF{:02X}{:02X}{:02X}", c[0], c[1], c[2]),
-        _ => format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2]),
-    }
-}
-
-pub const COLOR_FORMATS: [&str; 8] = [
-    "HEX #FFC200",
-    "HEX FFC200",
-    "RGB 255, 194, 0",
-    "RGB (1.00, 0.76, 0.00)",
-    "UIColor (Swift)",
-    "CSS rgba()",
-    "C# Color",
-    "Android 0xFFFFC200",
-];
+pub use crate::color::{format_color, COLOR_FORMATS};
 
 #[cfg(test)]
 mod tests {
@@ -1582,6 +1583,75 @@ mod tests {
         let img = Image { w, h, px: Arc::new(px) };
         let (a, b) = ruler_span(&img, p(10.0, 1.0), true, RULER_SENSITIVITY);
         assert_eq!((a.x, b.x), (0.0, 60.0));
+    }
+
+    fn ink_rows(pm: &Pixmap, x: u32) -> usize {
+        (0..pm.height()).filter(|y| pm.pixel(x, *y).unwrap().alpha() > 128).count()
+    }
+
+    #[test]
+    fn freehand_with_one_point_paints_a_dot() {
+        let fonts = Fonts::load();
+        let mut st = Style::default();
+        st.size = 4;
+        let pm = painted(&Obj { kind: Kind::Freehand { pts: vec![p(50.0, 50.0)] }, style: st }, &fonts, 100, 100);
+        let ink = ink(&pm);
+        assert!(!ink.is_empty());
+        let (minx, maxx) = (ink.iter().map(|q| q.0).min().unwrap(), ink.iter().map(|q| q.0).max().unwrap());
+        assert!(((maxx - minx + 1) as f32 - st.width()).abs() <= 2.0, "as wide as the line: {} vs {}", maxx - minx + 1, st.width());
+        assert!(painted(&Obj { kind: Kind::Freehand { pts: vec![] }, style: st }, &fonts, 100, 100).pixels().iter().all(|c| c.alpha() == 0));
+    }
+
+    #[test]
+    fn freehand_variability_thins_the_fast_part_of_a_stroke() {
+        let fonts = Fonts::load();
+        let mut st = Style::default();
+        st.size = 5;
+        let pts: Vec<P> = [10.0, 14.0, 18.0, 22.0, 26.0, 30.0, 34.0, 38.0, 90.0, 142.0, 194.0, 246.0, 298.0].iter().map(|x| p(*x, 50.0)).collect();
+        let stroke = |vary| painted(&Obj { kind: Kind::Freehand { pts: pts.clone() }, style: Style { vary, ..st } }, &fonts, 320, 100);
+        let plain = stroke(0);
+        let varied = stroke(2);
+        assert_eq!(ink_rows(&plain, 20), ink_rows(&plain, 250), "one width without variability");
+        assert!(ink_rows(&varied, 20) > ink_rows(&varied, 250) + 2, "slow part {} fast part {}", ink_rows(&varied, 20), ink_rows(&varied, 250));
+    }
+
+    #[test]
+    fn freehand_smoothness_rounds_off_a_corner() {
+        let fonts = Fonts::load();
+        let st = Style::default();
+        let corner: Vec<P> = (0..=10).map(|i| p(10.0 + i as f32 * 8.0, 70.0)).chain((1..=10).map(|i| p(90.0, 70.0 - i as f32 * 8.0))).collect();
+        let sharp = painted(&Obj { kind: Kind::Freehand { pts: corner.clone() }, style: st }, &fonts, 120, 100);
+        let smooth = painted(&Obj { kind: Kind::Freehand { pts: corner }, style: Style { smooth: 6, ..st } }, &fonts, 120, 100);
+        let outer = |pm: &Pixmap| ink(pm).iter().filter(|q| q.0 >= 90 && q.1 >= 68).count();
+        assert!(outer(&smooth) < outer(&sharp), "the smoothed stroke cuts the corner: {} vs {}", outer(&smooth), outer(&sharp));
+    }
+
+    #[test]
+    fn highlighter_cap_style_changes_the_ends() {
+        let fonts = Fonts::load();
+        let obj = |round_cap| Obj { kind: Kind::Highlighter { a: p(40.0, 50.0), b: p(160.0, 50.0) }, style: Style { round_cap, ..Style::default() } };
+        let flat = painted(&obj(false), &fonts, 200, 100);
+        let round = painted(&obj(true), &fonts, 200, 100);
+        assert_eq!(flat.pixel(35, 50).unwrap().alpha(), 0, "flat ends stop at the points");
+        assert!(round.pixel(35, 50).unwrap().alpha() > 0, "round ends reach past them");
+        assert_eq!(round.pixel(40, 50).unwrap().alpha(), flat.pixel(40, 50).unwrap().alpha());
+    }
+
+    #[test]
+    fn spotlight_darkness_follows_the_style() {
+        let fonts = Fonts::load();
+        let hole = R { x0: 20.0, y0: 20.0, x1: 60.0, y1: 60.0 };
+        let shade = |dim: f32| {
+            let mut doc = Doc::new(Image { w: 100, h: 100, px: Arc::new([255u8; 40000].to_vec()) }, 1.0);
+            doc.objs = vec![Obj { kind: Kind::Spotlight { r: hole }, style: Style { dim, ..Style::default() } }];
+            let pm = compose(&doc, &fonts, None);
+            (pm.pixel(80, 80).unwrap().red(), pm.pixel(40, 40).unwrap().red())
+        };
+        let (light_out, light_in) = shade(0.2);
+        let (dark_out, dark_in) = shade(0.8);
+        assert_eq!((light_in, dark_in), (255, 255), "the lit part is untouched");
+        assert!(dark_out < light_out, "{dark_out} < {light_out}");
+        assert!((light_out as f32 - 255.0 * 0.8).abs() < 3.0 && (dark_out as f32 - 255.0 * 0.2).abs() < 3.0);
     }
 
     #[test]

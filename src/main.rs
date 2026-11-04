@@ -1,4 +1,5 @@
 mod app_mode;
+mod color;
 mod editor;
 #[cfg(test)]
 mod headless;
@@ -10,6 +11,7 @@ mod prefs;
 mod render;
 mod autoscroll;
 mod scroll;
+mod selection;
 mod scroll_control;
 mod settings;
 mod sizing;
@@ -21,11 +23,12 @@ mod shell;
 mod updater;
 mod system;
 mod targets;
+mod windowbg;
 
 use eframe::egui::{self, Color32, ViewportBuilder, ViewportCommand, ViewportId};
 use model::{Doc, Image, Tool};
 use render::Fonts;
-use settings::{AfterShow, Confirm, Settings, WindowBg};
+use settings::{AfterShow, Confirm, Settings};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -57,6 +60,9 @@ pub enum Action {
     ZoomOut,
     ZoomFit,
     Zoom100,
+    ZoomSelection,
+    SelectionTopLeft,
+    SelectionBottomRight,
     About,
     Shortcuts,
     Tool(Tool),
@@ -395,11 +401,11 @@ impl App {
         if was_visible {
             self.hide_window();
         }
-        let solid = (self.settings.window_bg == WindowBg::Solid).then(|| model::hex(&self.settings.window_solid));
+        let solid = model::hex(&self.settings.window_solid);
         let opt = system::CaptureOptions {
             last_area: self.settings.last_area.map(|a| model::R { x0: a[0], y0: a[1], x1: a[2], y1: a[3] }),
-            trim_shadow: self.settings.trim_shadow,
-            solid_bg: solid,
+            window_bg: self.settings.window_bg,
+            solid_color: [solid[0], solid[1], solid[2]],
             scale: self.pixels_per_point(),
             snapshot,
         };
