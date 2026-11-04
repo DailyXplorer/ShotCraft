@@ -15,6 +15,8 @@ mod selection;
 mod scroll_control;
 mod settings;
 mod sizing;
+#[cfg(test)]
+mod pin_shots;
 mod stitch;
 mod tiled;
 #[cfg(target_os = "macos")]
@@ -125,6 +127,10 @@ pub struct Pin {
     /// Screen the window is sized for. Set by `pins_ui` only, so the window, the picture and the
     /// scroll range always agree, wherever the pin is dragged to.
     screen: egui::Vec2,
+    /// Turns wheel events over the pin into zoom steps.
+    wheel: sizing::WheelZoom,
+    /// The "Zoom with mouse wheel" preference, copied here by `pins_ui` like `screen`.
+    reverse_wheel: bool,
     tex: Option<tiled::TiledTexture>,
     open: bool,
 }
@@ -617,7 +623,7 @@ impl App {
     pub fn pin(&mut self, img: Image, scale: f32) {
         let id = self.next_pin;
         self.next_pin += 1;
-        self.pins.push(Arc::new(Mutex::new(Pin { id, img, scale, zoom: 1.0, semi: false, scroll: 0.0, screen: screen_size(&self.ctx), tex: None, open: true })));
+        self.pins.push(Arc::new(Mutex::new(Pin { id, img, scale, zoom: 1.0, semi: false, scroll: 0.0, screen: screen_size(&self.ctx), wheel: sizing::WheelZoom::default(), reverse_wheel: self.settings.reverse_zoom, tex: None, open: true })));
         self.wake_ui();
         self.bring_to_front("ShotCraft Pin");
     }
@@ -853,6 +859,7 @@ impl App {
             let (id, size) = {
                 let mut p = pin.lock().unwrap();
                 p.screen = screen_size(ctx);
+                p.reverse_wheel = self.settings.reverse_zoom;
                 (p.id, p.layout().window)
             };
             let builder = ViewportBuilder::default()
@@ -869,17 +876,19 @@ impl App {
 
     fn thumb_ui(&mut self, ctx: &egui::Context) {
         let Some(shared) = self.thumb.clone() else { return };
-        let (dims, expired) = {
+        let (dims, close) = {
             let th = shared.lock().unwrap();
-            ((th.img.w as u32, th.img.h as u32), th.blurred || (!th.hovered && th.born.elapsed().as_secs_f32() > 6.0))
+            let idle = th.born.elapsed().as_secs_f32();
+            ((th.img.w as u32, th.img.h as u32), sizing::thumb_should_close(self.settings.thumbnail_auto_close, idle, th.hovered, th.blurred))
         };
-        if expired && self.settings.thumbnail_auto_close {
+        if close {
             self.thumb = None;
             return;
         }
-        let size = egui::Vec2::from(sizing::thumb_layout(dims, model::THUMB_WIDTH, model::THUMB_MAX_HEIGHT).window);
+        let window = sizing::thumb_layout(dims, model::THUMB_WIDTH, model::THUMB_MAX_HEIGHT).window;
+        let size = egui::Vec2::from(window);
         let monitor = screen_size(ctx);
-        let pos = egui::pos2(monitor.x - size.x - 24.0, monitor.y - size.y - 72.0);
+        let pos = egui::Pos2::from(sizing::thumb_origin((monitor.x, monitor.y), window));
         let builder = ViewportBuilder::default()
             .with_title("ShotCraft Preview")
             .with_inner_size(size)
@@ -958,18 +967,83 @@ fn screen_size(ctx: &egui::Context) -> egui::Vec2 {
     ctx.input(|i| i.viewport().monitor_size).unwrap_or(egui::vec2(1440.0, 900.0))
 }
 
+/// Resizes a pin's window around its centre, so the picture grows and shrinks under the pointer.
+fn resize_pin_window(ctx: &egui::Context, old: sizing::Size, new: sizing::Size) {
+    ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(new.0, new.1)));
+    if let Some(outer) = ctx.input(|i| i.viewport().outer_rect) {
+        let at = sizing::recentered((outer.min.x, outer.min.y), old, new);
+        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(egui::pos2(at.0, at.1)));
+    }
+    ctx.request_repaint_of(ViewportId::ROOT);
+}
+
+/// Turns the drop shadow of the pin window under `ctx` on or off. The pin windows share a title, so
+/// this one is found by its frame. (Asking eframe for another `has_shadow` would rebuild the window.)
+#[cfg(target_os = "macos")]
+fn set_pin_shadow(ctx: &egui::Context, shadow: bool) {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSScreen};
+    let Some(outer) = ctx.input(|i| i.viewport().outer_rect) else { return };
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let Some(primary) = NSScreen::screens(mtm).iter().next() else { return };
+    let top = primary.frame().size.height;
+    for w in NSApplication::sharedApplication(mtm).windows().iter().filter(|w| w.title().to_string() == "ShotCraft Pin") {
+        let f = w.frame();
+        let (x, y) = (f.origin.x as f32, (top - f.origin.y - f.size.height) as f32);
+        if (x - outer.min.x).abs() < 2.0 && (y - outer.min.y).abs() < 2.0 {
+            w.setHasShadow(shadow);
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_pin_shadow(_ctx: &egui::Context, _shadow: bool) {}
+
 fn pin_window(ui: &mut egui::Ui, pin: &mut Pin, queue: &Queue) {
     let ctx = ui.ctx().clone();
     let (img, scale) = (pin.img.clone(), pin.scale);
     let layout = pin.layout();
-    let tex = pin.tex.get_or_insert_with(|| tiled::TiledTexture::new(&ctx, &format!("pin-{}", pin.id), (img.w, img.h), &img.px, tiled::Alpha::Straight, egui::TextureOptions::LINEAR));
     let rect = ui.max_rect();
     let resp = ui.allocate_rect(rect, egui::Sense::click_and_drag());
     let tint = if pin.semi { Color32::from_white_alpha(140) } else { Color32::WHITE };
-    if layout.max_scroll() > 0.0 && resp.hovered() {
-        pin.scroll -= ui.input(|i| i.smooth_scroll_delta.y);
+    let mut layout = layout;
+    if resp.hovered() {
+        // The wheel resizes the pin, and scrolls it instead when the picture is taller than the
+        // screen (Option or Command held: the other one). See `sizing::pin_wheel_action`.
+        let tall = Pin::layout_of(&img, scale, 1.0, pin.screen).max_scroll() > 0.0;
+        let (events, now) = ui.input(|i| (i.raw.events.clone(), i.time));
+        let mut resized_from = None;
+        for e in &events {
+            let egui::Event::MouseWheel { unit, delta, phase, modifiers } = e else { continue };
+            let precise = *unit == egui::MouseWheelUnit::Point;
+            let phase = match phase {
+                egui::TouchPhase::Start => sizing::WheelPhase::Start,
+                egui::TouchPhase::Move => sizing::WheelPhase::Move,
+                egui::TouchPhase::End | egui::TouchPhase::Cancel => sizing::WheelPhase::End,
+            };
+            if sizing::pin_wheel_action(tall, modifiers.alt || modifiers.command) == sizing::PinWheel::Scroll {
+                pin.scroll -= if precise { delta.y } else { delta.y * 50.0 };
+                pin.scroll = pin.scroll.clamp(0.0, layout.max_scroll());
+                continue;
+            }
+            let Some(zoom_in) = pin.wheel.feed(precise, delta.y, phase, pin.reverse_wheel, now) else { continue };
+            // The zoom as shown, which is lower than `pin.zoom` while the screen caps the pin.
+            let natural = egui::vec2(img.w as f32, img.h as f32) / scale.max(1.0) * pin.zoom;
+            let shown_pct = (pin.zoom * 100.0 * layout.content.0 / natural.x.max(1.0)).round() as u32;
+            let max_w = sizing::pin_max((pin.screen.x, pin.screen.y)).0;
+            let Some(next) = sizing::pin_zoom_step(shown_pct, zoom_in, layout.window.0, max_w) else { continue };
+            resized_from.get_or_insert(layout);
+            pin.zoom = next as f32 / 100.0;
+            let new = pin.layout();
+            pin.scroll = sizing::rescaled_scroll(pin.scroll, layout.content.1, new.content.1);
+            layout = new;
+        }
+        if let Some(old) = resized_from {
+            resize_pin_window(&ctx, old.window, layout.window);
+        }
     }
     pin.scroll = pin.scroll.clamp(0.0, layout.max_scroll());
+    let tex = pin.tex.get_or_insert_with(|| tiled::TiledTexture::new(&ctx, &format!("pin-{}", pin.id), (img.w, img.h), &img.px, tiled::Alpha::Straight, egui::TextureOptions::LINEAR));
     let content = egui::Rect::from_min_size(rect.min - egui::vec2(0.0, pin.scroll), egui::vec2(layout.content.0, layout.content.1));
     tex.paint_in(&ui.painter().with_clip_rect(rect), content, tint);
     if resp.drag_started() {
@@ -1011,12 +1085,14 @@ fn pin_window(ui: &mut egui::Ui, pin: &mut Pin, queue: &Queue) {
             if ui.radio(pin.zoom == z, label).clicked() {
                 pin.zoom = z;
                 let window = pin.layout().window;
-                ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(window.0, window.1)));
+                resize_pin_window(&ctx, layout.window, window);
                 ctx.request_repaint_of(ViewportId::ROOT);
                 ui.close();
             }
         }
         if ui.checkbox(&mut pin.semi, "Semi-transparent").clicked() {
+            // A see-through pin has no shadow: it is meant to be laid over something to compare.
+            set_pin_shadow(&ctx, !pin.semi);
             ui.close();
         }
         ui.separator();
@@ -1037,8 +1113,9 @@ fn pin_window(ui: &mut egui::Ui, pin: &mut Pin, queue: &Queue) {
 fn thumb_window(ui: &mut egui::Ui, th: &mut Thumb, queue: &Queue) {
     let ctx = ui.ctx().clone();
     // Automatic closing follows the window losing focus.
+    // `born` is when the pointer was last on it (or when it opened): the automatic timer counts from there.
     let focused = ctx.input(|i| i.viewport().focused.unwrap_or(false));
-    th.blurred |= th.focused && !focused;
+    th.blurred = sizing::lost_focus(th.focused, focused, th.blurred);
     th.focused = focused;
     let img = th.img.clone();
     let tex = th.tex.get_or_insert_with(|| tiled::TiledTexture::new(&ctx, "thumb", (img.w, img.h), &img.px, tiled::Alpha::Straight, egui::TextureOptions::LINEAR));
@@ -1049,8 +1126,9 @@ fn thumb_window(ui: &mut egui::Ui, th: &mut Thumb, queue: &Queue) {
     let image = sizing::thumb_layout((img.w as u32, img.h as u32), model::THUMB_WIDTH, model::THUMB_MAX_HEIGHT).image;
     let img_r = egui::Rect::from_center_size(rect.center(), egui::vec2(image.0, image.1));
     tex.paint_in(ui.painter(), img_r, Color32::WHITE);
-    if resp.hovered() {
-        th.hovered = true;
+    th.hovered = resp.hovered();
+    if th.hovered {
+        th.born = Instant::now();
         ui.painter().rect_filled(rect.shrink(sizing::THUMB_PAD), 6.0, Color32::from_black_alpha(110));
         let items = [
             (icons::Icon::Edit, "Edit", ThumbAction::Edit),

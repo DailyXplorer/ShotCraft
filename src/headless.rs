@@ -304,6 +304,57 @@ impl Rig {
     }
 }
 
+impl Rig {
+    /// Runs `body` for a few frames in a window of `size` points and returns the last frame. The
+    /// third frame gets `events`; the others get no input. Used for the small windows
+    /// (pins, thumbnail).
+    pub fn render_window(
+        &mut self,
+        size: (f32, f32),
+        ppp: f32,
+        events: Vec<egui::Event>,
+        mut body: impl FnMut(&mut egui::Ui),
+    ) -> Image {
+        self.ctx.set_visuals(egui::Visuals::dark());
+        self.ctx.set_pixels_per_point(ppp);
+        let mut last = None;
+        for n in 0..4 {
+            let mut input = RawInput::default();
+            input.screen_rect = Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(size.0, size.1),
+            ));
+            self.frame += 1;
+            input.time = Some(self.frame as f64 * 0.05);
+            input.viewport_id = ViewportId::ROOT;
+            if n == 2 {
+                input.events = events.clone();
+            }
+            let mut out = self.ctx.run_ui(input, |ui| body(ui));
+            self.soft.apply(&out.textures_delta);
+            out.textures_delta.clear();
+            last = Some((out.shapes, out.pixels_per_point));
+        }
+        let (shapes, ppp) = last.unwrap();
+        let prims = self.ctx.tessellate(shapes, ppp);
+        let (w, h) = ((size.0 * ppp) as usize, (size.1 * ppp) as usize);
+        // Light grey behind, so that the window edge and its transparency show.
+        let mut fb = vec![0.0f32; w * h * 4];
+        for px in fb.chunks_exact_mut(4) {
+            px.copy_from_slice(&[0.85, 0.85, 0.87, 1.0]);
+        }
+        self.soft.paint(&mut fb, w, h, ppp, &prims);
+        for id in std::mem::take(&mut self.soft.freed) {
+            self.soft.textures.remove(&id);
+        }
+        let bytes = fb
+            .iter()
+            .map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8)
+            .collect();
+        Image { w: w as u32, h: h as u32, px: Arc::new(bytes) }
+    }
+}
+
 pub fn save_png(img: &Image, path: &std::path::Path) {
     let rgba = image::RgbaImage::from_raw(img.w, img.h, img.px.to_vec()).unwrap();
     if let Some(dir) = path.parent() {
