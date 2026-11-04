@@ -70,6 +70,167 @@ pub fn pin_max(screen: Size) -> Size {
     (screen.0 * PIN_SCREEN_FRACTION, screen.1 * PIN_SCREEN_FRACTION)
 }
 
+/// A pin never gets narrower than this when the wheel zooms it out (a smaller picture can still
+/// be zoomed in).
+pub const PIN_MIN_WIDTH: f32 = 100.0;
+/// Smallest zoom the wheel steps down to, in percent.
+pub const PIN_MIN_ZOOM_PCT: u32 = 5;
+/// A trackpad swipe moves the pin one zoom step per this many points of scrolling.
+pub const PIN_WHEEL_THRESHOLD: f32 = 20.0;
+
+/// One wheel step is a third of an octave: three steps double or halve the pin.
+const PIN_ZOOM_FACTOR: f32 = 1.259_921;
+
+/// The zoom (in percent of the picture at its own size) one wheel step away, or `None` when the pin
+/// is at its limit. `shown_width` is the pin's width now and `max_width` the widest it may get.
+/// The factor is applied to the percent, which is then snapped down to a multiple of 5 up to 90 and
+/// of 25 above, so repeated steps land on round values (100, 125, 150, 175, 200, 250, ...).
+pub fn pin_zoom_step(current_pct: u32, zoom_in: bool, shown_width: f32, max_width: f32) -> Option<u32> {
+    if !shown_width.is_finite() || !max_width.is_finite() {
+        return None;
+    }
+    let cur = current_pct.max(PIN_MIN_ZOOM_PCT);
+    if zoom_in && shown_width >= max_width || !zoom_in && shown_width <= PIN_MIN_WIDTH {
+        return None;
+    }
+    let target = cur as f32 * if zoom_in { PIN_ZOOM_FACTOR } else { 1.0 / PIN_ZOOM_FACTOR };
+    let grid = if target > 90.0 { 25 } else { 5 };
+    let snapped = ((target / grid as f32).floor() as u32 * grid).max(PIN_MIN_ZOOM_PCT);
+    // Snapping down must never turn a step up into no step at all.
+    if zoom_in {
+        Some(if snapped > cur { snapped } else { cur + grid })
+    } else if snapped < cur {
+        Some(snapped)
+    } else {
+        None
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WheelPhase {
+    Start,
+    Move,
+    End,
+}
+
+/// A swipe that starts less than this long after the fingers lifted is taken for the start of the
+/// inertia (macOS reports both as "started"), not for a new swipe.
+pub const WHEEL_INERTIA_GAP_SECS: f64 = 0.15;
+
+/// Turns wheel events over a pin into zoom steps.
+///
+/// A classic wheel steps once per notch. A trackpad (`precise`) adds its deltas up and steps once
+/// per `PIN_WHEEL_THRESHOLD` points, so a slow swipe is a few steps and not one per event. The
+/// inertia that follows a swipe is dropped: otherwise one flick would zoom the pin all the way.
+#[derive(Debug, Clone, Copy)]
+pub struct WheelZoom {
+    acc: f32,
+    coasting: bool,
+    last_end: f64,
+}
+
+impl Default for WheelZoom {
+    fn default() -> Self {
+        WheelZoom { acc: 0.0, coasting: false, last_end: f64::NEG_INFINITY }
+    }
+}
+
+impl WheelZoom {
+    /// `dy` > 0 is a scroll up, which zooms in unless `reverse`; `now` is in seconds. Returns
+    /// `Some(zoom_in)` for a step.
+    pub fn feed(&mut self, precise: bool, dy: f32, phase: WheelPhase, reverse: bool, now: f64) -> Option<bool> {
+        match phase {
+            WheelPhase::Start => {
+                if now - self.last_end > WHEEL_INERTIA_GAP_SECS {
+                    self.coasting = false;
+                    self.acc = 0.0;
+                }
+            }
+            WheelPhase::End => {
+                self.coasting = precise;
+                self.last_end = now;
+                self.acc = 0.0;
+                return None;
+            }
+            WheelPhase::Move => {}
+        }
+        if !dy.is_finite() || dy == 0.0 || (precise && self.coasting) {
+            return None;
+        }
+        let up = if precise {
+            self.acc += dy;
+            if self.acc.abs() <= PIN_WHEEL_THRESHOLD {
+                return None;
+            }
+            let up = self.acc > 0.0;
+            self.acc -= PIN_WHEEL_THRESHOLD.copysign(self.acc);
+            up
+        } else {
+            dy > 0.0
+        };
+        Some(up != reverse)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinWheel {
+    Zoom,
+    Scroll,
+}
+
+/// What the wheel does over a pin. It resizes the pin, as in the original. A pin whose picture is
+/// taller than the screen at its own size (a long scrolling capture, `tall`) scrolls instead,
+/// since the wheel is the only way to read it; Option or Command held with the wheel does the
+/// other one. `tall` is a property of the picture, not of the current zoom, so the wheel does not
+/// change meaning in the middle of a gesture.
+pub fn pin_wheel_action(tall: bool, flip: bool) -> PinWheel {
+    if tall != flip {
+        PinWheel::Scroll
+    } else {
+        PinWheel::Zoom
+    }
+}
+
+/// Window origin that keeps the window centred on the same point when it goes from `old` to `new`.
+pub fn recentered(origin: Size, old: Size, new: Size) -> Size {
+    (origin.0 + (old.0 - new.0) / 2.0, origin.1 + (old.1 - new.1) / 2.0)
+}
+
+/// Scroll offset after the picture goes from height `old_h` to `new_h`: the same part of the picture
+/// stays at the top of the window.
+pub fn rescaled_scroll(scroll: f32, old_h: f32, new_h: f32) -> f32 {
+    if old_h > 0.0 && new_h > 0.0 && scroll.is_finite() {
+        scroll * new_h / old_h
+    } else {
+        0.0
+    }
+}
+
+/// Gap between the thumbnail and the right edge of the screen, and its bottom edge (which leaves
+/// room for the Dock).
+pub const THUMB_MARGIN_RIGHT: f32 = 24.0;
+pub const THUMB_MARGIN_BOTTOM: f32 = 72.0;
+/// In automatic mode, the thumbnail goes away this long after the pointer last left it.
+pub const THUMB_AUTO_HIDE_SECS: f32 = 6.0;
+
+/// Top-left corner of the thumbnail window: bottom right of the screen.
+pub fn thumb_origin(screen: Size, window: Size) -> Size {
+    (screen.0 - window.0 - THUMB_MARGIN_RIGHT, screen.1 - window.1 - THUMB_MARGIN_BOTTOM)
+}
+
+/// Whether the thumbnail should go away. Manual mode never closes it (only its close button, or
+/// using the picture, does). Automatic mode closes it when it loses focus (a click anywhere else),
+/// or after `THUMB_AUTO_HIDE_SECS` without the pointer on it.
+pub fn thumb_should_close(auto: bool, idle_secs: f32, hovered: bool, lost_focus: bool) -> bool {
+    auto && (lost_focus || (!hovered && idle_secs > THUMB_AUTO_HIDE_SECS))
+}
+
+/// Focus tracking for the thumbnail: "lost focus" means it had focus and no longer has it. A
+/// thumbnail that never got focus is left to the timer.
+pub fn lost_focus(had_focus: bool, has_focus: bool, already_lost: bool) -> bool {
+    already_lost || (had_focus && !has_focus)
+}
+
 /// Editor window for a picture of `content` points: close to a square whatever the shape of the
 /// picture, at least `min_width` wide, never larger than the screen.
 pub fn editor_window(content: Size, chrome: f32, margin: f32, min_width: f32, min_height_ratio: f32, screen: Size) -> Size {
@@ -187,5 +348,169 @@ mod tests {
             assert!(w >= 940.0);
         }
         assert_eq!(editor_window((500.0, 4000.0), 120.0, 48.0, 940.0, 0.9, screen), (940.0, 900.0));
+    }
+
+    #[test]
+    fn thumbnail_has_the_original_size() {
+        assert_eq!(crate::model::THUMB_WIDTH, 204.0);
+        assert_eq!(crate::model::THUMB_MAX_HEIGHT, 190.0);
+        let t = thumb_layout((1920, 1080), crate::model::THUMB_WIDTH, crate::model::THUMB_MAX_HEIGHT);
+        assert_eq!(t.window.0, 204.0);
+        assert!(t.window.1 <= 190.0);
+    }
+
+    #[test]
+    fn thumbnail_sits_at_the_bottom_right() {
+        let screen = (1440.0, 900.0);
+        let window = (204.0, 150.0);
+        let o = thumb_origin(screen, window);
+        assert_eq!(o, (1440.0 - 204.0 - THUMB_MARGIN_RIGHT, 900.0 - 150.0 - THUMB_MARGIN_BOTTOM));
+        assert!(o.0 + window.0 <= screen.0 && o.1 + window.1 <= screen.1);
+    }
+
+    #[test]
+    fn manual_thumbnail_never_closes_itself() {
+        assert!(!thumb_should_close(false, 1000.0, false, true));
+    }
+
+    #[test]
+    fn automatic_thumbnail_closes_when_it_loses_focus() {
+        assert!(thumb_should_close(true, 0.0, true, true));
+        assert!(!thumb_should_close(true, 0.0, false, false));
+    }
+
+    #[test]
+    fn automatic_thumbnail_times_out_unless_the_pointer_is_on_it() {
+        assert!(!thumb_should_close(true, THUMB_AUTO_HIDE_SECS - 0.1, false, false));
+        assert!(thumb_should_close(true, THUMB_AUTO_HIDE_SECS + 0.1, false, false));
+        assert!(!thumb_should_close(true, 100.0, true, false));
+    }
+
+    #[test]
+    fn focus_loss_needs_focus_first() {
+        assert!(!lost_focus(false, false, false), "never focused: the timer decides");
+        assert!(!lost_focus(true, true, false));
+        assert!(lost_focus(true, false, false));
+        assert!(lost_focus(false, true, true), "once lost, stays lost");
+    }
+
+    #[test]
+    fn zoom_steps_land_on_round_values() {
+        let mut z = 100;
+        let mut up = vec![];
+        for _ in 0..4 {
+            z = pin_zoom_step(z, true, 300.0, 5000.0).unwrap();
+            up.push(z);
+        }
+        assert_eq!(up, [125, 150, 175, 200]);
+        let mut z = 100;
+        let mut down = vec![];
+        for _ in 0..5 {
+            z = pin_zoom_step(z, false, 400.0, 5000.0).unwrap();
+            down.push(z);
+        }
+        assert_eq!(down, [75, 55, 40, 30, 20]);
+    }
+
+    #[test]
+    fn zoom_steps_always_move_and_stay_in_range() {
+        for cur in 5..400u32 {
+            let up = pin_zoom_step(cur, true, 300.0, 5000.0).unwrap();
+            assert!(up > cur, "{cur} -> {up}");
+            match pin_zoom_step(cur, false, 300.0, 5000.0) {
+                Some(d) => assert!(d < cur && d >= PIN_MIN_ZOOM_PCT, "{cur} -> {d}"),
+                None => assert_eq!(cur, PIN_MIN_ZOOM_PCT),
+            }
+        }
+    }
+
+    #[test]
+    fn zoom_out_stops_at_the_minimum_width_and_zoom_in_at_the_screen() {
+        assert_eq!(pin_zoom_step(100, false, PIN_MIN_WIDTH, 1000.0), None);
+        assert_eq!(pin_zoom_step(100, false, PIN_MIN_WIDTH - 40.0, 1000.0), None);
+        assert!(pin_zoom_step(100, false, PIN_MIN_WIDTH + 1.0, 1000.0).is_some());
+        assert_eq!(pin_zoom_step(100, true, 1000.0, 1000.0), None);
+        assert!(pin_zoom_step(100, true, 999.0, 1000.0).is_some());
+        // a tiny picture can still grow
+        assert!(pin_zoom_step(100, true, 40.0, 1000.0).is_some());
+        assert_eq!(pin_zoom_step(100, true, f32::NAN, 1000.0), None);
+    }
+
+    #[test]
+    fn a_wheel_notch_is_one_step_and_reverse_flips_it() {
+        let mut w = WheelZoom::default();
+        assert_eq!(w.feed(false, 1.0, WheelPhase::Move, false, 0.0), Some(true));
+        assert_eq!(w.feed(false, -1.0, WheelPhase::Move, false, 0.1), Some(false));
+        assert_eq!(w.feed(false, 1.0, WheelPhase::Move, true, 0.2), Some(false));
+        assert_eq!(w.feed(false, 0.0, WheelPhase::Move, false, 0.3), None);
+    }
+
+    #[test]
+    fn a_trackpad_steps_once_per_twenty_points() {
+        let mut w = WheelZoom::default();
+        assert_eq!(w.feed(true, 1.0, WheelPhase::Start, false, 0.0), None);
+        let mut steps = 0;
+        for i in 0..30 {
+            if w.feed(true, 3.0, WheelPhase::Move, false, 0.01 * i as f64) == Some(true) {
+                steps += 1;
+            }
+        }
+        // 1 + 90 points in: a step each time the sum passes 20 (and 20 is taken off).
+        assert_eq!(steps, 4);
+        assert_eq!(w.feed(true, -50.0, WheelPhase::Move, false, 1.0), Some(false));
+    }
+
+    #[test]
+    fn trackpad_inertia_is_ignored_until_a_new_swipe() {
+        let mut w = WheelZoom::default();
+        w.feed(true, 0.0, WheelPhase::Start, false, 0.0);
+        assert_eq!(w.feed(true, 30.0, WheelPhase::Move, false, 0.1), Some(true));
+        w.feed(true, 0.0, WheelPhase::End, false, 0.2);
+        // inertia: reported as a start 40 ms after the fingers lifted, then moves
+        w.feed(true, 40.0, WheelPhase::Start, false, 0.24);
+        for i in 0..20 {
+            assert_eq!(w.feed(true, 40.0, WheelPhase::Move, false, 0.3 + 0.01 * i as f64), None);
+        }
+        // a mouse wheel is not affected by it
+        assert_eq!(w.feed(false, 1.0, WheelPhase::Move, false, 0.6), Some(true));
+        // a new swipe, well after the last end, works again
+        assert_eq!(w.feed(true, 30.0, WheelPhase::Start, false, 1.5), Some(true));
+    }
+
+    #[test]
+    fn tall_pins_scroll_and_the_others_zoom_and_a_modifier_flips_it() {
+        assert_eq!(pin_wheel_action(false, false), PinWheel::Zoom);
+        assert_eq!(pin_wheel_action(true, false), PinWheel::Scroll);
+        assert_eq!(pin_wheel_action(true, true), PinWheel::Zoom);
+        assert_eq!(pin_wheel_action(false, true), PinWheel::Scroll);
+    }
+
+    #[test]
+    fn zooming_keeps_the_window_centred() {
+        assert_eq!(recentered((100.0, 100.0), (200.0, 100.0), (250.0, 125.0)), (75.0, 87.5));
+        assert_eq!(recentered((100.0, 100.0), (200.0, 100.0), (200.0, 100.0)), (100.0, 100.0));
+    }
+
+    #[test]
+    fn zooming_a_scrolled_pin_keeps_the_top_of_the_view() {
+        assert_eq!(rescaled_scroll(100.0, 1000.0, 2000.0), 200.0);
+        assert_eq!(rescaled_scroll(100.0, 0.0, 2000.0), 0.0);
+    }
+
+    #[test]
+    fn wheel_zoom_then_layout_stays_inside_the_screen() {
+        // Zoom a 500x400 pt picture in until the wheel stops it, on a 1440x900 screen.
+        let max = pin_max((1440.0, 900.0));
+        let mut pct = 100;
+        for _ in 0..40 {
+            let shown = pin_layout((500.0 * pct as f32 / 100.0, 400.0 * pct as f32 / 100.0), max);
+            match pin_zoom_step(pct, true, shown.content.0, max.0) {
+                Some(next) => pct = next,
+                None => break,
+            }
+        }
+        let p = pin_layout((500.0 * pct as f32 / 100.0, 400.0 * pct as f32 / 100.0), max);
+        assert!(p.window.0 <= max.0 + 0.01 && p.window.1 <= max.1 + 0.01);
+        assert!(pct > 100);
     }
 }
