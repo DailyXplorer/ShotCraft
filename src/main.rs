@@ -4,7 +4,11 @@ mod icons;
 mod model;
 mod prefs;
 mod render;
+mod scroll;
 mod settings;
+mod sizing;
+mod stitch;
+mod tiled;
 #[cfg(target_os = "macos")]
 mod shell;
 #[cfg(target_os = "macos")]
@@ -53,6 +57,10 @@ pub enum Action {
     PinCopy(Image),
     ThumbDo(ThumbAction),
     Captured(Result<Option<Captured>, String>),
+    ScrollingCapture,
+    ScrollingCancel,
+    ScrollingArea(Result<Option<model::R>, String>),
+    ScrollingFinished(Result<Option<scroll::Outcome>, String>),
     OcrCaptured(Result<Option<Captured>, String>),
     OcrDone(Result<system::OcrResult, String>),
 }
@@ -98,14 +106,19 @@ pub struct Pin {
     scale: f32,
     zoom: f32,
     semi: bool,
-    tex: Option<egui::TextureHandle>,
+    /// How far the picture is scrolled up, in points, when it is taller than the window.
+    scroll: f32,
+    /// Screen the window is sized for. Set by `pins_ui` only, so the window, the picture and the
+    /// scroll range always agree, wherever the pin is dragged to.
+    screen: egui::Vec2,
+    tex: Option<tiled::TiledTexture>,
     open: bool,
 }
 
 pub struct Thumb {
     img: Image,
     scale: f32,
-    tex: Option<egui::TextureHandle>,
+    tex: Option<tiled::TiledTexture>,
     born: Instant,
     hovered: bool,
     focused: bool,
@@ -141,6 +154,7 @@ pub struct App {
     /// Passes left in which the app and its windows are brought to the front.
     front_until: Option<Instant>,
     front_title: &'static str,
+    scroll: Option<scroll::Session>,
     ocr_running: bool,
     busy: bool,
     pub about_open: bool,
@@ -202,6 +216,7 @@ impl App {
             woke_at: Instant::now(),
             front_until: None,
             front_title: "",
+            scroll: None,
             ocr_running: false,
             busy: false,
             about_open: false,
@@ -341,6 +356,108 @@ impl App {
         });
     }
 
+    /// Starts a scrolling capture, or ends the running one (the hotkey and the menu item act as Done).
+    fn start_scrolling(&mut self) {
+        if let Some(s) = &self.scroll {
+            s.finish();
+            return;
+        }
+        if self.busy {
+            return;
+        }
+        self.busy = true;
+        let was_visible = !self.hidden;
+        if was_visible {
+            self.hide_window();
+        }
+        let (q, ctx) = (self.queue.clone(), self.ctx.clone());
+        std::thread::spawn(move || {
+            if was_visible {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            let res = scroll::select_area();
+            q.lock().unwrap().push(Action::ScrollingArea(res));
+            ctx.request_repaint();
+        });
+    }
+
+    fn scrolling_area(&mut self, res: Result<Option<model::R>, String>) {
+        let area = match res {
+            Ok(Some(area)) => area,
+            Ok(None) => {
+                self.busy = false;
+                return;
+            }
+            Err(e) => {
+                self.busy = false;
+                self.error(e);
+                return;
+            }
+        };
+        let Some(rect) = scroll::GrabRect::from_area(&area) else {
+            self.busy = false;
+            self.error("That area is too small. Select a larger area to scroll through.");
+            return;
+        };
+        let Some(pos) = scroll::control_position(&rect.as_r(), scroll::CONTROL_SIZE, &scroll::screens()) else {
+            self.busy = false;
+            self.error("No room for the controls next to that area. Select a smaller area.");
+            return;
+        };
+        self.scroll = Some(scroll::Session::start(rect, pos, self.queue.clone(), self.ctx.clone()));
+        self.grab_escape(true);
+        // The control is a new window and the app has no Dock icon: wake the UI pass that creates it
+        // while the editor is hidden, and bring it to the front.
+        self.wake_ui();
+        self.bring_to_front(scroll::CONTROL_TITLE);
+        self.ctx.request_repaint();
+    }
+
+    fn scrolling_finished(&mut self, res: Result<Option<scroll::Outcome>, String>) {
+        self.scroll = None;
+        self.grab_escape(false);
+        match res {
+            Ok(Some(o)) => {
+                let (frames, lost, capped) = (o.frames, o.lost, o.capped);
+                let (img, scale) = (o.img, o.scale);
+                self.handle(Action::Captured(Ok(Some(Captured { img, scale, area: None, mode: CaptureMode::Area }))));
+                if capped {
+                    self.say(format!("Stopped at the height limit of {} px", stitch::MAX_HEIGHT));
+                } else if frames <= 1 && lost > 0 {
+                    self.say("Lost track while scrolling, so this is only the first view. Scroll slower and try again");
+                } else if frames <= 1 {
+                    self.say("The page didn't scroll, so this is a regular screenshot");
+                }
+            }
+            Ok(None) => self.handle(Action::Captured(Ok(None))),
+            Err(e) => self.handle(Action::Captured(Err(e))),
+        }
+    }
+
+    fn scroll_ui(&mut self, ctx: &egui::Context) {
+        let Some(s) = &self.scroll else { return };
+        let builder = ViewportBuilder::default()
+            .with_title(scroll::CONTROL_TITLE)
+            .with_inner_size(scroll::CONTROL_SIZE)
+            .with_position(s.control_pos)
+            .with_decorations(false)
+            .with_resizable(false)
+            .with_transparent(true)
+            .with_has_shadow(false)
+            .with_active(false)
+            .with_always_on_top();
+        show_window(ctx, scroll::control_id(), builder, s.control_body());
+    }
+
+    pub fn grab_escape(&mut self, on: bool) {
+        #[cfg(target_os = "macos")]
+        if let Some(s) = &mut self.shell {
+            s.grab_escape(on);
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = on;
+    }
+
     pub fn open_image(&mut self, img: Image, scale: f32, fullscreen: bool) {
         self.doc = Some(Doc::new(img, scale));
         self.ed.reset_for_new_doc(fullscreen && self.settings.prefer_100);
@@ -351,10 +468,7 @@ impl App {
         };
         let chrome = editor::TOOLBAR_H + editor::OPTIONS_H + editor::STATUS_H;
         system::center_main_window(&self.ctx, |screen_w, screen_h| {
-            // Close to a square, whatever the shape of the capture, and never smaller than the toolbar.
-            let width = (w + WINDOW_MARGIN).max(editor::MIN_W).min(screen_w);
-            let height = (h + chrome + WINDOW_MARGIN).max(width * WINDOW_MIN_HEIGHT_RATIO).min(screen_h);
-            (width, height)
+            sizing::editor_window((w, h), chrome, WINDOW_MARGIN, editor::MIN_W, WINDOW_MIN_HEIGHT_RATIO, (screen_w, screen_h))
         });
     }
 
@@ -415,7 +529,7 @@ impl App {
     pub fn pin(&mut self, img: Image, scale: f32) {
         let id = self.next_pin;
         self.next_pin += 1;
-        self.pins.push(Arc::new(Mutex::new(Pin { id, img, scale, zoom: 1.0, semi: false, tex: None, open: true })));
+        self.pins.push(Arc::new(Mutex::new(Pin { id, img, scale, zoom: 1.0, semi: false, scroll: 0.0, screen: screen_size(&self.ctx), tex: None, open: true })));
         self.wake_ui();
         self.bring_to_front("ShotCraft Pin");
     }
@@ -513,6 +627,14 @@ impl App {
                 }
             }
             Action::OcrDone(result) => self.ocr_done(result),
+            Action::ScrollingCapture => self.start_scrolling(),
+            Action::ScrollingCancel => {
+                if let Some(s) = &self.scroll {
+                    s.press_escape();
+                }
+            }
+            Action::ScrollingArea(res) => self.scrolling_area(res),
+            Action::ScrollingFinished(res) => self.scrolling_finished(res),
             Action::OpenClipboard => match system::clipboard_image() {
                 Ok(img) => {
                     let s = self.pixels_per_point();
@@ -625,12 +747,13 @@ impl App {
         self.pins.retain(|p| p.lock().unwrap().open);
         for pin in &self.pins {
             let (id, size) = {
-                let p = pin.lock().unwrap();
-                (p.id, p.size())
+                let mut p = pin.lock().unwrap();
+                p.screen = screen_size(ctx);
+                (p.id, p.layout().window)
             };
             let builder = ViewportBuilder::default()
                 .with_title("ShotCraft Pin")
-                .with_inner_size(size)
+                .with_inner_size([size.0, size.1])
                 .with_decorations(false)
                 .with_resizable(false)
                 .with_transparent(true)
@@ -642,17 +765,16 @@ impl App {
 
     fn thumb_ui(&mut self, ctx: &egui::Context) {
         let Some(shared) = self.thumb.clone() else { return };
-        let (aspect, expired) = {
+        let (dims, expired) = {
             let th = shared.lock().unwrap();
-            (th.img.h as f32 / th.img.w.max(1) as f32, th.blurred || (!th.hovered && th.born.elapsed().as_secs_f32() > 6.0))
+            ((th.img.w as u32, th.img.h as u32), th.blurred || (!th.hovered && th.born.elapsed().as_secs_f32() > 6.0))
         };
         if expired && self.settings.thumbnail_auto_close {
             self.thumb = None;
             return;
         }
-        let w = model::THUMB_WIDTH;
-        let size = egui::vec2(w, (w * aspect).clamp(90.0, model::THUMB_MAX_HEIGHT));
-        let monitor = ctx.input(|i| i.viewport().monitor_size).unwrap_or(egui::vec2(1440.0, 900.0));
+        let size = egui::Vec2::from(sizing::thumb_layout(dims, model::THUMB_WIDTH, model::THUMB_MAX_HEIGHT).window);
+        let monitor = screen_size(ctx);
         let pos = egui::pos2(monitor.x - size.x - 24.0, monitor.y - size.y - 72.0);
         let builder = ViewportBuilder::default()
             .with_title("ShotCraft Preview")
@@ -717,22 +839,35 @@ impl App {
 }
 
 impl Pin {
-    fn size(&self) -> egui::Vec2 {
-        egui::vec2(self.img.w as f32, self.img.h as f32) / self.scale.max(1.0) * self.zoom
+    /// The picture at its zoom, then bounded to the screen: see `sizing::pin_layout`.
+    fn layout(&self) -> sizing::PinLayout {
+        Self::layout_of(&self.img, self.scale, self.zoom, self.screen)
     }
+
+    fn layout_of(img: &Image, scale: f32, zoom: f32, screen: egui::Vec2) -> sizing::PinLayout {
+        let content = egui::vec2(img.w as f32, img.h as f32) / scale.max(1.0) * zoom;
+        sizing::pin_layout((content.x, content.y), sizing::pin_max((screen.x, screen.y)))
+    }
+}
+
+fn screen_size(ctx: &egui::Context) -> egui::Vec2 {
+    ctx.input(|i| i.viewport().monitor_size).unwrap_or(egui::vec2(1440.0, 900.0))
 }
 
 fn pin_window(ui: &mut egui::Ui, pin: &mut Pin, queue: &Queue) {
     let ctx = ui.ctx().clone();
     let (img, scale) = (pin.img.clone(), pin.scale);
-    let tex = pin.tex.get_or_insert_with(|| {
-        let ci = egui::ColorImage::from_rgba_unmultiplied([img.w as usize, img.h as usize], &img.px);
-        ctx.load_texture(format!("pin-{}", pin.id), ci, egui::TextureOptions::LINEAR)
-    });
+    let layout = pin.layout();
+    let tex = pin.tex.get_or_insert_with(|| tiled::TiledTexture::new(&ctx, &format!("pin-{}", pin.id), (img.w, img.h), &img.px, tiled::Alpha::Straight, egui::TextureOptions::LINEAR));
     let rect = ui.max_rect();
     let resp = ui.allocate_rect(rect, egui::Sense::click_and_drag());
     let tint = if pin.semi { Color32::from_white_alpha(140) } else { Color32::WHITE };
-    ui.painter().image(tex.id(), rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), tint);
+    if layout.max_scroll() > 0.0 && resp.hovered() {
+        pin.scroll -= ui.input(|i| i.smooth_scroll_delta.y);
+    }
+    pin.scroll = pin.scroll.clamp(0.0, layout.max_scroll());
+    let content = egui::Rect::from_min_size(rect.min - egui::vec2(0.0, pin.scroll), egui::vec2(layout.content.0, layout.content.1));
+    tex.paint_in(&ui.painter().with_clip_rect(rect), content, tint);
     if resp.drag_started() {
         ctx.send_viewport_cmd(ViewportCommand::StartDrag);
     }
@@ -771,7 +906,8 @@ fn pin_window(ui: &mut egui::Ui, pin: &mut Pin, queue: &Queue) {
         for (label, z) in [("50%", 0.5), ("100%", 1.0), ("200%", 2.0)] {
             if ui.radio(pin.zoom == z, label).clicked() {
                 pin.zoom = z;
-                ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(img.w as f32, img.h as f32) / scale.max(1.0) * z));
+                let window = pin.layout().window;
+                ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(window.0, window.1)));
                 ctx.request_repaint_of(ViewportId::ROOT);
                 ui.close();
             }
@@ -801,18 +937,17 @@ fn thumb_window(ui: &mut egui::Ui, th: &mut Thumb, queue: &Queue) {
     th.blurred |= th.focused && !focused;
     th.focused = focused;
     let img = th.img.clone();
-    let tex = th.tex.get_or_insert_with(|| {
-        let ci = egui::ColorImage::from_rgba_unmultiplied([img.w as usize, img.h as usize], &img.px);
-        ctx.load_texture("thumb", ci, egui::TextureOptions::LINEAR)
-    });
+    let tex = th.tex.get_or_insert_with(|| tiled::TiledTexture::new(&ctx, "thumb", (img.w, img.h), &img.px, tiled::Alpha::Straight, egui::TextureOptions::LINEAR));
     let rect = ui.max_rect();
     let resp = ui.allocate_rect(rect, egui::Sense::click_and_drag());
     ui.painter().rect_filled(rect, 10.0, Color32::from_gray(30));
-    let img_r = rect.shrink(4.0);
-    ui.painter().image(tex.id(), img_r, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+    // The picture keeps its aspect ratio and is centred; a tall one leaves empty sides.
+    let image = sizing::thumb_layout((img.w as u32, img.h as u32), model::THUMB_WIDTH, model::THUMB_MAX_HEIGHT).image;
+    let img_r = egui::Rect::from_center_size(rect.center(), egui::vec2(image.0, image.1));
+    tex.paint_in(ui.painter(), img_r, Color32::WHITE);
     if resp.hovered() {
         th.hovered = true;
-        ui.painter().rect_filled(img_r, 6.0, Color32::from_black_alpha(110));
+        ui.painter().rect_filled(rect.shrink(sizing::THUMB_PAD), 6.0, Color32::from_black_alpha(110));
         let items = [
             (icons::Icon::Edit, "Edit", ThumbAction::Edit),
             (icons::Icon::Copy, "Copy", ThumbAction::Copy),
@@ -903,6 +1038,7 @@ impl eframe::App for App {
         }
         self.pins_ui(&ctx);
         self.thumb_ui(&ctx);
+        self.scroll_ui(&ctx);
         self.prefs_ui(&ctx);
         self.settle_windows();
         self.screenshot_tick(ui);

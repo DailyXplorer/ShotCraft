@@ -31,10 +31,11 @@ pub enum HotkeyAction {
     RepeatArea,
     Ocr,
     Show,
+    Scrolling,
 }
 
 impl HotkeyAction {
-    pub const ALL: [HotkeyAction; 8] = [
+    pub const ALL: [HotkeyAction; 9] = [
         HotkeyAction::Fullscreen,
         HotkeyAction::AllDisplays,
         HotkeyAction::Area,
@@ -43,6 +44,7 @@ impl HotkeyAction {
         HotkeyAction::RepeatArea,
         HotkeyAction::Ocr,
         HotkeyAction::Show,
+        HotkeyAction::Scrolling,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -54,6 +56,7 @@ impl HotkeyAction {
             HotkeyAction::RepeatArea => "Repeat area screenshot",
             HotkeyAction::Ocr => "Instant Text/QR Recognition",
             HotkeyAction::Show => "Show ShotCraft",
+            HotkeyAction::Scrolling => "Scrolling screenshot",
         }
     }
 }

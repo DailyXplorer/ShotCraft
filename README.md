@@ -2,7 +2,7 @@
 
 A simple, private screenshot tool for macOS. Capture an area, a window or the full screen, then annotate, blur, measure, read text (OCR) and pin the result on screen. Everything stays on your Mac: no account, no upload, no telemetry. The only network access is the update check in release builds, which the app asks about first.
 
-ShotCraft is written in Rust. It is an early version (0.1.0).
+ShotCraft is written in Rust. It is an early version (0.1.1).
 
 ## Features
 
@@ -11,10 +11,20 @@ ShotCraft is written in Rust. It is an early version (0.1.0).
 * Area, any window, repeat the last area, and full-screen captures. Fullscreen captures the display the mouse pointer is on, and All Displays puts every display in one picture laid out like your desk.
 * Active Window captures the frontmost window of the app you are using, without clicking. Use it from a hotkey, or from the menu bar icon menu, which targets the app that was in front before you opened it. When that app has no capturable window, you pick a window instead.
 * A 3-second delayed capture of the display the mouse was on when you started it.
+* Scrolling capture: pick an area, scroll the page yourself, and ShotCraft stitches what the area showed into one tall image that opens in the editor. A small always-on-top control next to the area shows the live height and has Done and Cancel; `Esc` cancels. The area is grabbed about four to five times per second. Fixed headers and footers are kept once, scrolling back up adds nothing, and the image stops at 20,000 px. Start it from the menu bar icon or with its hotkey (not set by default); pressing the hotkey again acts as Done.
 * Window captures can keep a transparent background or use a solid color, and can trim the window shadow.
 * Instant text and QR recognition: select an area and the recognized text goes straight to the clipboard, with no editor.
 * Open an existing image from a file or from the clipboard. The file picker and the command line open PNG, JPEG, GIF, BMP, TIFF and WebP files; saving writes PNG or JPEG. Animated GIFs open as their first frame.
 * Lives in the menu bar only: no Dock icon, and starting the app (Finder, Launch at startup, `open`) shows no window. Windows appear when you capture, open a file, open Preferences, pin an image or check for updates. Every command, including Preferences, Check for Updates, Check for Updates Automatically, About and Quit, is in the menu bar icon menu. The app has no menu bar of its own and no Cmd+Tab entry; global hotkeys work at any time.
+
+Scrolling capture limits:
+
+* You scroll by hand. ShotCraft does not scroll for you (that would need the Accessibility permission).
+* Scroll steadily, with every part of the page staying in view in at least two grabs. If the page jumps further than about 90% of the area between two grabs, or the content is blank or strongly repetitive (stripes, grids), that step is dropped and the control says "Lost track"; scroll back a little and continue.
+* Content that animates inside the area (video, ads, a blinking cursor beside the text) can confuse the match; small changes are tolerated.
+* Only scrolling downwards builds the image: content above the point where you started is not added (the control says so), and scrolling back up over what is already captured changes nothing. A blank band at the very top of the page is treated like a fixed header, which is harmless. The control window needs room beside the area on the same display. Esc is taken from other apps while a capture runs; if another ShotCraft hotkey already uses Esc, use the Cancel button.
+* If the screen can't be captured for a moment (screen locked, permission prompt), the capture ends with what was stitched so far.
+* Very tall images are shown in the editor as several textures, so they open at the width of the window; export and copy use the full-resolution image.
 
 ### After a capture
 
@@ -51,12 +61,12 @@ The preview thumbnail sits in the bottom-right corner of the screen. Hover it fo
 
 ### Pins
 
-A pinned image is a borderless window that stays above other windows. Drag it anywhere. Right-click for Edit, Copy, 50% / 100% / 200% size, Semi-transparent and Close; double-click to reopen it in the editor; press `Esc` to close it. You can have several pins at once.
+A pinned image is a borderless window that stays above other windows. Drag it anywhere. Right-click for Edit, Copy, 50% / 100% / 200% size, Semi-transparent and Close; double-click to reopen it in the editor; press `Esc` to close it. You can have several pins at once. A pin never grows past 90% of the screen: a picture that is too wide is scaled down, and one that is too tall (a scrolling capture) scrolls with the mouse wheel inside the pin.
 
 ### Preferences
 
 * General: what happens after a screenshot (editor, thumbnail or nothing; copy; save), thumbnail auto-close, launch at startup, screenshots folder, save format, Retina downscale, window screenshot background and shadow.
-* Hotkeys: record or clear a shortcut for each of the eight actions listed under Keyboard shortcuts. ShotCraft flags a shortcut that macOS refuses because another app uses it.
+* Hotkeys: record or clear a shortcut for each of the nine actions listed under Keyboard shortcuts. ShotCraft flags a shortcut that macOS refuses because another app uses it.
 * Advanced: OCR line breaks, hide the menu bar icon (only while a Show ShotCraft hotkey is set and registered, since the icon is the way back into the app), keep the main window on top, zoom direction, default zoom level, what Esc does when hiding the editor (copy and/or save), and confirmation style (custom notification, system notification or none).
 
 Settings are stored in `~/Library/Application Support/ShotCraft/settings.json`.
@@ -75,6 +85,7 @@ Global hotkeys (editable in Preferences, Hotkeys):
 | Repeat area screenshot | not set |
 | Instant Text/QR Recognition | `Ctrl+Opt+Cmd+O` |
 | Show ShotCraft | not set |
+| Scrolling screenshot | not set |
 
 In the editor:
 
@@ -104,7 +115,7 @@ ShotCraft makes no network connections of its own: the source contains no networ
 
 ## Install
 
-Download `ShotCraft-0.1.0.zip` from the [Releases page](https://github.com/DailyXplorer/ShotCraft/releases/latest), unzip it and move `ShotCraft.app` to `/Applications`. The app is universal (Apple Silicon and Intel).
+Download `ShotCraft-0.1.1.zip` from the [Releases page](https://github.com/DailyXplorer/ShotCraft/releases/latest), unzip it and move `ShotCraft.app` to `/Applications`. The app is universal (Apple Silicon and Intel).
 
 ShotCraft is signed with its own certificate, not an Apple Developer ID, and it is not notarized, so macOS refuses to open it the first time (`spctl` reports "rejected"). To open it anyway:
 

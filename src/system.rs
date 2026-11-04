@@ -40,7 +40,7 @@ pub fn load_image_file(path: &Path) -> Result<Image, String> {
 }
 
 /// Read the capture rectangle macOS stores on the file (kMDItemScreenCaptureGlobalRect).
-fn capture_rect(path: &Path) -> Option<R> {
+pub(crate) fn capture_rect(path: &Path) -> Option<R> {
     let out = Command::new("xattr").args(["-px", "com.apple.metadata:kMDItemScreenCaptureGlobalRect"]).arg(path).output().ok()?;
     let hexs: String = String::from_utf8_lossy(&out.stdout).split_whitespace().collect();
     let bytes: Vec<u8> = (0..hexs.len() / 2).filter_map(|i| u8::from_str_radix(&hexs[i * 2..i * 2 + 2], 16).ok()).collect();

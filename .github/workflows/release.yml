@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - "v*"
+    # Pushes to main only warm the Rust build cache: a tag run can read only caches saved on the default branch.
+    branches:
+      - main
   pull_request:
 
 permissions:
@@ -32,11 +35,19 @@ jobs:
       - name: Install Rust targets
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
+      # Caches the dependencies of both targets. Only main saves it, so that PR caches do not push it out.
+      - name: Cache the Rust build
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: release
+          cache-targets: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       - name: Test
         run: cargo test
 
       - name: Check the tag matches the version
-        if: github.event_name == 'push'
+        if: startsWith(github.ref, 'refs/tags/v')
         run: |
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
           test "$GITHUB_REF_NAME" = "v$version"
@@ -66,7 +77,7 @@ jobs:
         run: scripts/package-release.sh update
 
       - name: Keep the release files
-        if: github.event_name == 'push'
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release
@@ -74,7 +85,7 @@ jobs:
           retention-days: 1
 
   publish:
-    if: github.event_name == 'push'
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: package
     runs-on: ubuntu-latest
     permissions:
