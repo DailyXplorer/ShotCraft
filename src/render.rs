@@ -643,10 +643,13 @@ pub fn seg_dist(q: P, a: P, b: P) -> f32 {
 
 /// Within a stroke of width `w` with square ends, which also covers round ends and miter joins.
 fn on_stroke(q: P, s: P, e: P, w: f32, tol: f32) -> bool {
-    let len = s.dist(e).max(1e-6);
+    let reach = w / 2.0 + tol;
+    let len = s.dist(e);
+    if len < 1e-6 {
+        return q.dist(s) <= reach;
+    }
     let (ux, uy) = ((e.x - s.x) / len, (e.y - s.y) / len);
     let (dx, dy) = (q.x - s.x, q.y - s.y);
-    let reach = w / 2.0 + tol;
     (dx * uy - dy * ux).abs() <= reach && (-reach..=len + reach).contains(&(dx * ux + dy * uy))
 }
 
@@ -677,8 +680,6 @@ fn dash_segments(shaft: &[P], dash: &StrokeDash) -> Vec<[P; 2]> {
 
 /// True on anything the arrow paints, within `tol`. An arrow too short to paint stays selectable.
 pub fn arrow_hit(a: P, b: P, seed: u64, st: &Style, q: P, tol: f32) -> bool {
-    // Antialiasing paints up to a pixel past the line, however far the editor is zoomed in.
-    let tol = tol.max(1.0);
     match arrow_geometry(a, b, seed, st) {
         None => seg_dist(q, a, b) <= st.width() + tol,
         Some(ArrowGeometry::Solid { outline, edge }) => {
@@ -1777,7 +1778,7 @@ mod tests {
                         for (x, y) in ink(&painted(&obj, &fonts, 1200, 800)) {
                             let q = p(x as f32 + 0.5, y as f32 + 0.5);
                             assert!(area.contains(q), "{style:?} size {size} scale {scale}: {x},{y} outside {area:?}");
-                            assert!(arrow_hit(a, b, 7, &st, q, 0.05), "{style:?} size {size} scale {scale}: {x},{y} cannot be clicked");
+                            assert!(arrow_hit(a, b, 7, &st, q, 1.0), "{style:?} size {size} scale {scale}: {x},{y} cannot be clicked");
                         }
                         let len = a.dist(b);
                         let beside = p((a.x + b.x) / 2.0 - (b.y - a.y) / len * 200.0, (a.y + b.y) / 2.0 + (b.x - a.x) / len * 200.0);
@@ -1819,10 +1820,33 @@ mod tests {
     }
 
     #[test]
-    fn faint_edge_pixels_stay_clickable_at_high_zoom() {
-        let st = Style { size: 0, scale: 1.0, arrow: ArrowStyle::Line, ..Style::default() };
-        let (a, b) = (p(100.25, 180.25), p(300.25, 180.25));
-        assert!(arrow_hit(a, b, 7, &st, p(200.5, 179.5), 6.0 / 64.0));
+    fn clicks_on_blank_canvas_never_select_a_dashed_arrow() {
+        let st = Style { size: 1, scale: 1.0, dashed: true, arrow: ArrowStyle::Line, ..Style::default() };
+        assert!(!arrow_hit(p(300.25, 300.25), p(296.8854, 270.43927), 7, &st, p(50.5, 50.5), 6.0), "a dash can end up with no length");
+        for style in [ArrowStyle::Line, ArrowStyle::Double, ArrowStyle::HandDrawn] {
+            for size in 0..=SIZE_MAX {
+                for i in 0..2000 {
+                    let turn = i as f32 * 0.37;
+                    let (a, len) = (p(600.0, 600.0), 20.0 + i as f32 * 0.173);
+                    let b = p(a.x + turn.cos() * len, a.y + turn.sin() * len);
+                    let st = Style { size, dashed: true, arrow: style, ..Style::default() };
+                    assert!(!arrow_hit(a, b, 7, &st, p(-1500.0, -1500.0), 6.0), "{style:?} size {size} step {i}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_stroke_with_no_length_is_only_its_point() {
+        let q = p(10.0, 10.0);
+        assert!(on_stroke(p(12.0, 10.0), q, q, 2.0, 1.0));
+        assert!(!on_stroke(p(14.0, 10.0), q, q, 2.0, 1.0));
+    }
+
+    #[test]
+    fn at_high_zoom_clicks_just_past_an_arrow_reach_its_neighbour() {
+        let st = Style { size: 7, arrow: ArrowStyle::Shape, ..Style::default() };
+        assert!(!arrow_hit(p(100.0, 180.4), p(600.0, 180.4), 7, &st, p(465.5, 243.5), 6.0 / 64.0));
     }
 
     #[test]
@@ -1863,7 +1887,7 @@ mod tests {
             for (i, (x, y)) in ink(&painted(&obj, &fonts, 6200, 1000)).into_iter().enumerate() {
                 let q = p(x as f32 + 0.5, y as f32 + 0.5);
                 assert!(area.contains(q), "seed {seed}: {x},{y} outside {area:?}");
-                assert!(i % 97 != 0 || arrow_hit(a, b, seed, &st, q, 0.05), "seed {seed} size {size} dashed {dashed}: {x},{y} cannot be clicked");
+                assert!(i % 97 != 0 || arrow_hit(a, b, seed, &st, q, 1.0), "seed {seed} size {size} dashed {dashed}: {x},{y} cannot be clicked");
             }
         }
     }
