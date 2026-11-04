@@ -5,6 +5,7 @@ mod prefs;
 mod render;
 mod scroll;
 mod settings;
+mod sizing;
 mod stitch;
 mod tiled;
 #[cfg(target_os = "macos")]
@@ -97,6 +98,8 @@ pub struct Pin {
     scale: f32,
     zoom: f32,
     semi: bool,
+    /// How far the picture is scrolled up, in points, when it is taller than the window.
+    scroll: f32,
     tex: Option<tiled::TiledTexture>,
     open: bool,
 }
@@ -407,10 +410,7 @@ impl App {
         };
         let chrome = editor::TOOLBAR_H + editor::OPTIONS_H + editor::STATUS_H;
         system::center_main_window(&self.ctx, |screen_w, screen_h| {
-            // Close to a square, whatever the shape of the capture, and never smaller than the toolbar.
-            let width = (w + WINDOW_MARGIN).max(editor::MIN_W).min(screen_w);
-            let height = (h + chrome + WINDOW_MARGIN).max(width * WINDOW_MIN_HEIGHT_RATIO).min(screen_h);
-            (width, height)
+            sizing::editor_window((w, h), chrome, WINDOW_MARGIN, editor::MIN_W, WINDOW_MIN_HEIGHT_RATIO, (screen_w, screen_h))
         });
     }
 
@@ -471,7 +471,7 @@ impl App {
     pub fn pin(&mut self, img: Image, scale: f32) {
         let id = self.next_pin;
         self.next_pin += 1;
-        self.pins.push(Arc::new(Mutex::new(Pin { id, img, scale, zoom: 1.0, semi: false, tex: None, open: true })));
+        self.pins.push(Arc::new(Mutex::new(Pin { id, img, scale, zoom: 1.0, semi: false, scroll: 0.0, tex: None, open: true })));
         self.ctx.request_repaint();
     }
 
@@ -681,11 +681,11 @@ impl App {
         for pin in &self.pins {
             let (id, size) = {
                 let p = pin.lock().unwrap();
-                (p.id, p.size())
+                (p.id, p.layout(screen_size(ctx)).window)
             };
             let builder = ViewportBuilder::default()
                 .with_title("ShotCraft Pin")
-                .with_inner_size(size)
+                .with_inner_size([size.0, size.1])
                 .with_decorations(false)
                 .with_resizable(false)
                 .with_transparent(true)
@@ -697,17 +697,16 @@ impl App {
 
     fn thumb_ui(&mut self, ctx: &egui::Context) {
         let Some(shared) = self.thumb.clone() else { return };
-        let (aspect, expired) = {
+        let (dims, expired) = {
             let th = shared.lock().unwrap();
-            (th.img.h as f32 / th.img.w.max(1) as f32, th.blurred || (!th.hovered && th.born.elapsed().as_secs_f32() > 6.0))
+            ((th.img.w as u32, th.img.h as u32), th.blurred || (!th.hovered && th.born.elapsed().as_secs_f32() > 6.0))
         };
         if expired && self.settings.thumbnail_auto_close {
             self.thumb = None;
             return;
         }
-        let w = model::THUMB_WIDTH;
-        let size = egui::vec2(w, (w * aspect).clamp(90.0, model::THUMB_MAX_HEIGHT));
-        let monitor = ctx.input(|i| i.viewport().monitor_size).unwrap_or(egui::vec2(1440.0, 900.0));
+        let size = egui::Vec2::from(sizing::thumb_layout(dims, model::THUMB_WIDTH, model::THUMB_MAX_HEIGHT).window);
+        let monitor = screen_size(ctx);
         let pos = egui::pos2(monitor.x - size.x - 24.0, monitor.y - size.y - 72.0);
         let builder = ViewportBuilder::default()
             .with_title("ShotCraft Preview")
@@ -772,9 +771,19 @@ impl App {
 }
 
 impl Pin {
-    fn size(&self) -> egui::Vec2 {
-        egui::vec2(self.img.w as f32, self.img.h as f32) / self.scale.max(1.0) * self.zoom
+    /// The picture at its zoom, then bounded to the screen: see `sizing::pin_layout`.
+    fn layout(&self, screen: egui::Vec2) -> sizing::PinLayout {
+        Self::layout_of(&self.img, self.scale, self.zoom, screen)
     }
+
+    fn layout_of(img: &Image, scale: f32, zoom: f32, screen: egui::Vec2) -> sizing::PinLayout {
+        let content = egui::vec2(img.w as f32, img.h as f32) / scale.max(1.0) * zoom;
+        sizing::pin_layout((content.x, content.y), sizing::pin_max((screen.x, screen.y)))
+    }
+}
+
+fn screen_size(ctx: &egui::Context) -> egui::Vec2 {
+    ctx.input(|i| i.viewport().monitor_size).unwrap_or(egui::vec2(1440.0, 900.0))
 }
 
 fn pin_window(ui: &mut egui::Ui, pin: &mut Pin, queue: &Queue) {
@@ -782,9 +791,15 @@ fn pin_window(ui: &mut egui::Ui, pin: &mut Pin, queue: &Queue) {
     let (img, scale) = (pin.img.clone(), pin.scale);
     let tex = pin.tex.get_or_insert_with(|| tiled::TiledTexture::new(&ctx, &format!("pin-{}", pin.id), (img.w, img.h), &img.px, tiled::Alpha::Straight, egui::TextureOptions::LINEAR));
     let rect = ui.max_rect();
+    let layout = Pin::layout_of(&img, scale, pin.zoom, screen_size(&ctx));
     let resp = ui.allocate_rect(rect, egui::Sense::click_and_drag());
     let tint = if pin.semi { Color32::from_white_alpha(140) } else { Color32::WHITE };
-    tex.paint_in(ui.painter(), rect, tint);
+    if layout.max_scroll() > 0.0 && resp.hovered() {
+        pin.scroll -= ui.input(|i| i.smooth_scroll_delta.y);
+    }
+    pin.scroll = pin.scroll.clamp(0.0, layout.max_scroll());
+    let content = egui::Rect::from_min_size(rect.min - egui::vec2(0.0, pin.scroll), egui::vec2(layout.content.0, layout.content.1));
+    tex.paint_in(&ui.painter().with_clip_rect(rect), content, tint);
     if resp.drag_started() {
         ctx.send_viewport_cmd(ViewportCommand::StartDrag);
     }
@@ -823,7 +838,8 @@ fn pin_window(ui: &mut egui::Ui, pin: &mut Pin, queue: &Queue) {
         for (label, z) in [("50%", 0.5), ("100%", 1.0), ("200%", 2.0)] {
             if ui.radio(pin.zoom == z, label).clicked() {
                 pin.zoom = z;
-                ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(img.w as f32, img.h as f32) / scale.max(1.0) * z));
+                let window = Pin::layout_of(&img, scale, z, screen_size(&ctx)).window;
+                ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(window.0, window.1)));
                 ctx.request_repaint_of(ViewportId::ROOT);
                 ui.close();
             }
@@ -857,7 +873,9 @@ fn thumb_window(ui: &mut egui::Ui, th: &mut Thumb, queue: &Queue) {
     let rect = ui.max_rect();
     let resp = ui.allocate_rect(rect, egui::Sense::click_and_drag());
     ui.painter().rect_filled(rect, 10.0, Color32::from_gray(30));
-    let img_r = rect.shrink(4.0);
+    // The picture keeps its aspect ratio and is centred; a tall one leaves empty sides.
+    let image = sizing::thumb_layout((img.w as u32, img.h as u32), model::THUMB_WIDTH, model::THUMB_MAX_HEIGHT).image;
+    let img_r = egui::Rect::from_center_size(rect.center(), egui::vec2(image.0, image.1));
     tex.paint_in(ui.painter(), img_r, Color32::WHITE);
     if resp.hovered() {
         th.hovered = true;
