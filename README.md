@@ -2,7 +2,7 @@
 
 A simple, private screenshot tool for macOS. Capture an area, a window or the full screen, then annotate, blur, measure, read text (OCR) and pin the result on screen. Everything stays on your Mac: no account, no upload, no telemetry. The only network access is the update check in release builds, which the app asks about first.
 
-ShotCraft is written in Rust. It is an early version (0.1.0).
+ShotCraft is written in Rust. It is an early version (0.1.1).
 
 ## Features
 
@@ -115,7 +115,7 @@ ShotCraft makes no network connections of its own: the source contains no networ
 
 ## Install
 
-Download `ShotCraft-0.1.0.zip` from the [Releases page](https://github.com/DailyXplorer/ShotCraft/releases/latest), unzip it and move `ShotCraft.app` to `/Applications`. The app is universal (Apple Silicon and Intel).
+Download `ShotCraft-0.1.1.zip` from the [Releases page](https://github.com/DailyXplorer/ShotCraft/releases/latest), unzip it and move `ShotCraft.app` to `/Applications`. The app is universal (Apple Silicon and Intel).
 
 ShotCraft is signed with its own certificate, not an Apple Developer ID, and it is not notarized, so macOS refuses to open it the first time (`spctl` reports "rejected"). To open it anyway:
 
