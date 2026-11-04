@@ -256,7 +256,7 @@ impl App {
             #[cfg(target_os = "macos")]
             shell: None,
             doc: None,
-            ed: editor::Editor::default(),
+            ed: editor::Editor::from_settings(&settings),
             pins: vec![],
             next_pin: 1,
             thumb: None,
@@ -472,8 +472,9 @@ impl App {
         };
         // Scrolling for the user needs the Accessibility permission; ask for it the first time. Without it
         // the capture still works, the user scrolls.
-        let auto = autoscroll::trusted(true);
-        self.scroll = Some(scroll::Session::start(rect, pos, auto, self.queue.clone(), self.ctx.clone()));
+        let limits = scroll::Limits::from_settings(&self.settings);
+        let auto = !limits.manual && autoscroll::trusted(true);
+        self.scroll = Some(scroll::Session::start(rect, pos, auto, limits, self.queue.clone(), self.ctx.clone()));
         self.grab_escape(true);
         // The control is a new window and the app has no Dock icon: wake the UI pass that creates it
         // while the editor is hidden, and show it without taking the keyboard from the page.
@@ -487,15 +488,18 @@ impl App {
         self.grab_escape(false);
         match res {
             Ok(Some(o)) => {
-                let (frames, lost, capped) = (o.frames, o.lost, o.capped);
+                let (frames, lost, capped, max_height) = (o.frames, o.lost, o.capped, o.max_height);
+                let size = (o.img.w, o.img.h);
                 let (img, scale) = (o.img, o.scale);
                 self.handle(Action::Captured(Ok(Some(Captured { img, scale, area: None, mode: CaptureMode::Area }))));
                 if capped {
-                    self.say(format!("Stopped at the height limit of {} px", stitch::MAX_HEIGHT));
+                    self.say(format!("Stopped at the height limit of {max_height} px. Change it in Preferences"));
                 } else if frames <= 1 && lost > 0 {
                     self.say("Lost track while scrolling, so this is only the first view. Scroll slower and try again");
                 } else if frames <= 1 {
                     self.say("The page didn't scroll, so this is a regular screenshot");
+                } else {
+                    self.say(format!("Final image size: {} × {} px", size.0, size.1));
                 }
             }
             Ok(None) => self.handle(Action::Captured(Ok(None))),
@@ -555,7 +559,8 @@ impl App {
 
     fn save_target(&self, img: &Image) -> PathBuf {
         let ext = if self.settings.save_auto_format && system::looks_like_photo(img) { "jpg" } else { "png" };
-        PathBuf::from(&self.settings.folder).join(format!("ShotCraft-{}.{ext}", system::file_stamp()))
+        let stem = settings::file_stem(&self.settings.file_name_template, &system::now_stamp());
+        system::unique_path(&PathBuf::from(&self.settings.folder), &stem, ext)
     }
 
     fn prepared_for_save(&self) -> Option<Image> {
@@ -617,9 +622,9 @@ impl App {
         }
         self.ocr_running = true;
         self.say("Reading text…");
-        let (img, queue, ctx) = (img.clone(), self.queue.clone(), self.ctx.clone());
+        let (img, queue, ctx, language) = (img.clone(), self.queue.clone(), self.ctx.clone(), self.settings.ocr_language.clone());
         std::thread::spawn(move || {
-            let result = system::recognize(&img);
+            let result = system::recognize_in(&img, &language);
             queue.lock().unwrap().push(Action::OcrDone(result));
             ctx.request_repaint();
         });

@@ -46,6 +46,64 @@ const SETTLE_RETRY: Duration = Duration::from_millis(300);
 /// Frames dropped in a row before automatic scrolling gives up and leaves the scrolling to the user.
 const MAX_LOST_IN_ROW: u32 = 3;
 
+/// Memory a stitched picture may take, in bytes (4 per pixel): a wide picture stops short of the height limit.
+const MAX_BYTES: u64 = 1_000_000_000;
+/// How long the page gets to settle after a scroll, by speed level (see `Limits::wait`): slow levels give it
+/// more time, fast ones less.
+const WAIT_SCALE: [f32; 5] = [2.0, 1.4, 1.0, 0.7, 0.5];
+/// Share of the area height scrolled between two grabs, by speed level. Level 2 is `STEP_SHARE`.
+const STEP_SHARES: [f32; 5] = [0.3, 0.4, STEP_SHARE, 0.6, 0.7];
+
+/// What the scrolling settings ask of a capture.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Limits {
+    /// Height the picture stops at, in pixels.
+    pub max_height: u32,
+    /// Speed level, 0 to `settings::SCROLL_SPEED_MAX`.
+    pub speed: u8,
+    /// The page moves the other way than the wheel says (an app that reverses the wheel).
+    pub reverse: bool,
+    /// The user scrolls, even when ShotCraft could.
+    pub manual: bool,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Limits { max_height: crate::settings::SCROLL_MAX_HEIGHT, speed: crate::settings::SCROLL_SPEED_DEFAULT, reverse: false, manual: false }
+    }
+}
+
+impl Limits {
+    pub fn from_settings(s: &crate::settings::Settings) -> Limits {
+        Limits { max_height: s.scroll_max_height(), speed: s.scroll_speed_level(), reverse: s.scroll_reverse, manual: s.scroll_manual }
+    }
+
+    /// Rows the picture may have when the frames are `width` pixels wide.
+    pub fn max_rows(&self, width: u32) -> u32 {
+        let by_memory = MAX_BYTES / (4 * width.max(1) as u64);
+        self.max_height.min(by_memory.min(u32::MAX as u64) as u32).max(1)
+    }
+
+    /// `base` stretched or shrunk for the speed level.
+    pub fn wait(&self, base: Duration) -> Duration {
+        base.mul_f32(WAIT_SCALE[self.speed.min(4) as usize])
+    }
+
+    /// Points to scroll between two grabs for an area `area_h` points tall.
+    pub fn step(&self, area_h: u32) -> i32 {
+        ((area_h as f32 * STEP_SHARES[self.speed.min(4) as usize]) as i32).clamp(STEP_MIN, STEP_MAX)
+    }
+
+    /// The wheel amount that moves the page down by `dy`.
+    pub fn wheel(&self, dy: i32) -> i32 {
+        if self.reverse {
+            -dy
+        } else {
+            dy
+        }
+    }
+}
+
 const RUNNING: u8 = 0;
 const DONE: u8 = 1;
 const CANCEL: u8 = 2;
@@ -173,6 +231,8 @@ pub struct Outcome {
     /// Frames dropped because the offset could not be found.
     pub lost: u32,
     pub capped: bool,
+    /// The height limit the capture ran with, in pixels.
+    pub max_height: u32,
 }
 
 pub struct Session {
@@ -184,17 +244,21 @@ pub struct Session {
 impl Session {
     /// Starts the capture thread. `auto` is whether ShotCraft may scroll the page (the Accessibility
     /// permission is granted).
-    pub fn start(rect: GrabRect, control_pos: [f32; 2], auto: bool, queue: Queue, ctx: Context) -> Session {
+    pub fn start(rect: GrabRect, control_pos: [f32; 2], auto: bool, limits: Limits, queue: Queue, ctx: Context) -> Session {
         let stop = Arc::new(AtomicU8::new(RUNNING));
-        let (mode, note) = if auto { (Mode::Auto, Note::ScrollingForYou) } else { (Mode::Manual, Note::NeedsAccessibility) };
+        let (mode, note) = match (auto, limits.manual) {
+            (true, _) => (Mode::Auto, Note::ScrollingForYou),
+            (false, true) => (Mode::Manual, Note::ScrollYourself),
+            (false, false) => (Mode::Manual, Note::NeedsAccessibility),
+        };
         let progress = Arc::new(Mutex::new(Progress { height: 0, frames: 0, lost: 0, note, mode, esc_at: None }));
         let (s, p) = (stop.clone(), progress.clone());
         std::thread::spawn(move || {
             // A panic must not leave the control window up for ever: report it like any other error.
             let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let mut page = ScreenPage { rect, scroller: autoscroll::Scroller::new(rect), started: Instant::now() };
+                let mut page = ScreenPage { rect, scroller: autoscroll::Scroller::new(rect), started: Instant::now(), limits };
                 let repaint = || ctx.request_repaint_of(control_id());
-                run(&mut page, rect.w, rect.h, mode, &s, &p, &repaint)
+                run_with(&mut page, rect.w, rect.h, mode, &limits, &s, &p, &repaint)
             }))
             .unwrap_or_else(|_| Err("The scrolling capture stopped unexpectedly.".to_string()));
             queue.lock().unwrap().push(Action::ScrollingFinished(res));
@@ -259,6 +323,7 @@ struct ScreenPage {
     rect: GrabRect,
     scroller: autoscroll::Scroller,
     started: Instant,
+    limits: Limits,
 }
 
 impl Page for ScreenPage {
@@ -267,7 +332,7 @@ impl Page for ScreenPage {
     }
 
     fn scroll(&mut self, dy: i32) -> Result<(), String> {
-        self.scroller.scroll(dy)
+        self.scroller.scroll(self.limits.wheel(dy))
     }
 
     fn sleep(&mut self, d: Duration) {
@@ -281,13 +346,14 @@ impl Page for ScreenPage {
 
 /// Points the page is scrolled by between two grabs for an area this tall.
 pub fn step_points(area_h: u32) -> i32 {
-    ((area_h as f32 * STEP_SHARE) as i32).clamp(STEP_MIN, STEP_MAX)
+    Limits::default().step(area_h)
 }
 
 struct Loop<'a> {
     stop: &'a AtomicU8,
     progress: &'a Mutex<Progress>,
     repaint: &'a dyn Fn(),
+    limits: Limits,
 }
 
 impl Loop<'_> {
@@ -327,13 +393,13 @@ fn grab_retrying(page: &mut dyn Page) -> Result<RgbaImage, String> {
 /// Waits for the page to stop moving after a scroll and returns how it looks then: the last of two
 /// looks that agree, or the last look when the page never settles.
 fn settle(page: &mut dyn Page, lp: &Loop) -> Result<RgbaImage, String> {
-    page.sleep(SETTLE_FIRST);
+    page.sleep(lp.limits.wait(SETTLE_FIRST));
     let mut prev = grab_retrying(page)?;
     for _ in 0..SETTLE_MAX_LOOKS {
         if lp.state() != RUNNING {
             break;
         }
-        page.sleep(SETTLE_POLL);
+        page.sleep(lp.limits.wait(SETTLE_POLL));
         let cur = grab_retrying(page)?;
         if frames_match(&prev, &cur) {
             return Ok(cur);
@@ -345,11 +411,17 @@ fn settle(page: &mut dyn Page, lp: &Loop) -> Result<RgbaImage, String> {
 
 /// The capture loop. `area_w` is the area width in points, to know the display scale.
 pub fn run(page: &mut dyn Page, area_w: u32, area_h: u32, mode: Mode, stop: &AtomicU8, progress: &Mutex<Progress>, repaint: &dyn Fn()) -> Result<Option<Outcome>, String> {
-    let lp = Loop { stop, progress, repaint };
+    run_with(page, area_w, area_h, mode, &Limits::default(), stop, progress, repaint)
+}
+
+/// `run` with the limits from the settings.
+pub fn run_with(page: &mut dyn Page, area_w: u32, area_h: u32, mode: Mode, limits: &Limits, stop: &AtomicU8, progress: &Mutex<Progress>, repaint: &dyn Fn()) -> Result<Option<Outcome>, String> {
+    let lp = Loop { stop, progress, repaint, limits: *limits };
     let mut mode = mode;
-    let mut stitcher = Stitcher::new();
     let mut lost = 0u32;
     let first = grab_retrying(page)?;
+    let max_height = limits.max_rows(first.width());
+    let mut stitcher = Stitcher::with_max_height(max_height);
     let scale = (first.width() as f32 / area_w as f32).max(1.0);
     stitcher.push(&first);
     let start_note = if mode == Mode::Auto { Note::ScrollingForYou } else { lp.progress.lock().unwrap().note };
@@ -357,7 +429,7 @@ pub fn run(page: &mut dyn Page, area_w: u32, area_h: u32, mode: Mode, stop: &Ato
 
     // Auto mode state: points per step, how much the page really moves per point asked, and the
     // runs of dropped and motionless frames.
-    let mut step = step_points(area_h);
+    let mut step = limits.step(area_h);
     let mut ratio = 1.0f32;
     let mut lost_in_row = 0u32;
     let mut undid = false;
@@ -437,7 +509,7 @@ pub fn run(page: &mut dyn Page, area_w: u32, area_h: u32, mode: Mode, stop: &Ato
                 let mut result = stitcher.push_hinted(&frame, hint);
                 if matches!(result, Push::Unchanged | Push::Revisited { .. }) && !undid {
                     // Not moving yet? Give a slow page one more moment before calling it the end.
-                    page.sleep(SETTLE_RETRY);
+                    page.sleep(limits.wait(SETTLE_RETRY));
                     if let Ok(frame) = settle(page, &lp) {
                         result = stitcher.push_hinted(&frame, hint);
                     }
@@ -499,7 +571,7 @@ pub fn run(page: &mut dyn Page, area_w: u32, area_h: u32, mode: Mode, stop: &Ato
     let img = stitcher.finish().map_err(|_| "No image was captured.".to_string())?;
     let (w, h) = img.dimensions();
     let scale = (w as f32 / area_w as f32).max(1.0);
-    Ok(Some(Outcome { img: Image { w, h, px: Arc::new(img.into_raw()) }, scale, frames, lost, capped }))
+    Ok(Some(Outcome { img: Image { w, h, px: Arc::new(img.into_raw()) }, scale, frames, lost, capped, max_height }))
 }
 
 /// One look at the area, as pixels.
@@ -892,6 +964,92 @@ mod tests {
         assert_eq!(step_points(5000), STEP_MAX);
         for h in [48, 100, 400, 984, 3000] {
             assert!(step_points(h) as f32 <= h as f32 * 0.9 || step_points(h) == STEP_MIN);
+        }
+    }
+
+    // Settings.
+
+    fn capture_with(page: &mut FakePage, mode: Mode, limits: &Limits, stop: &AtomicU8) -> Outcome {
+        let p = progress(mode);
+        let (w, h) = (page.page.width(), page.area_h);
+        run_with(page, w, h, mode, limits, stop, &p, &|| {}).unwrap().unwrap()
+    }
+
+    #[test]
+    fn the_default_limits_are_the_old_behaviour() {
+        let l = Limits::default();
+        assert_eq!((l.max_height, l.speed, l.reverse, l.manual), (20_000, 2, false, false));
+        assert_eq!(l.step(400), 200);
+        assert_eq!(l.wait(SETTLE_FIRST), SETTLE_FIRST);
+        assert_eq!(l.wheel(120), 120);
+        assert_eq!(Limits::from_settings(&crate::settings::Settings::default()), l);
+    }
+
+    #[test]
+    fn limits_come_from_the_settings_in_range() {
+        let mut s = crate::settings::Settings::default();
+        s.scroll_max_height = 10;
+        s.scroll_speed = 9;
+        s.scroll_reverse = true;
+        s.scroll_manual = true;
+        let l = Limits::from_settings(&s);
+        assert_eq!((l.max_height, l.speed, l.reverse, l.manual), (1_000, 4, true, true));
+    }
+
+    #[test]
+    fn the_height_limit_leaves_room_in_memory_for_a_wide_picture() {
+        let l = Limits { max_height: 400_000, ..Limits::default() };
+        assert_eq!(l.max_rows(1000), 250_000);
+        assert_eq!(l.max_rows(3024), 82_671);
+        assert_eq!(Limits::default().max_rows(3024), 20_000);
+        assert_eq!(l.max_rows(0), 250_000_000_u32.min(400_000));
+        assert!(l.max_rows(u32::MAX) >= 1);
+    }
+
+    #[test]
+    fn faster_levels_scroll_further_and_wait_less() {
+        let steps: Vec<i32> = (0..=4).map(|speed| Limits { speed, ..Limits::default() }.step(400)).collect();
+        assert!(steps.windows(2).all(|w| w[0] < w[1]), "{steps:?}");
+        assert_eq!(steps[2], step_points(400));
+        let waits: Vec<Duration> = (0..=4).map(|speed| Limits { speed, ..Limits::default() }.wait(Duration::from_millis(100))).collect();
+        assert!(waits.windows(2).all(|w| w[0] > w[1]), "{waits:?}");
+        assert!(steps.iter().all(|&s| s as f32 <= 400.0 * 0.9));
+        assert_eq!(Limits { speed: 250, ..Limits::default() }.step(400), steps[4], "out of range counts as the fastest");
+    }
+
+    #[test]
+    fn reverse_flips_the_wheel_both_ways() {
+        let l = Limits { reverse: true, ..Limits::default() };
+        assert_eq!((l.wheel(100), l.wheel(-100), l.wheel(0)), (-100, 100, 0));
+    }
+
+    #[test]
+    fn a_page_taller_than_the_limit_stops_at_it_and_says_so() {
+        let page = inbox(300, 90, 40);
+        let mut fake = FakePage::new(page.clone(), 200);
+        let stop = AtomicU8::new(RUNNING);
+        let limits = Limits { max_height: 1_000, ..Limits::default() };
+        let o = capture_with(&mut fake, Mode::Auto, &limits, &stop);
+        assert!(o.capped);
+        assert_eq!(o.max_height, 1_000);
+        assert!(o.img.h <= 1_000 && o.img.h > 800, "{}", o.img.h);
+        let n = o.img.h as usize * 300 * 4;
+        assert_eq!(o.img.px[..n], page.as_raw()[..n], "what is kept is the top of the page");
+    }
+
+    #[test]
+    fn the_speed_level_changes_how_far_each_step_goes() {
+        let page = inbox(300, 90, 40);
+        let (mut slow, mut fast) = (FakePage::new(page.clone(), 200), FakePage::new(page.clone(), 200));
+        let stop = AtomicU8::new(RUNNING);
+        let a = capture_with(&mut slow, Mode::Auto, &Limits { speed: 0, ..Limits::default() }, &stop);
+        let b = capture_with(&mut fast, Mode::Auto, &Limits { speed: 4, ..Limits::default() }, &stop);
+        assert_eq!(slow.scrolls[0], Limits { speed: 0, ..Limits::default() }.step(200));
+        assert_eq!(fast.scrolls[0], Limits { speed: 4, ..Limits::default() }.step(200));
+        assert!(slow.scrolls[0] < fast.scrolls[0]);
+        assert!(slow.grabs > fast.grabs, "{} vs {}", slow.grabs, fast.grabs);
+        for o in [a, b] {
+            assert_eq!(o.img.px.as_slice(), page.as_raw().as_slice(), "every speed gets the whole page");
         }
     }
 

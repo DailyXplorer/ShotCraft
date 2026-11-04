@@ -113,6 +113,8 @@ struct Overlay {
 
 pub struct Editor {
     pub tool: Tool,
+    /// Tool a new screenshot opens with; none keeps the one in use.
+    pub default_tool: Option<Tool>,
     styles: HashMap<Tool, Style>,
     zoom: f32,
     pan: Vec2,
@@ -153,6 +155,7 @@ impl Default for Editor {
         styles.insert(Tool::Oval, Style { shape: Shape::Oval, ..shape });
         Editor {
             tool: Tool::Select,
+            default_tool: None,
             styles,
             zoom: 1.0,
             pan: Vec2::ZERO,
@@ -183,6 +186,56 @@ impl Default for Editor {
     }
 }
 
+/// The style a tool had when the settings were saved. Anything out of range (a hand-edited file,
+/// a newer version's value) falls back to `base`'s.
+fn style_from_stored(st: &crate::settings::ToolStyle, base: &Style) -> Style {
+    fn pick<T: Copy>(all: &[T], i: u8, fallback: T) -> T {
+        all.get(i as usize).copied().unwrap_or(fallback)
+    }
+    let color = if st.color.len() == 7 && st.color.starts_with('#') && st.color[1..].chars().all(|c| c.is_ascii_hexdigit()) { hex(&st.color) } else { base.color };
+    Style {
+        color,
+        size: if (st.size as usize) < LINE_WIDTHS.len() { st.size } else { base.size },
+        dashed: st.dashed,
+        arrow: pick(&ARROW_STYLES, st.arrow, base.arrow),
+        fill: pick(&FILLS, st.fill, base.fill),
+        shape: pick(&SHAPES, st.shape, base.shape),
+        font: pick(&FONTS, st.font, base.font),
+        blur: pick(&BlurMode::ALL, st.blur, base.blur),
+        smooth: st.smooth.min(FREEHAND_SMOOTH_MAX),
+        vary: st.vary.min(FREEHAND_VARY.len() as u8 - 1),
+        round_cap: st.round_cap,
+        dim: if st.dim.is_finite() { st.dim.clamp(0.0, 1.0) } else { base.dim },
+        scale: base.scale,
+    }
+}
+
+fn style_to_stored(s: &Style) -> crate::settings::ToolStyle {
+    fn index<T: PartialEq>(all: &[T], v: &T) -> u8 {
+        all.iter().position(|x| x == v).unwrap_or(0) as u8
+    }
+    crate::settings::ToolStyle {
+        color: format!("#{:02X}{:02X}{:02X}", s.color[0], s.color[1], s.color[2]),
+        size: s.size,
+        dashed: s.dashed,
+        arrow: index(&ARROW_STYLES, &s.arrow),
+        fill: index(&FILLS, &s.fill),
+        shape: index(&SHAPES, &s.shape),
+        font: index(&FONTS, &s.font),
+        blur: index(&BlurMode::ALL, &s.blur),
+        smooth: s.smooth,
+        vary: s.vary,
+        round_cap: s.round_cap,
+        dim: s.dim,
+    }
+}
+
+// The order the stored choices count in. Append only: stored files point into these.
+const ARROW_STYLES: [ArrowStyle; 4] = [ArrowStyle::Shape, ArrowStyle::HandDrawn, ArrowStyle::Line, ArrowStyle::Double];
+const FILLS: [Fill; 4] = [Fill::HandDrawn, Fill::Transparent, Fill::Translucent, Fill::Opaque];
+const SHAPES: [Shape; 2] = [Shape::Rect, Shape::Oval];
+const FONTS: [FontKind; 2] = [FontKind::Sans, FontKind::Goofy];
+
 impl Editor {
     pub fn reset_for_new_doc(&mut self, prefer_100: bool) {
         self.fit = true;
@@ -197,6 +250,33 @@ impl Editor {
         if matches!(self.tool, Tool::Crop | Tool::Cut | Tool::Ocr | Tool::Backdrop) {
             self.tool = Tool::Select;
         }
+        if let Some(t) = self.default_tool {
+            self.tool = t;
+        }
+    }
+
+    /// The editor as the settings left it: the last style of each tool.
+    pub fn from_settings(settings: &crate::settings::Settings) -> Editor {
+        let mut ed = Editor::default();
+        ed.load_styles(settings);
+        ed
+    }
+
+    /// Replaces the tools' styles by the factory ones with the stored ones on top.
+    pub fn load_styles(&mut self, settings: &crate::settings::Settings) {
+        self.styles = Editor::default().styles;
+        for tool in Tool::TOOLBAR {
+            if let Some(stored) = settings.tool_styles.get(tool.name()) {
+                let base = self.styles.get(&tool).copied().unwrap_or_default();
+                self.styles.insert(tool, style_from_stored(stored, &base));
+            }
+        }
+        self.default_tool = Tool::TOOLBAR.into_iter().filter(|t| *t != Tool::Backdrop).find(|t| t.name() == settings.default_tool);
+    }
+
+    /// What `load_styles` would read back: the toolbar tools' styles, as the settings keep them.
+    fn stored_styles(&self) -> std::collections::BTreeMap<String, crate::settings::ToolStyle> {
+        Tool::TOOLBAR.into_iter().filter_map(|t| self.styles.get(&t).map(|s| (t.name().to_string(), style_to_stored(s)))).collect()
     }
 
     fn style_for(&self, t: Tool) -> Style {
@@ -792,6 +872,20 @@ impl App {
         egui::CentralPanel::default().frame(egui::Frame::new().fill(t.canvas)).show(ui, |ui| self.canvas_ui(ui, &t));
         self.popovers(ui.ctx(), &t);
         self.overlays(ui.ctx(), &t);
+        self.remember_styles();
+    }
+
+    /// Keeps the tools' latest styles in the settings, so the next launch starts from them.
+    fn remember_styles(&mut self) {
+        let now = self.ed.stored_styles();
+        if now == self.settings.tool_styles {
+            return;
+        }
+        self.settings.tool_styles = now;
+        // The tests draw the editor all the time: they must not write the user's settings.
+        if !cfg!(test) {
+            self.settings.save();
+        }
     }
 
     fn toolbar(&mut self, ui: &mut Ui, t: &Th) {
@@ -2530,5 +2624,117 @@ mod key_tests {
         assert_eq!(pts.len(), 1);
         assert!((pts[0].x - 150.0).abs() < 0.6 && (pts[0].y - 100.0).abs() < 0.6);
         assert!(hit(&d.objs[0], pts[0], 1.0, &t.app.fonts), "the point can be picked");
+    }
+}
+
+#[cfg(test)]
+mod style_memory_tests {
+    use super::*;
+    use crate::settings::{Settings, ToolStyle};
+
+    fn all_tools() -> impl Iterator<Item = Tool> {
+        Tool::TOOLBAR.into_iter()
+    }
+
+    #[test]
+    fn a_fresh_install_keeps_the_factory_styles() {
+        let fresh = Editor::from_settings(&Settings::default());
+        let factory = Editor::default();
+        for t in all_tools() {
+            assert_eq!(fresh.style_for(t), factory.style_for(t), "{t:?}");
+        }
+        assert_eq!(fresh.default_tool, None);
+        assert_eq!(fresh.stored_styles().len(), Tool::TOOLBAR.len().min(fresh.styles.len()));
+    }
+
+    #[test]
+    fn every_tools_style_survives_a_save_and_load() {
+        let mut ed = Editor::default();
+        for (n, t) in all_tools().enumerate() {
+            let mut st = ed.style_for(t);
+            st.color = [(n * 17) as u8, 200, (255 - n * 9) as u8, 255];
+            st.size = (n % 4) as u8;
+            st.dashed = n % 2 == 0;
+            st.arrow = ARROW_STYLES[n % 4];
+            st.fill = FILLS[n % 4];
+            st.shape = SHAPES[n % 2];
+            st.font = FONTS[n % 2];
+            st.blur = BlurMode::ALL[n % BlurMode::ALL.len()];
+            st.smooth = (n as u8) % (FREEHAND_SMOOTH_MAX + 1);
+            st.vary = (n % FREEHAND_VARY.len()) as u8;
+            st.round_cap = n % 3 == 0;
+            st.dim = 0.1 * (n % 9) as f32;
+            ed.styles.insert(t, st);
+        }
+        let mut settings = Settings::default();
+        settings.tool_styles = ed.stored_styles();
+        // Through the file and back, as a restart does.
+        let settings: Settings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        let back = Editor::from_settings(&settings);
+        for t in all_tools() {
+            let (a, b) = (ed.style_for(t), back.style_for(t));
+            assert_eq!((a.color, a.size, a.dashed, a.arrow, a.fill, a.shape, a.font, a.blur), (b.color, b.size, b.dashed, b.arrow, b.fill, b.shape, b.font, b.blur), "{t:?}");
+            assert_eq!((a.smooth, a.vary, a.round_cap), (b.smooth, b.vary, b.round_cap), "{t:?}");
+            assert!((a.dim - b.dim).abs() < 1e-6, "{t:?}");
+        }
+    }
+
+    #[test]
+    fn a_hand_edited_style_cannot_break_the_editor() {
+        let base = Style::default();
+        let junk = ToolStyle { color: "red".into(), size: 250, arrow: 99, fill: 99, shape: 99, font: 99, blur: 99, smooth: 99, vary: 99, dim: f32::NAN, ..ToolStyle::default() };
+        let st = style_from_stored(&junk, &base);
+        assert_eq!(st.color, base.color);
+        assert_eq!((st.size, st.arrow, st.fill, st.shape, st.font, st.blur), (base.size, base.arrow, base.fill, base.shape, base.font, base.blur));
+        assert!(st.smooth <= FREEHAND_SMOOTH_MAX && (st.vary as usize) < FREEHAND_VARY.len());
+        assert_eq!(st.dim, base.dim);
+        let loud = style_from_stored(&ToolStyle { dim: 7.0, color: "#00ff7f".into(), ..ToolStyle::default() }, &base);
+        assert_eq!((loud.dim, loud.color), (1.0, [0, 255, 127, 255]));
+    }
+
+    #[test]
+    fn a_stored_style_for_one_tool_leaves_the_others_alone() {
+        let mut settings = Settings::default();
+        settings.tool_styles.insert("Oval".into(), ToolStyle { size: 3, color: "#123456".into(), ..ToolStyle::default() });
+        settings.tool_styles.insert("Gone Tool".into(), ToolStyle::default());
+        let ed = Editor::from_settings(&settings);
+        let factory = Editor::default();
+        assert_eq!(ed.style_for(Tool::Oval).size, 3);
+        assert_eq!(ed.style_for(Tool::Oval).color, [0x12, 0x34, 0x56, 255]);
+        assert_eq!(ed.style_for(Tool::Rectangle), factory.style_for(Tool::Rectangle));
+    }
+
+    #[test]
+    fn the_default_tool_is_picked_by_name() {
+        let mut settings = Settings::default();
+        settings.default_tool = "Arrow".into();
+        assert_eq!(Editor::from_settings(&settings).default_tool, Some(Tool::Arrow));
+        settings.default_tool = "Backdrop".into();
+        assert_eq!(Editor::from_settings(&settings).default_tool, None, "Backdrop is not a tool to start with");
+        settings.default_tool = "no such tool".into();
+        assert_eq!(Editor::from_settings(&settings).default_tool, None);
+    }
+
+    #[test]
+    fn tool_names_are_unique_keys() {
+        let mut names: Vec<&str> = all_tools().map(|t| t.name()).collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), Tool::TOOLBAR.len(), "{names:?}");
+    }
+
+    #[test]
+    fn a_style_the_user_changes_lands_in_the_settings() {
+        crate::headless::with_rig(|rig| {
+            let mut app = rig.app();
+            app.doc = Some(crate::model::Doc::new(Image { w: 40, h: 30, px: std::sync::Arc::new(vec![255; 40 * 30 * 4]) }, 1.0));
+            app.ed.tool = Tool::Rectangle;
+            app.update_style(|st| st.size = 3);
+            app.remember_styles();
+            assert_eq!(app.settings.tool_styles["Rectangle"].size, 3);
+            assert_eq!(app.settings.tool_styles["Oval"], Editor::default().stored_styles()["Oval"]);
+            // And a new launch reads it back.
+            assert_eq!(Editor::from_settings(&app.settings).style_for(Tool::Rectangle).size, 3);
+        });
     }
 }

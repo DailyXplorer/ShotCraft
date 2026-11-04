@@ -359,9 +359,27 @@ pub fn save_image(img: &Image, path: &Path) -> Result<(), String> {
     }
 }
 
-pub fn file_stamp() -> String {
-    let out = Command::new("date").arg("+%Y%m%d-%H%M%S").output().ok();
-    out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| "now".into())
+/// The local date and time, for the names of saved files.
+pub fn now_stamp() -> crate::settings::Stamp {
+    let out = Command::new("date").arg("+%Y %m %d %H %M %S").output().ok();
+    let text = out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+    parse_stamp(&text).unwrap_or(crate::settings::Stamp { year: 1970, month: 1, day: 1, hour: 0, minute: 0, second: 0 })
+}
+
+fn parse_stamp(text: &str) -> Option<crate::settings::Stamp> {
+    let n: Vec<i32> = text.split_whitespace().map(|p| p.parse().ok()).collect::<Option<_>>()?;
+    let [year, month, day, hour, minute, second] = n[..] else { return None };
+    Some(crate::settings::Stamp { year, month: month as u32, day: day as u32, hour: hour as u32, minute: minute as u32, second: second as u32 })
+}
+
+/// `stem.ext` in `dir`, or `stem-2.ext`, `stem-3.ext`... when that name is taken: a save never
+/// replaces a file.
+pub fn unique_path(dir: &std::path::Path, stem: &str, ext: &str) -> PathBuf {
+    let first = dir.join(format!("{stem}.{ext}"));
+    if !first.exists() {
+        return first;
+    }
+    (2u32..).map(|n| dir.join(format!("{stem}-{n}.{ext}"))).find(|p| !p.exists()).unwrap_or(first)
 }
 
 pub fn notify(title: &str, body: &str) {
@@ -438,10 +456,17 @@ pub struct OcrResult {
     pub codes: Vec<String>,
 }
 
-#[cfg(target_os = "macos")]
+/// Text and codes in an image, with the text read in the default languages.
 pub fn recognize(img: &Image) -> Result<OcrResult, String> {
+    recognize_in(img, "")
+}
+
+/// Like `recognize`, trying `language` (a Vision language code from `ocr_languages`) first; empty or
+/// unknown keeps Vision's own choice.
+#[cfg(target_os = "macos")]
+pub fn recognize_in(img: &Image, language: &str) -> Result<OcrResult, String> {
     use objc2::AnyThread;
-    use objc2_foundation::{NSArray, NSData, NSDictionary};
+    use objc2_foundation::{NSArray, NSData, NSDictionary, NSString};
     use objc2_vision::{VNDetectBarcodesRequest, VNImageRequestHandler, VNRecognizeTextRequest, VNRequest, VNRequestTextRecognitionLevel};
     let png = encode_png(img)?;
     objc2::rc::autoreleasepool(|_| unsafe {
@@ -450,6 +475,9 @@ pub fn recognize(img: &Image) -> Result<OcrResult, String> {
         let text = VNRecognizeTextRequest::new();
         text.setRecognitionLevel(VNRequestTextRecognitionLevel::Accurate);
         text.setUsesLanguageCorrection(true);
+        if ocr_languages().iter().any(|(code, _)| code == language) {
+            text.setRecognitionLanguages(&NSArray::from_retained_slice(&[NSString::from_str(language)]));
+        }
         let codes = VNDetectBarcodesRequest::new();
         let a: &VNRequest = &text;
         let b: &VNRequest = &codes;
@@ -510,13 +538,78 @@ pub fn text_boxes(_img: &Image) -> Vec<R> {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn recognize(_img: &Image) -> Result<OcrResult, String> {
+pub fn recognize_in(_img: &Image, _language: &str) -> Result<OcrResult, String> {
     Err("Text recognition needs macOS".into())
+}
+
+/// The languages text recognition can read, as (Vision code, name in the user's language), by name.
+/// Asked once: the answer doesn't change while the app runs.
+pub fn ocr_languages() -> &'static [(String, String)] {
+    static LANGUAGES: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
+    LANGUAGES.get_or_init(|| {
+        let mut list = supported_ocr_languages();
+        list.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+        list
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn supported_ocr_languages() -> Vec<(String, String)> {
+    use objc2_foundation::{NSLocale, NSString};
+    use objc2_vision::{VNRecognizeTextRequest, VNRequestTextRecognitionLevel};
+    objc2::rc::autoreleasepool(|_| unsafe {
+        let text = VNRecognizeTextRequest::new();
+        text.setRecognitionLevel(VNRequestTextRecognitionLevel::Accurate);
+        let Ok(codes) = text.supportedRecognitionLanguagesAndReturnError() else { return vec![] };
+        let locale = NSLocale::currentLocale();
+        codes
+            .iter()
+            .map(|c| {
+                let code = c.to_string();
+                let name = locale.localizedStringForLocaleIdentifier(&NSString::from_str(&code)).to_string();
+                (code.clone(), if name.is_empty() { code } else { name })
+            })
+            .collect()
+    })
+}
+
+/// Without Vision there is nothing to offer.
+#[cfg(not(target_os = "macos"))]
+fn supported_ocr_languages() -> Vec<(String, String)> {
+    vec![]
+}
+
+/// Opens System Settings on the keyboard pane, where the system's own screenshot shortcuts can be switched off.
+pub fn open_keyboard_settings() {
+    let _ = Command::new("open").arg("x-apple.systempreferences:com.apple.Keyboard-Settings.extension").spawn();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_date_command_output_is_read_back() {
+        let s = parse_stamp("2026 11 05 09 07 03").unwrap();
+        assert_eq!((s.year, s.month, s.day, s.hour, s.minute, s.second), (2026, 11, 5, 9, 7, 3));
+        assert!(parse_stamp("").is_none());
+        assert!(parse_stamp("2026 11 05").is_none());
+        assert!(parse_stamp("a b c d e f").is_none());
+        assert!(parse_stamp("1 2 3 4 5 6 7").is_none());
+    }
+
+    #[test]
+    fn a_save_never_takes_a_name_that_exists() {
+        let dir = temp_png("unique").with_extension("d");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(unique_path(&dir, "shot", "png"), dir.join("shot.png"));
+        std::fs::write(dir.join("shot.png"), b"x").unwrap();
+        assert_eq!(unique_path(&dir, "shot", "png"), dir.join("shot-2.png"));
+        std::fs::write(dir.join("shot-2.png"), b"x").unwrap();
+        assert_eq!(unique_path(&dir, "shot", "png"), dir.join("shot-3.png"));
+        assert_eq!(unique_path(&dir, "shot", "jpg"), dir.join("shot.jpg"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     // 2 × 1 images, left pixel (200, 40, 20) and right pixel (10, 120, 230), one per format the open dialog offers.
     const GIF: &[u8] = &[
