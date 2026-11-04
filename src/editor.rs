@@ -1078,7 +1078,12 @@ impl App {
         };
         let txt = render::format_color(self.ed.hover_color, self.settings.color_format);
         // Some formats (OKLCH, UIColor) are wider than the default cell.
-        let txt_w = ui.painter().layout_no_wrap(txt.clone(), value.clone(), t.text).size().x;
+        // Sized from a few wide samples, not from the colour under the cursor, so the cells to
+        // the right do not slide around while the mouse moves.
+        let txt_w = [[255, 255, 255, 255], [0, 0, 255, 255], [200, 100, 255, 255], [255, 0, 255, 255]]
+            .iter()
+            .map(|c| ui.painter().layout_no_wrap(render::format_color(*c, self.settings.color_format), value.clone(), t.text).size().x)
+            .fold(0.0f32, f32::max);
         let (r, resp) = cell(ui, &mut x, (txt_w + 44.0).max(140.0), "st-color");
         let sw = Rect::from_min_size(pos2(r.left() + 6.0, r.center().y - 9.0), vec2(18.0, 18.0));
         ui.painter().rect_filled(sw, 4.0, c32(self.ed.hover_color));
