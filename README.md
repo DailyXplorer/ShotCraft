@@ -9,10 +9,19 @@ ShotCraft is written in Rust. It is an early version (0.1.0).
 ### Capture
 
 * Area, any window, full screen (main display), repeat the last area, and a 3-second delayed full-screen capture.
+* Scrolling capture: pick an area, scroll the page yourself, and ShotCraft stitches what the area showed into one tall image that opens in the editor. A small always-on-top control next to the area shows the live height and has Done and Cancel; `Esc` cancels. The area is grabbed about four to five times per second. Fixed headers and footers are kept once, scrolling back up adds nothing, and the image stops at 20,000 px. Start it from the menu bar icon or with its hotkey (not set by default); pressing the hotkey again acts as Done.
 * Window captures can keep a transparent background or use a solid color, and can trim the window shadow.
 * Instant text and QR recognition: select an area and the recognized text goes straight to the clipboard, with no editor.
 * Open an existing image from a file or from the clipboard. The file picker and the command line open PNG, JPEG, GIF, BMP, TIFF and WebP files; saving writes PNG or JPEG. Animated GIFs open as their first frame.
 * Runs from the menu bar. The capture commands are in the menu bar icon menu, and global hotkeys work while the editor is hidden.
+
+Scrolling capture limits:
+
+* You scroll by hand. ShotCraft does not scroll for you (that would need the Accessibility permission).
+* Scroll steadily, with every part of the page staying in view in at least two grabs. If the page jumps further than about 90% of the area between two grabs, or the content is blank or strongly repetitive (stripes, grids), that step is dropped and the control says "Lost track"; scroll back a little and continue.
+* Content that animates inside the area (video, ads, a blinking cursor beside the text) can confuse the match; small changes are tolerated.
+* Only vertical scrolling downwards builds the image, and the control window needs room beside the area on the same display.
+* Very tall images are shown in the editor as several textures, so they open at the width of the window; export and copy use the full-resolution image.
 
 ### After a capture
 
@@ -54,7 +63,7 @@ A pinned image is a borderless window that stays above other windows. Drag it an
 ### Preferences
 
 * General: what happens after a screenshot (editor, thumbnail or nothing; copy; save), thumbnail auto-close, launch at startup, screenshots folder, save format, Retina downscale, window screenshot background and shadow.
-* Hotkeys: record or clear a shortcut for each of the six actions listed under Keyboard shortcuts. ShotCraft flags a shortcut that macOS refuses because another app uses it.
+* Hotkeys: record or clear a shortcut for each of the seven actions listed under Keyboard shortcuts. ShotCraft flags a shortcut that macOS refuses because another app uses it.
 * Advanced: OCR line breaks, hide the menu bar icon, keep the main window on top, zoom direction, default zoom level, what Esc does when hiding the editor (copy and/or save), and confirmation style (custom notification, system notification or none).
 
 Settings are stored in `~/Library/Application Support/ShotCraft/settings.json`.
@@ -71,6 +80,7 @@ Global hotkeys (editable in Preferences, Hotkeys):
 | Repeat area screenshot | not set |
 | Instant Text/QR Recognition | not set |
 | Show ShotCraft | not set |
+| Scrolling screenshot | not set |
 
 In the editor:
 

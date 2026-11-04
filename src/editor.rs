@@ -1,6 +1,7 @@
 use crate::icons::{self, Icon};
 use crate::model::*;
 use crate::render;
+use crate::tiled::{Alpha, TiledTexture};
 use crate::{Action, App};
 use eframe::egui::{
     self, pos2, vec2, Align2, Color32, CornerRadius, FontFamily, FontId, Key, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2,
@@ -97,14 +98,14 @@ pub enum Popover {
 struct Comp {
     key: (u64, Option<usize>),
     pm: Pixmap,
-    tex: egui::TextureHandle,
+    tex: TiledTexture,
 }
 
 struct Overlay {
     obj: Obj,
     version: u64,
     rect: R,
-    tex: egui::TextureHandle,
+    tex: TiledTexture,
 }
 
 pub struct Editor {
@@ -123,7 +124,7 @@ pub struct Editor {
     hover_color: Rgba,
     comp: Option<Comp>,
     overlay: Option<Overlay>,
-    preview: Option<(u64, (u32, u32), egui::TextureHandle)>,
+    preview: Option<(u64, (u32, u32), TiledTexture)>,
     pub popover: Popover,
     crop_draft: Option<R>,
     resize_w: String,
@@ -368,9 +369,8 @@ fn new_kind(tool: Tool, q: P, n: u32) -> Option<Kind> {
     })
 }
 
-fn color_image(pm: &Pixmap) -> egui::ColorImage {
-    egui::ColorImage::from_rgba_premultiplied([pm.width() as usize, pm.height() as usize], pm.data())
-}
+/// Pictures taller than this many times their width open fitted to the width.
+const TALL_ASPECT: f32 = 3.0;
 
 const TEX: egui::TextureOptions = egui::TextureOptions {
     magnification: egui::TextureFilter::Nearest,
@@ -1122,15 +1122,15 @@ impl App {
         let key = (d.version, skip);
         if self.ed.comp.as_ref().map_or(true, |c| c.key != key) {
             let pm = render::compose(d, &self.fonts, skip);
-            let img = color_image(&pm);
+            let size = (pm.width(), pm.height());
             match &mut self.ed.comp {
-                Some(c) if c.pm.width() == pm.width() && c.pm.height() == pm.height() => {
-                    c.tex.set(img, TEX);
+                Some(c) if c.tex.fits(ctx, size) => {
+                    c.tex.update(pm.data(), Alpha::Premultiplied, TEX);
                     c.pm = pm;
                     c.key = key;
                 }
                 _ => {
-                    let tex = ctx.load_texture("composite", img, TEX);
+                    let tex = TiledTexture::new(ctx, "composite", size, pm.data(), Alpha::Premultiplied, TEX);
                     self.ed.comp = Some(Comp { key, pm, tex });
                 }
             }
@@ -1149,13 +1149,13 @@ impl App {
                         let mut local = obj.clone();
                         local.translate(-b.x0, -b.y0);
                         render::draw_obj(&mut region, &local, &self.fonts, d.scale_factor);
-                        let img = color_image(&region);
+                        let size = (region.width(), region.height());
                         let tex = match self.ed.overlay.take() {
-                            Some(mut o) => {
-                                o.tex.set(img, TEX);
+                            Some(mut o) if o.tex.fits(ctx, size) => {
+                                o.tex.update(region.data(), Alpha::Premultiplied, TEX);
                                 o.tex
                             }
-                            None => ctx.load_texture("overlay", img, TEX),
+                            _ => TiledTexture::new(ctx, "overlay", size, region.data(), Alpha::Premultiplied, TEX),
                         };
                         self.ed.overlay = Some(Overlay { obj: obj.clone(), version: comp.key.0, rect: b, tex });
                     } else {
@@ -1168,8 +1168,7 @@ impl App {
         if self.ed.tool == Tool::Backdrop && d.backdrop.is_some() {
             if self.ed.preview.as_ref().map_or(true, |p| p.0 != d.version) {
                 let img = render::export(d, &self.fonts);
-                let ci = egui::ColorImage::from_rgba_unmultiplied([img.w as usize, img.h as usize], &img.px);
-                let tex = ctx.load_texture("backdrop-preview", ci, egui::TextureOptions::LINEAR);
+                let tex = TiledTexture::new(ctx, "backdrop-preview", (img.w, img.h), &img.px, Alpha::Straight, egui::TextureOptions::LINEAR);
                 self.ed.preview = Some((d.version, (img.w, img.h), tex));
             }
         }
@@ -1205,15 +1204,23 @@ impl App {
             let fitz = (avail.x / fit_target.w()).min(avail.y / fit_target.h()).max(0.01);
             let hundred = 1.0 / ppp;
             self.ed.zoom = if self.ed.prefer_100 || self.settings.prefer_100 { hundred.min(fitz.max(hundred * 0.8)) } else { fitz.min(hundred) };
+            // A tall picture (a scrolling capture) shrunk to fit its height would be unreadable: fit its
+            // width instead and start at the top; scrolling or zooming moves down the picture.
+            let tall = fit_target.h() / fit_target.w() > TALL_ASPECT;
+            if tall {
+                self.ed.zoom = (avail.x / fit_target.w()).min(hundred).max(0.01);
+            }
             let content = vec2(fit_target.w(), fit_target.h()) * self.ed.zoom;
-            self.ed.pan = (rect.size() - content) / 2.0 - vec2(fit_target.x0, fit_target.y0) * self.ed.zoom;
+            let free = rect.size() - content;
+            let offset = if tall { vec2(free.x / 2.0, 24.0) } else { free / 2.0 };
+            self.ed.pan = offset - vec2(fit_target.x0, fit_target.y0) * self.ed.zoom;
         }
 
         let painter = ui.painter_at(rect);
         if backdrop_mode {
             if let Some((_, (w, h), tex)) = &self.ed.preview {
                 let r = self.ed.rect_screen(&R { x0: 0.0, y0: 0.0, x1: *w as f32, y1: *h as f32 });
-                painter.image(tex.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                tex.paint_in(&painter, r, Color32::WHITE);
             }
             self.canvas_zoom_pan(ui, &resp);
             return;
@@ -1221,13 +1228,12 @@ impl App {
 
         let view_screen = self.ed.rect_screen(&view);
         if let Some(c) = &self.ed.comp {
-            let uv = Rect::from_min_max(pos2(view.x0 / iw, view.y0 / ih), pos2(view.x1 / iw, view.y1 / ih));
-            painter.image(c.tex.id(), view_screen, uv, Color32::WHITE);
+            c.tex.paint(&painter, &view, |r| self.ed.rect_screen(r), Color32::WHITE);
         }
         painter.rect_stroke(view_screen, 0.0, Stroke::new(1.0, t.line), StrokeKind::Outside);
         let clip = painter.with_clip_rect(view_screen.intersect(rect));
         if let Some(o) = &self.ed.overlay {
-            clip.image(o.tex.id(), self.ed.rect_screen(&o.rect), Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            o.tex.paint_in(&clip, self.ed.rect_screen(&o.rect), Color32::WHITE);
         }
 
         let pointer = ui.input(|i| i.pointer.hover_pos());

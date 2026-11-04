@@ -3,7 +3,10 @@ mod icons;
 mod model;
 mod prefs;
 mod render;
+mod scroll;
 mod settings;
+mod stitch;
+mod tiled;
 #[cfg(target_os = "macos")]
 mod shell;
 #[cfg(target_os = "macos")]
@@ -51,6 +54,10 @@ pub enum Action {
     PinCopy(Image),
     ThumbDo(ThumbAction),
     Captured(Result<Option<Captured>, String>),
+    ScrollingCapture,
+    ScrollingCancel,
+    ScrollingArea(Result<Option<model::R>, String>),
+    ScrollingFinished(Result<Option<scroll::Outcome>, String>, f32),
     OcrCaptured(Result<Option<Captured>, String>),
     OcrDone(Result<system::OcrResult, String>),
 }
@@ -90,14 +97,14 @@ pub struct Pin {
     scale: f32,
     zoom: f32,
     semi: bool,
-    tex: Option<egui::TextureHandle>,
+    tex: Option<tiled::TiledTexture>,
     open: bool,
 }
 
 pub struct Thumb {
     img: Image,
     scale: f32,
-    tex: Option<egui::TextureHandle>,
+    tex: Option<tiled::TiledTexture>,
     born: Instant,
     hovered: bool,
     focused: bool,
@@ -124,6 +131,7 @@ pub struct App {
     quitting: bool,
     pub hidden: bool,
     hide_pending: bool,
+    scroll: Option<scroll::Session>,
     ocr_running: bool,
     busy: bool,
     pub about_open: bool,
@@ -182,6 +190,7 @@ impl App {
             quitting: false,
             hidden: background,
             hide_pending: false,
+            scroll: None,
             ocr_running: false,
             busy: false,
             about_open: false,
@@ -288,6 +297,102 @@ impl App {
             q.lock().unwrap().push(if for_ocr { Action::OcrCaptured(res) } else { Action::Captured(res) });
             ctx.request_repaint();
         });
+    }
+
+    /// Starts a scrolling capture, or ends the running one (the hotkey and the menu item act as Done).
+    fn start_scrolling(&mut self) {
+        if let Some(s) = &self.scroll {
+            s.finish();
+            return;
+        }
+        if self.busy {
+            return;
+        }
+        self.busy = true;
+        let was_visible = !self.hidden;
+        if was_visible {
+            self.hide_window();
+        }
+        let (q, ctx) = (self.queue.clone(), self.ctx.clone());
+        std::thread::spawn(move || {
+            if was_visible {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            let res = scroll::select_area();
+            q.lock().unwrap().push(Action::ScrollingArea(res));
+            ctx.request_repaint();
+        });
+    }
+
+    fn scrolling_area(&mut self, res: Result<Option<model::R>, String>) {
+        let area = match res {
+            Ok(Some(area)) => area,
+            Ok(None) => {
+                self.busy = false;
+                return;
+            }
+            Err(e) => {
+                self.busy = false;
+                self.error(e);
+                return;
+            }
+        };
+        let Some(rect) = scroll::GrabRect::from_area(&area) else {
+            self.busy = false;
+            self.error("That area is too small. Select a larger area to scroll through.");
+            return;
+        };
+        let Some(pos) = scroll::control_position(&rect.as_r(), scroll::CONTROL_SIZE, &scroll::screens()) else {
+            self.busy = false;
+            self.error("No room for the controls next to that area. Select a smaller area.");
+            return;
+        };
+        self.scroll = Some(scroll::Session::start(rect, pos, self.pixels_per_point(), self.queue.clone(), self.ctx.clone()));
+        self.grab_escape(true);
+        self.ctx.request_repaint();
+    }
+
+    fn scrolling_finished(&mut self, res: Result<Option<scroll::Outcome>, String>, scale: f32) {
+        self.scroll = None;
+        self.grab_escape(false);
+        match res {
+            Ok(Some(o)) => {
+                let (frames, capped) = (o.frames, o.capped);
+                let img = o.img;
+                self.handle(Action::Captured(Ok(Some(Captured { img, scale, area: None, mode: CaptureMode::Area }))));
+                if capped {
+                    self.say(format!("Stopped at the height limit of {} px", stitch::MAX_HEIGHT));
+                } else if frames <= 1 {
+                    self.say("The page didn't scroll, so this is a regular screenshot");
+                }
+            }
+            Ok(None) => self.handle(Action::Captured(Ok(None))),
+            Err(e) => self.handle(Action::Captured(Err(e))),
+        }
+    }
+
+    fn scroll_ui(&mut self, ctx: &egui::Context) {
+        let Some(s) = &self.scroll else { return };
+        let builder = ViewportBuilder::default()
+            .with_title("ShotCraft Scrolling Capture")
+            .with_inner_size(scroll::CONTROL_SIZE)
+            .with_position(s.control_pos)
+            .with_decorations(false)
+            .with_resizable(false)
+            .with_transparent(true)
+            .with_has_shadow(false)
+            .with_active(false)
+            .with_always_on_top();
+        show_window(ctx, scroll::control_id(), builder, s.control_body());
+    }
+
+    pub fn grab_escape(&mut self, on: bool) {
+        #[cfg(target_os = "macos")]
+        if let Some(s) = &mut self.shell {
+            s.grab_escape(on);
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = on;
     }
 
     pub fn open_image(&mut self, img: Image, scale: f32, fullscreen: bool) {
@@ -455,6 +560,14 @@ impl App {
                 }
             }
             Action::OcrDone(result) => self.ocr_done(result),
+            Action::ScrollingCapture => self.start_scrolling(),
+            Action::ScrollingCancel => {
+                if let Some(s) = &self.scroll {
+                    s.cancel();
+                }
+            }
+            Action::ScrollingArea(res) => self.scrolling_area(res),
+            Action::ScrollingFinished(res, scale) => self.scrolling_finished(res, scale),
             Action::OpenClipboard => match system::clipboard_image() {
                 Ok(img) => {
                     let s = self.pixels_per_point();
@@ -665,14 +778,11 @@ impl Pin {
 fn pin_window(ui: &mut egui::Ui, pin: &mut Pin, queue: &Queue) {
     let ctx = ui.ctx().clone();
     let (img, scale) = (pin.img.clone(), pin.scale);
-    let tex = pin.tex.get_or_insert_with(|| {
-        let ci = egui::ColorImage::from_rgba_unmultiplied([img.w as usize, img.h as usize], &img.px);
-        ctx.load_texture(format!("pin-{}", pin.id), ci, egui::TextureOptions::LINEAR)
-    });
+    let tex = pin.tex.get_or_insert_with(|| tiled::TiledTexture::new(&ctx, &format!("pin-{}", pin.id), (img.w, img.h), &img.px, tiled::Alpha::Straight, egui::TextureOptions::LINEAR));
     let rect = ui.max_rect();
     let resp = ui.allocate_rect(rect, egui::Sense::click_and_drag());
     let tint = if pin.semi { Color32::from_white_alpha(140) } else { Color32::WHITE };
-    ui.painter().image(tex.id(), rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), tint);
+    tex.paint_in(ui.painter(), rect, tint);
     if resp.drag_started() {
         ctx.send_viewport_cmd(ViewportCommand::StartDrag);
     }
@@ -741,15 +851,12 @@ fn thumb_window(ui: &mut egui::Ui, th: &mut Thumb, queue: &Queue) {
     th.blurred |= th.focused && !focused;
     th.focused = focused;
     let img = th.img.clone();
-    let tex = th.tex.get_or_insert_with(|| {
-        let ci = egui::ColorImage::from_rgba_unmultiplied([img.w as usize, img.h as usize], &img.px);
-        ctx.load_texture("thumb", ci, egui::TextureOptions::LINEAR)
-    });
+    let tex = th.tex.get_or_insert_with(|| tiled::TiledTexture::new(&ctx, "thumb", (img.w, img.h), &img.px, tiled::Alpha::Straight, egui::TextureOptions::LINEAR));
     let rect = ui.max_rect();
     let resp = ui.allocate_rect(rect, egui::Sense::click_and_drag());
     ui.painter().rect_filled(rect, 10.0, Color32::from_gray(30));
     let img_r = rect.shrink(4.0);
-    ui.painter().image(tex.id(), img_r, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+    tex.paint_in(ui.painter(), img_r, Color32::WHITE);
     if resp.hovered() {
         th.hovered = true;
         ui.painter().rect_filled(img_r, 6.0, Color32::from_black_alpha(110));
@@ -839,6 +946,7 @@ impl eframe::App for App {
         }
         self.pins_ui(&ctx);
         self.thumb_ui(&ctx);
+        self.scroll_ui(&ctx);
         self.prefs_ui(&ctx);
         self.keep_ui_alive(&ctx);
         self.screenshot_tick(ui);
