@@ -38,6 +38,18 @@ const MIN_BODY: usize = 16;
 /// The header and the footer may each take at most this share of the frame height (percent).
 const MAX_BAND_PERCENT: usize = 40;
 
+/// A column (of the 64) that has detail counts as fixed when this share of its rows is unchanged...
+const FIXED_COLUMN_PERCENT: usize = 98;
+/// ... and as moving when less than this share is.
+const MOVING_COLUMN_PERCENT: usize = 90;
+/// Columns are only blanked when at least this many are fixed and at least this many move.
+const MIN_FIXED_COLUMNS: usize = 2;
+const MIN_MOVING_COLUMNS: usize = 4;
+
+/// A hint narrows the search to this fraction of the body height (1/n) on each side, at least `HINT_MIN_TOLERANCE` rows.
+const HINT_TOLERANCE_DIV: usize = 20;
+const HINT_MIN_TOLERANCE: usize = 6;
+
 /// What `Stitcher::push` did with a frame.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Push {
@@ -90,6 +102,19 @@ impl Sig {
         sig
     }
 
+    /// The same signature with some columns set to one grey, in every row: they match any shift and tell none apart.
+    fn blanked(&self, columns: &[bool]) -> Sig {
+        let mut rows = self.rows.clone();
+        for (i, v) in rows.iter_mut().enumerate() {
+            if columns[i % self.blocks] {
+                *v = 128;
+            }
+        }
+        let mut sig = Sig { blocks: self.blocks, rows, inf: vec![] };
+        sig.inf = (0..sig.rows.len() / sig.blocks).map(|y| sig.informative(y)).collect();
+        sig
+    }
+
     fn row(&self, y: usize) -> &[u8] {
         &self.rows[y * self.blocks..(y + 1) * self.blocks]
     }
@@ -118,8 +143,46 @@ enum Estimate {
     Lost,
 }
 
+/// A column that has detail and does not move at all between two frames belongs to something fixed
+/// next to the scrolling part (a side panel, a pane that scrolls on its own): the rows of the whole
+/// frame then never line up, whatever the shift. Such columns are blanked in both signatures, so the
+/// shift is found on the columns that move. Nothing changes unless some columns move and some are fixed.
+fn without_fixed_columns(prev: &Sig, cur: &Sig, top: usize, bot: usize) -> Option<(Sig, Sig)> {
+    let (blocks, body) = (cur.blocks, bot - top);
+    let mut fixed = vec![false; blocks];
+    let (mut n_fixed, mut n_moving) = (0, 0);
+    for b in 0..blocks {
+        let col = |s: &Sig, y: usize| s.rows[y * blocks + b];
+        let (lo, hi) = (top..bot).fold((255u8, 0u8), |(lo, hi), y| (lo.min(col(cur, y)), hi.max(col(cur, y))));
+        let detail = (top..bot).filter(|&y| col(cur, y).abs_diff(col(cur, top)) > ROW_TOLERANCE as u8).count() * 20 >= body;
+        if hi - lo < TEXTURE_RANGE || !detail {
+            continue;
+        }
+        let same = (top..bot).filter(|&y| col(cur, y).abs_diff(col(prev, y)) <= ROW_TOLERANCE as u8).count();
+        if same * 100 >= body * FIXED_COLUMN_PERCENT {
+            fixed[b] = true;
+            n_fixed += 1;
+        } else if same * 100 < body * MOVING_COLUMN_PERCENT {
+            n_moving += 1;
+        }
+    }
+    if n_fixed < MIN_FIXED_COLUMNS || n_moving < MIN_MOVING_COLUMNS {
+        return None;
+    }
+    Some((prev.blanked(&fixed), cur.blanked(&fixed)))
+}
+
 /// Finds how far the page moved between `prev` and `cur`, looking only at rows `top..bot`.
-fn estimate(prev: &Sig, cur: &Sig, top: usize, bot: usize) -> Estimate {
+fn estimate(prev: &Sig, cur: &Sig, top: usize, bot: usize, hint: Option<i32>) -> Estimate {
+    if bot.saturating_sub(top) >= MIN_BODY {
+        if let Some((p, c)) = without_fixed_columns(prev, cur, top, bot) {
+            return estimate_columns(&p, &c, top, bot, hint);
+        }
+    }
+    estimate_columns(prev, cur, top, bot, hint)
+}
+
+fn estimate_columns(prev: &Sig, cur: &Sig, top: usize, bot: usize, hint: Option<i32>) -> Estimate {
     let body = bot.saturating_sub(top);
     if body < MIN_BODY {
         return Estimate::Lost;
@@ -150,6 +213,21 @@ fn estimate(prev: &Sig, cur: &Sig, top: usize, bot: usize) -> Estimate {
         costs.push(if evidence >= MIN_INFORMATIVE_ROWS { sum as f32 / (n.max(1) * blocks as u64) as f32 } else { f32::MAX });
     }
     let at = |i: usize| i as i32 - dmax;
+    // With a hint (the scroll the caller asked for), only shifts near it are candidates, and among the
+    // ones that fit equally well the closest to the hint wins: that is what tells the right row of a
+    // list of look-alike rows from its neighbours. When nothing near the hint fits, the search is open.
+    if let Some(h) = hint.filter(|h| h.abs() <= dmax) {
+        let tol = ((body / HINT_TOLERANCE_DIV).max(HINT_MIN_TOLERANCE)) as i32;
+        let near: Vec<usize> = (0..costs.len()).filter(|&i| (at(i) - h).abs() <= tol).collect();
+        if let Some(&floor) = near.iter().min_by(|&&a, &&b| costs[a].total_cmp(&costs[b])) {
+            if costs[floor] <= MAX_COARSE_COST {
+                let pick = near.iter().copied().filter(|&i| costs[i] <= costs[floor] + MIN_MARGIN).min_by_key(|&i| (at(i) - h).abs()).unwrap_or(floor);
+                if let Some(e) = verify(prev, cur, top, bot, at(pick)) {
+                    return e;
+                }
+            }
+        }
+    }
     let mut best = 0usize;
     for i in 1..costs.len() {
         if costs[i] < costs[best] || (costs[i] == costs[best] && at(i).abs() < at(best).abs()) {
@@ -164,6 +242,11 @@ fn estimate(prev: &Sig, cur: &Sig, top: usize, bot: usize) -> Estimate {
     if runner_up < costs[best] + MIN_MARGIN {
         return Estimate::Lost;
     }
+    verify(prev, cur, top, bot, d).unwrap_or(Estimate::Lost)
+}
+
+/// Checks a candidate shift on every row of the overlap.
+fn verify(prev: &Sig, cur: &Sig, top: usize, bot: usize, d: i32) -> Option<Estimate> {
     // Check the winner on every row of the overlap.
     let lo = top + (-d).max(0) as usize;
     let hi = bot - d.max(0) as usize;
@@ -172,13 +255,28 @@ fn estimate(prev: &Sig, cur: &Sig, top: usize, bot: usize) -> Estimate {
     let matched = (lo..hi).filter(|&y| cur.same_row(y, prev, (y as i32 + d) as usize)).count();
     let (matched_inf, total_inf) = (lo..hi).filter(|&y| both(y)).fold((0, 0), |(m, t), y| (m + cur.same_row(y, prev, (y as i32 + d) as usize) as usize, t + 1));
     if (matched as f32) < MIN_MATCHED * rows as f32 || (matched_inf as f32) < MIN_MATCHED * total_inf as f32 {
-        return Estimate::Lost;
+        return None;
     }
-    if d == 0 {
-        Estimate::Same
-    } else {
-        Estimate::Offset(d)
+    Some(if d == 0 { Estimate::Same } else { Estimate::Offset(d) })
+}
+
+/// True when two frames of the same size show the same picture, give or take a few pixels of noise
+/// (a blinking caret, a video corner). Used to tell when a page has stopped moving.
+pub fn frames_match(a: &RgbaImage, b: &RgbaImage) -> bool {
+    if a.dimensions() != b.dimensions() {
+        return false;
     }
+    let (w, h) = (a.width() as usize, a.height() as usize);
+    let (ra, rb) = (a.as_raw(), b.as_raw());
+    let (mut seen, mut differ) = (0usize, 0usize);
+    for y in (0..h).step_by(2) {
+        for x in (0..w).step_by(2) {
+            let i = (y * w + x) * 4;
+            seen += 1;
+            differ += (0..3).any(|c| ra[i + c].abs_diff(rb[i + c]) > 8) as usize;
+        }
+    }
+    differ * 500 <= seen
 }
 
 /// Builds the image frame by frame. Feed it every captured frame in order, then call `finish`.
@@ -252,6 +350,13 @@ impl Stitcher {
     }
 
     pub fn push(&mut self, frame: &RgbaImage) -> Push {
+        self.push_hinted(frame, None)
+    }
+
+    /// Like `push`, with the number of rows the page is expected to have moved since the previous
+    /// frame (positive = down). The hint only picks between shifts that fit the pixels equally well;
+    /// it never makes a bad fit acceptable.
+    pub fn push_hinted(&mut self, frame: &RgbaImage, hint: Option<i32>) -> Push {
         if self.capped {
             return Push::Capped;
         }
@@ -271,10 +376,10 @@ impl Stitcher {
         }
         let sig = Sig::new(frame);
         if self.bands_known {
-            return self.push_known(frame, sig);
+            return self.push_known(frame, sig, hint);
         }
         let first = self.first_sig.take().expect("the first frame is kept until the bands are known");
-        let result = self.push_second(frame, sig, &first);
+        let result = self.push_second(frame, sig, &first, hint);
         if !self.bands_known {
             self.first_sig = Some(first);
         }
@@ -282,7 +387,7 @@ impl Stitcher {
     }
 
     /// The second distinct frame: find the fixed bands and the first offset.
-    fn push_second(&mut self, frame: &RgbaImage, sig: Sig, first: &Sig) -> Push {
+    fn push_second(&mut self, frame: &RgbaImage, sig: Sig, first: &Sig, hint: Option<i32>) -> Push {
         let (_, h) = frame.dimensions();
         let h = h as usize;
         let cap = h * MAX_BAND_PERCENT / 100;
@@ -292,7 +397,7 @@ impl Stitcher {
         // continue past the band, so they are not a bar.
         let header = if header > 0 && first.same_row(header - 1, first, header) { 0 } else { header };
         let footer = if footer > 0 && first.same_row(h - footer, first, h - footer - 1) { 0 } else { footer };
-        match estimate(first, &sig, header, h - footer) {
+        match estimate(first, &sig, header, h - footer, hint) {
             Estimate::Same => Push::Unchanged,
             Estimate::Lost => Push::Lost,
             Estimate::Offset(d) => {
@@ -311,10 +416,10 @@ impl Stitcher {
         }
     }
 
-    fn push_known(&mut self, frame: &RgbaImage, sig: Sig) -> Push {
+    fn push_known(&mut self, frame: &RgbaImage, sig: Sig, hint: Option<i32>) -> Push {
         let h = frame.height() as usize;
         let prev = self.prev_sig.as_ref().expect("set with the bands");
-        match estimate(prev, &sig, self.header, h - self.footer) {
+        match estimate(prev, &sig, self.header, h - self.footer, hint) {
             Estimate::Same => {
                 self.frames_used += 1;
                 self.remember_footer(frame);
@@ -517,6 +622,117 @@ mod tests {
         }
         image::imageops::replace(&mut sheet, result, (strip_w + gap) as i64, gap as i64);
         sheet.save(dir.join(format!("{name}.png"))).unwrap();
+    }
+
+    /// A mail-list-like page: rows of equal height, each with the same icons at the same places and
+    /// different text. A shift by a whole number of rows lines the icons up, which is what makes this
+    /// the hard case. Every `repeat`th row is an exact copy of the one before it.
+    fn inbox_page(w: u32, rows: u32, row_h: u32, seed: u32, repeat: u32) -> RgbaImage {
+        let mut img = RgbaImage::from_pixel(w, rows * row_h, Rgba([255, 255, 255, 255]));
+        for r in 0..rows {
+            let id = if repeat > 0 && r % repeat == repeat - 1 { r - 1 } else { r };
+            let y0 = r * row_h;
+            // Separator line, checkbox and star: identical in every row.
+            for x in 0..w {
+                img.put_pixel(x, y0 + row_h - 1, Rgba([225, 228, 232, 255]));
+            }
+            for (x0, x1) in [(14, 26), (40, 52)] {
+                for y in y0 + row_h / 2 - 6..y0 + row_h / 2 + 6 {
+                    for x in x0..x1 {
+                        img.put_pixel(x, y, Rgba([150, 150, 156, 255]));
+                    }
+                }
+            }
+            // Sender, subject and date: words of different widths, row by row.
+            for (x_from, x_to, dark) in [(70, 150, 30u8), (170, w - 90, 90), (w - 70, w - 12, 120)] {
+                let mut x = x_from;
+                let mut k = 0;
+                while x + 6 < x_to {
+                    let word = 12 + hash(seed, id, k) % 46;
+                    for xx in x..(x + word).min(x_to) {
+                        for yy in y0 + row_h / 2 - 5..y0 + row_h / 2 + 5 {
+                            if hash(seed ^ 0x55, xx / 2 + id * 977, yy) % 100 < 58 {
+                                img.put_pixel(xx, yy, Rgba([dark, dark, dark.saturating_add(8), 255]));
+                            }
+                        }
+                    }
+                    x += word + 8;
+                    k += 1;
+                }
+            }
+        }
+        img
+    }
+
+    #[test]
+    #[ignore]
+    fn explore_inner_scroll() {
+        // Web-mail-like: a fixed top bar, a fixed side column and a fixed right margin; only the list moves.
+        let (w, fh) = (1100u32, 984u32);
+        let page = inbox_page(w, 140, 80, 5, 0);
+        let side = text_page(220, fh, 9);
+        let top = bar(w, 120, [240, 242, 245]);
+        let right = text_page(70, fh, 11);
+        for step in [20u32, 60, 100, 200, 300, 500] {
+            for hint in [false, true] {
+                let mut s = Stitcher::new();
+                let mut out = String::new();
+                for k in 0..7u32 {
+                    let mut f = crop(&page, k * step, fh);
+                    paste(&mut f, &side, 0);
+                    paste(&mut f, &right, w - 70);
+                    paste(&mut f, &top, 0);
+                    let r = if hint && k > 0 { s.push_hinted(&f, Some(step as i32)) } else { s.push(&f) };
+                    out += &format!("{} ", match r { Push::First => "F".into(), Push::Appended { offset, .. } => format!("+{offset}"), Push::Lost => "LOST".into(), Push::Unchanged => "=".into(), other => format!("{other:?}") });
+                }
+                println!("inner step {step:4} hint={hint:5} frames={} h={}: {out}", s.frames_used(), s.height());
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn explore_real_png() {
+        let Some(path) = std::env::var_os("REPRO_PNG") else { return };
+        let page = image::open(path).unwrap().to_rgba8();
+        let fh = 984;
+        for step in [4u32, 10, 20, 40, 80, 120, 200, 400, 600, 800] {
+            for hint in [false, true] {
+                let mut s = Stitcher::new();
+                let mut y = 0;
+                let mut out = String::new();
+                for _ in 0..8 {
+                    if y + fh > page.height() { break; }
+                    let r = if hint && y > 0 { s.push_hinted(&crop(&page, y, fh), Some(step as i32)) } else { s.push(&crop(&page, y, fh)) };
+                    out += &format!("{} ", match r { Push::First => "F".into(), Push::Appended { offset, .. } => format!("+{offset}"), Push::Lost => "LOST".into(), Push::Unchanged => "=".into(), other => format!("{other:?}") });
+                    y += step;
+                }
+                println!("step {step:4} hint={hint:5} frames={} h={}: {out}", s.frames_used(), s.height());
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn explore_inbox_steps() {
+        let page = inbox_page(W, 200, 40, 5, 0);
+        for step in [4u32, 10, 20, 40, 60, 80, 100, 120, 150, 200, 240, 300, 400, 600] {
+            for hint in [false, true] {
+                let mut s = Stitcher::new();
+                let mut y = 0;
+                let mut out = String::new();
+                let mut lost = 0;
+                for _ in 0..8 {
+                    let r = if hint && y > 0 { s.push_hinted(&crop(&page, y, 492), Some(step as i32)) } else { s.push(&crop(&page, y, 492)) };
+                    if matches!(r, Push::Lost) {
+                        lost += 1;
+                    }
+                    out += &format!("{} ", match r { Push::First => "F".into(), Push::Appended { offset, .. } => format!("+{offset}"), Push::Lost => "LOST".into(), Push::Unchanged => "=".into(), other => format!("{other:?}") });
+                    y += step;
+                }
+                println!("step {step:4} hint={hint:5} frames={} h={} lost={lost}: {out}", s.frames_used(), s.height());
+            }
+        }
     }
 
     const W: u32 = 360;

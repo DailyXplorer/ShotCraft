@@ -29,6 +29,8 @@ pub struct Shell {
     /// Esc, registered only while a scrolling capture runs so that it can be cancelled from any app.
     escape: Option<HotKey>,
     escape_id: Arc<AtomicU32>,
+    enter: Option<HotKey>,
+    enter_id: Arc<AtomicU32>,
 }
 
 fn action_for(id: &str) -> Option<Action> {
@@ -331,12 +333,19 @@ impl Shell {
         let map = hotkey_map.clone();
         let escape_id: Arc<AtomicU32> = Arc::default();
         let esc = escape_id.clone();
+        let enter_id: Arc<AtomicU32> = Arc::default();
+        let ent = enter_id.clone();
         GlobalHotKeyEvent::set_event_handler(Some(move |e: GlobalHotKeyEvent| {
             if e.state != HotKeyState::Pressed {
                 return;
             }
             if e.id == esc.load(Ordering::SeqCst) {
                 queue.lock().unwrap().push(Action::ScrollingCancel);
+                ctx.request_repaint();
+                return;
+            }
+            if e.id == ent.load(Ordering::SeqCst) {
+                queue.lock().unwrap().push(Action::ScrollingCapture);
                 ctx.request_repaint();
                 return;
             }
@@ -356,7 +365,7 @@ impl Shell {
             ctx.request_repaint();
         }));
 
-        let mut shell = Shell { tray, _menubar: menubar, autostart_item, auto_updates_item, updater, hotkeys: GlobalHotKeyManager::new().ok(), registered: vec![], show_hotkey_works: false, hotkey_map, escape: None, escape_id };
+        let mut shell = Shell { tray, _menubar: menubar, autostart_item, auto_updates_item, updater, hotkeys: GlobalHotKeyManager::new().ok(), registered: vec![], show_hotkey_works: false, hotkey_map, escape: None, escape_id, enter: None, enter_id };
         shell.apply_hotkeys(settings);
         shell
     }
@@ -384,18 +393,21 @@ impl Shell {
         failed
     }
 
-    /// Takes Esc for the length of a scrolling capture, or gives it back.
+    /// Takes Esc and Return for the length of a scrolling capture, or gives them back. The control
+    /// never has the keyboard (the page being captured keeps it), so these keys are global.
     pub fn grab_escape(&mut self, on: bool) {
         let Some(mgr) = &self.hotkeys else { return };
-        if let Some(hk) = self.escape.take() {
-            self.escape_id.store(0, Ordering::SeqCst);
-            let _ = mgr.unregister(hk);
-        }
-        if on {
-            let Ok(hk) = "Escape".parse::<HotKey>() else { return };
-            if mgr.register(hk).is_ok() {
-                self.escape_id.store(hk.id(), Ordering::SeqCst);
-                self.escape = Some(hk);
+        for (slot, id, name) in [(&mut self.escape, &self.escape_id, "Escape"), (&mut self.enter, &self.enter_id, "Enter")] {
+            if let Some(hk) = slot.take() {
+                id.store(0, Ordering::SeqCst);
+                let _ = mgr.unregister(hk);
+            }
+            if on {
+                let Ok(hk) = name.parse::<HotKey>() else { continue };
+                if mgr.register(hk).is_ok() {
+                    id.store(hk.id(), Ordering::SeqCst);
+                    *slot = Some(hk);
+                }
             }
         }
     }

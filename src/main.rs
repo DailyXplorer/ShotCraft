@@ -4,7 +4,9 @@ mod icons;
 mod model;
 mod prefs;
 mod render;
+mod autoscroll;
 mod scroll;
+mod scroll_control;
 mod settings;
 mod sizing;
 mod stitch;
@@ -154,6 +156,7 @@ pub struct App {
     /// Passes left in which the app and its windows are brought to the front.
     front_until: Option<Instant>,
     front_title: &'static str,
+    front_focus: bool,
     scroll: Option<scroll::Session>,
     ocr_running: bool,
     busy: bool,
@@ -216,6 +219,7 @@ impl App {
             woke_at: Instant::now(),
             front_until: None,
             front_title: "",
+            front_focus: true,
             scroll: None,
             ocr_running: false,
             busy: false,
@@ -279,6 +283,16 @@ impl App {
         app_mode::activate();
         self.front_until = Some(Instant::now() + std::time::Duration::from_secs(3));
         self.front_title = title;
+        self.front_focus = true;
+        self.ctx.request_repaint();
+    }
+
+    /// Like `bring_to_front`, but the app is not activated and no window takes the keyboard: for a HUD
+    /// that floats over another app the user keeps working in.
+    fn show_without_focus(&mut self, title: &'static str) {
+        self.front_until = Some(Instant::now() + std::time::Duration::from_secs(3));
+        self.front_title = title;
+        self.front_focus = false;
         self.ctx.request_repaint();
     }
 
@@ -301,7 +315,7 @@ impl App {
     fn settle_windows(&mut self) {
         if let Some(until) = self.front_until {
             // The window may not exist yet; keep at it until it is in front, or for a few seconds.
-            if app_mode::bring_to_front(self.front_title) || Instant::now() > until {
+            if app_mode::bring_to_front(self.front_title, self.front_focus) || Instant::now() > until {
                 self.front_until = None;
             } else {
                 self.ctx.request_repaint_after(std::time::Duration::from_millis(40));
@@ -404,12 +418,15 @@ impl App {
             self.error("No room for the controls next to that area. Select a smaller area.");
             return;
         };
-        self.scroll = Some(scroll::Session::start(rect, pos, self.queue.clone(), self.ctx.clone()));
+        // Scrolling for the user needs the Accessibility permission; ask for it the first time. Without it
+        // the capture still works, the user scrolls.
+        let auto = autoscroll::trusted(true);
+        self.scroll = Some(scroll::Session::start(rect, pos, auto, self.queue.clone(), self.ctx.clone()));
         self.grab_escape(true);
         // The control is a new window and the app has no Dock icon: wake the UI pass that creates it
-        // while the editor is hidden, and bring it to the front.
+        // while the editor is hidden, and show it without taking the keyboard from the page.
         self.wake_ui();
-        self.bring_to_front(scroll::CONTROL_TITLE);
+        self.show_without_focus(scroll::CONTROL_TITLE);
         self.ctx.request_repaint();
     }
 
