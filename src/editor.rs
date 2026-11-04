@@ -289,16 +289,12 @@ fn text_segments(ui: &mut Ui, labels: &[&str], selected: usize, t: &Th) -> Optio
     clicked
 }
 
-fn hit(obj: &Obj, q: P, tol: f32) -> bool {
-    let seg_dist = |a: P, b: P| {
-        let (dx, dy) = (b.x - a.x, b.y - a.y);
-        let l2 = (dx * dx + dy * dy).max(1e-6);
-        let t = (((q.x - a.x) * dx + (q.y - a.y) * dy) / l2).clamp(0.0, 1.0);
-        q.dist(p(a.x + dx * t, a.y + dy * t))
-    };
+fn hit(obj: &Obj, q: P, tol: f32, fonts: &render::Fonts) -> bool {
+    let seg_dist = |a: P, b: P| render::seg_dist(q, a, b);
     let w = obj.style.width();
     match &obj.kind {
-        Kind::Arrow { a, b } | Kind::Line { a, b } | Kind::Ruler { a, b } => seg_dist(*a, *b) <= w * 1.5 + tol,
+        Kind::Arrow { a, b, seed } => render::arrow_hit(*a, *b, *seed, &obj.style, q, tol),
+        Kind::Line { a, b } | Kind::Ruler { a, b } => seg_dist(*a, *b) <= w * 1.5 + tol,
         Kind::Highlighter { a, b } => seg_dist(*a, *b) <= obj.style.highlight_size() / 2.0 + tol,
         Kind::Freehand { pts } => pts.windows(2).any(|s| seg_dist(s[0], s[1]) <= w + tol),
         Kind::Rect { r, .. } | Kind::Oval { r, .. } => {
@@ -308,13 +304,13 @@ fn hit(obj: &Obj, q: P, tol: f32) -> bool {
                 r.expand(w + tol).contains(q) && !r.expand(-(w + tol)).contains(q)
             }
         }
-        _ => obj.bounds().expand(tol).contains(q),
+        _ => render::bounds(obj, fonts).expand(tol).contains(q),
     }
 }
 
 fn handles(obj: &Obj) -> Vec<(Handle, P)> {
     match &obj.kind {
-        Kind::Arrow { a, b } | Kind::Line { a, b } | Kind::Ruler { a, b } | Kind::Highlighter { a, b } => vec![(Handle::A, *a), (Handle::B, *b)],
+        Kind::Arrow { a, b, .. } | Kind::Line { a, b } | Kind::Ruler { a, b } | Kind::Highlighter { a, b } => vec![(Handle::A, *a), (Handle::B, *b)],
         Kind::Rect { r, .. } | Kind::Oval { r, .. } | Kind::Blur { r, .. } | Kind::Spotlight { r } | Kind::Magnifier { r, .. } => vec![
             (Handle::Corner(0), p(r.x0, r.y0)),
             (Handle::Corner(1), p(r.x1, r.y0)),
@@ -356,7 +352,7 @@ fn set_end(kind: &mut Kind, start: P, q: P, shift: bool) {
 fn new_kind(tool: Tool, q: P, n: u32) -> Option<Kind> {
     let z = R::from_points(q, q);
     Some(match tool {
-        Tool::Arrow => Kind::Arrow { a: q, b: q },
+        Tool::Arrow => Kind::Arrow { a: q, b: q, seed: next_seed() },
         Tool::Line => Kind::Line { a: q, b: q },
         Tool::Ruler => Kind::Ruler { a: q, b: q },
         Tool::Highlighter => Kind::Highlighter { a: q, b: q },
@@ -1146,7 +1142,7 @@ impl App {
                 let fresh = self.ed.overlay.as_ref().map_or(true, |o| o.obj != *obj || o.version != comp.key.0);
                 if fresh {
                     let (w, h) = (comp.pm.width() as f32, comp.pm.height() as f32);
-                    let b = obj.bounds().expand(2.0).clamp_to(w, h);
+                    let b = render::bounds(obj, &self.fonts).expand(2.0).clamp_to(w, h);
                     let b = R { x0: b.x0.floor(), y0: b.y0.floor(), x1: b.x1.ceil(), y1: b.y1.ceil() };
                     if b.w() >= 1.0 && b.h() >= 1.0 {
                         let mut region = render::crop_pixmap(&comp.pm, &b);
@@ -1257,7 +1253,7 @@ impl App {
         }
     }
 
-    /// Checkerboard layer (0x10007b654): a repeating tile of two greys behind the picture.
+    /// Checkerboard layer: a repeating tile of two greys behind the picture.
     fn paint_checker(&mut self, ui: &mut Ui, rect: Rect) {
         let dark = ui.visuals().dark_mode;
         if self.ed.checker.as_ref().map_or(true, |c| c.0 != dark) {
@@ -1415,7 +1411,7 @@ impl App {
         }
     }
 
-    /// Ruler keys (0x10009e964): 2 and ←→ measure across, 1 and ↑↓ measure down.
+    /// Ruler keys: 2 and ←→ measure across, 1 and ↑↓ measure down.
     /// `Some(true)` is horizontal. Arrows keep moving a selected object.
     fn ruler_axis(&self, ui: &Ui) -> Option<bool> {
         if self.ed.editing_text {
@@ -1448,7 +1444,7 @@ impl App {
         d.touch();
     }
 
-    /// Blur Text and Erase Text only touch the text found inside their area (0x100107cfc).
+    /// Blur Text and Erase Text only touch the text found inside their area.
     fn detect_blur_text(&mut self) {
         let (Some(d), Some(i)) = (&mut self.doc, self.ed.selected) else { return };
         let Some(Obj { kind: Kind::Blur { r, text }, style }) = d.objs.get_mut(i) else { return };
@@ -1467,7 +1463,7 @@ impl App {
 
     fn top_hit(&self, q: P, tol: f32) -> Option<usize> {
         let d = self.doc.as_ref()?;
-        (0..d.objs.len()).rev().find(|i| hit(&d.objs[*i], q, tol))
+        (0..d.objs.len()).rev().find(|i| hit(&d.objs[*i], q, tol, &self.fonts))
     }
 
     fn begin_drag(&mut self, q: P, tol: f32) {
@@ -1499,7 +1495,7 @@ impl App {
             if let Some(h) = self.handle_at(i, q, tol) {
                 return self.start_handle(i, h);
             }
-            if self.doc.as_ref().map_or(false, |d| i < d.objs.len() && hit(&d.objs[i], q, tol)) {
+            if self.doc.as_ref().map_or(false, |d| i < d.objs.len() && hit(&d.objs[i], q, tol, &self.fonts)) {
                 self.doc.as_mut().unwrap().checkpoint();
                 self.ed.drag = Drag::Move { idx: i, last: q };
                 return;
@@ -1617,7 +1613,7 @@ impl App {
             if let Some(o) = d.objs.get(i) {
                 let b = match &o.kind {
                     Kind::Text { at, text } => render::text_box(*at, text, &o.style, &self.fonts),
-                    _ => o.bounds(),
+                    _ => render::bounds(o, &self.fonts),
                 };
                 let bs = self.ed.rect_screen(&b);
                 painter.rect_stroke(bs, 3.0, Stroke::new(1.0, accent.gamma_multiply(0.8)), StrokeKind::Outside);
@@ -1633,12 +1629,12 @@ impl App {
                             let size = o.style.text_size();
                             let last = text.split('\n').last().unwrap_or("");
                             let font = match o.style.font {
-                                FontKind::Sans => &self.fonts.sans,
+                                FontKind::Sans => self.fonts.text(&o.style),
                                 FontKind::Goofy => &self.fonts.goofy,
                             };
                             let (w, _) = render::measure(font, last, size);
                             let lines = text.split('\n').count().max(1) as f32 - 1.0;
-                            let top = p(at.x + w + 1.0, at.y + lines * size * 1.2);
+                            let top = p(at.x + w + 1.0, at.y + lines * o.style.text_line_height());
                             let a = self.ed.to_screen(top);
                             let bpt = self.ed.to_screen(top.add(0.0, size * 1.15));
                             painter.line_segment([a, bpt], Stroke::new(2.0, accent));

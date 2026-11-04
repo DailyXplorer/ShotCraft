@@ -11,7 +11,7 @@ ShotCraft is written in Rust. It is an early version (0.1.0).
 * Area, any window, full screen (main display), repeat the last area, and a 3-second delayed full-screen capture.
 * Window captures can keep a transparent background or use a solid color, and can trim the window shadow.
 * Instant text and QR recognition: select an area and the recognized text goes straight to the clipboard, with no editor.
-* Open an existing image from a file or from the clipboard. The file picker lists PNG, JPEG, GIF, BMP, TIFF and WebP, but only the PNG and JPEG decoders are built in (see `Cargo.toml`).
+* Open an existing image from a file or from the clipboard. The file picker and the command line open PNG, JPEG, GIF, BMP, TIFF and WebP files; saving writes PNG or JPEG. Animated GIFs open as their first frame.
 * Runs from the menu bar. The capture commands are in the menu bar icon menu, and global hotkeys work while the editor is hidden.
 
 ### After a capture
@@ -130,6 +130,7 @@ Set the version in `Cargo.toml`, then push a tag such as `v0.1.0`. The Release w
 ## Credits
 
 * [DM Sans](https://github.com/googlefonts/dm-fonts), SIL Open Font License: `assets/fonts/OFL.txt`
+* App icon: the default [eframe](https://github.com/emilk/egui) icon, MIT or Apache-2.0 License
 * [Sparkle](https://sparkle-project.org), MIT License, included in releases
 * [Hugeicons](https://hugeicons.com) free icons, MIT License: `assets/icons/LICENSE-hugeicons.md`
 

@@ -100,6 +100,8 @@ pub struct Thumb {
     tex: Option<egui::TextureHandle>,
     born: Instant,
     hovered: bool,
+    focused: bool,
+    blurred: bool,
 }
 
 pub struct App {
@@ -435,7 +437,7 @@ impl App {
                             AfterShow::Editor => self.open_image(c.img, c.scale, full),
                             AfterShow::Thumbnail => {
                                 self.ed.reset_for_new_doc(false);
-                                self.thumb = Some(Arc::new(Mutex::new(Thumb { img: c.img, scale: c.scale, tex: None, born: Instant::now(), hovered: false })));
+                                self.thumb = Some(Arc::new(Mutex::new(Thumb { img: c.img, scale: c.scale, tex: None, born: Instant::now(), hovered: false, focused: false, blurred: false })));
                             }
                             AfterShow::Nothing => self.ed.reset_for_new_doc(false),
                         }
@@ -464,7 +466,7 @@ impl App {
                 }
             },
             Action::OpenFile => {
-                let picked = rfd::FileDialog::new().add_filter("Images", &["png", "jpg", "jpeg", "gif", "bmp", "tiff", "webp"]).pick_file();
+                let picked = rfd::FileDialog::new().add_filter("Images", system::OPEN_EXTENSIONS).pick_file();
                 if let Some(path) = picked {
                     match system::load_image_file(&path) {
                         Ok(img) => self.open_image(img, 1.0, false),
@@ -582,14 +584,14 @@ impl App {
         let Some(shared) = self.thumb.clone() else { return };
         let (aspect, expired) = {
             let th = shared.lock().unwrap();
-            (th.img.h as f32 / th.img.w.max(1) as f32, !th.hovered && th.born.elapsed().as_secs_f32() > 6.0)
+            (th.img.h as f32 / th.img.w.max(1) as f32, th.blurred || (!th.hovered && th.born.elapsed().as_secs_f32() > 6.0))
         };
         if expired && self.settings.thumbnail_auto_close {
             self.thumb = None;
             return;
         }
-        let w = 240.0;
-        let size = egui::vec2(w, (w * aspect).clamp(90.0, 220.0));
+        let w = model::THUMB_WIDTH;
+        let size = egui::vec2(w, (w * aspect).clamp(90.0, model::THUMB_MAX_HEIGHT));
         let monitor = ctx.input(|i| i.viewport().monitor_size).unwrap_or(egui::vec2(1440.0, 900.0));
         let pos = egui::pos2(monitor.x - size.x - 24.0, monitor.y - size.y - 72.0);
         let builder = ViewportBuilder::default()
@@ -734,6 +736,10 @@ fn pin_window(ui: &mut egui::Ui, pin: &mut Pin, queue: &Queue) {
 
 fn thumb_window(ui: &mut egui::Ui, th: &mut Thumb, queue: &Queue) {
     let ctx = ui.ctx().clone();
+    // Automatic closing follows the window losing focus.
+    let focused = ctx.input(|i| i.viewport().focused.unwrap_or(false));
+    th.blurred |= th.focused && !focused;
+    th.focused = focused;
     let img = th.img.clone();
     let tex = th.tex.get_or_insert_with(|| {
         let ci = egui::ColorImage::from_rgba_unmultiplied([img.w as usize, img.h as usize], &img.px);
