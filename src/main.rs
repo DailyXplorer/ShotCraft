@@ -108,6 +108,9 @@ pub struct Pin {
     semi: bool,
     /// How far the picture is scrolled up, in points, when it is taller than the window.
     scroll: f32,
+    /// Screen the window is sized for. Set by `pins_ui` only, so the window, the picture and the
+    /// scroll range always agree, wherever the pin is dragged to.
+    screen: egui::Vec2,
     tex: Option<tiled::TiledTexture>,
     open: bool,
 }
@@ -526,7 +529,7 @@ impl App {
     pub fn pin(&mut self, img: Image, scale: f32) {
         let id = self.next_pin;
         self.next_pin += 1;
-        self.pins.push(Arc::new(Mutex::new(Pin { id, img, scale, zoom: 1.0, semi: false, scroll: 0.0, tex: None, open: true })));
+        self.pins.push(Arc::new(Mutex::new(Pin { id, img, scale, zoom: 1.0, semi: false, scroll: 0.0, screen: screen_size(&self.ctx), tex: None, open: true })));
         self.wake_ui();
         self.bring_to_front("ShotCraft Pin");
     }
@@ -744,8 +747,9 @@ impl App {
         self.pins.retain(|p| p.lock().unwrap().open);
         for pin in &self.pins {
             let (id, size) = {
-                let p = pin.lock().unwrap();
-                (p.id, p.layout(screen_size(ctx)).window)
+                let mut p = pin.lock().unwrap();
+                p.screen = screen_size(ctx);
+                (p.id, p.layout().window)
             };
             let builder = ViewportBuilder::default()
                 .with_title("ShotCraft Pin")
@@ -836,8 +840,8 @@ impl App {
 
 impl Pin {
     /// The picture at its zoom, then bounded to the screen: see `sizing::pin_layout`.
-    fn layout(&self, screen: egui::Vec2) -> sizing::PinLayout {
-        Self::layout_of(&self.img, self.scale, self.zoom, screen)
+    fn layout(&self) -> sizing::PinLayout {
+        Self::layout_of(&self.img, self.scale, self.zoom, self.screen)
     }
 
     fn layout_of(img: &Image, scale: f32, zoom: f32, screen: egui::Vec2) -> sizing::PinLayout {
@@ -853,9 +857,9 @@ fn screen_size(ctx: &egui::Context) -> egui::Vec2 {
 fn pin_window(ui: &mut egui::Ui, pin: &mut Pin, queue: &Queue) {
     let ctx = ui.ctx().clone();
     let (img, scale) = (pin.img.clone(), pin.scale);
+    let layout = pin.layout();
     let tex = pin.tex.get_or_insert_with(|| tiled::TiledTexture::new(&ctx, &format!("pin-{}", pin.id), (img.w, img.h), &img.px, tiled::Alpha::Straight, egui::TextureOptions::LINEAR));
     let rect = ui.max_rect();
-    let layout = Pin::layout_of(&img, scale, pin.zoom, screen_size(&ctx));
     let resp = ui.allocate_rect(rect, egui::Sense::click_and_drag());
     let tint = if pin.semi { Color32::from_white_alpha(140) } else { Color32::WHITE };
     if layout.max_scroll() > 0.0 && resp.hovered() {
@@ -902,7 +906,7 @@ fn pin_window(ui: &mut egui::Ui, pin: &mut Pin, queue: &Queue) {
         for (label, z) in [("50%", 0.5), ("100%", 1.0), ("200%", 2.0)] {
             if ui.radio(pin.zoom == z, label).clicked() {
                 pin.zoom = z;
-                let window = Pin::layout_of(&img, scale, z, screen_size(&ctx)).window;
+                let window = pin.layout().window;
                 ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(window.0, window.1)));
                 ctx.request_repaint_of(ViewportId::ROOT);
                 ui.close();
@@ -943,7 +947,7 @@ fn thumb_window(ui: &mut egui::Ui, th: &mut Thumb, queue: &Queue) {
     tex.paint_in(ui.painter(), img_r, Color32::WHITE);
     if resp.hovered() {
         th.hovered = true;
-        ui.painter().rect_filled(img_r, 6.0, Color32::from_black_alpha(110));
+        ui.painter().rect_filled(rect.shrink(sizing::THUMB_PAD), 6.0, Color32::from_black_alpha(110));
         let items = [
             (icons::Icon::Edit, "Edit", ThumbAction::Edit),
             (icons::Icon::Copy, "Copy", ThumbAction::Copy),

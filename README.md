@@ -61,7 +61,7 @@ The preview thumbnail sits in the bottom-right corner of the screen. Hover it fo
 
 ### Pins
 
-A pinned image is a borderless window that stays above other windows. Drag it anywhere. Right-click for Edit, Copy, 50% / 100% / 200% size, Semi-transparent and Close; double-click to reopen it in the editor; press `Esc` to close it. You can have several pins at once.
+A pinned image is a borderless window that stays above other windows. Drag it anywhere. Right-click for Edit, Copy, 50% / 100% / 200% size, Semi-transparent and Close; double-click to reopen it in the editor; press `Esc` to close it. You can have several pins at once. A pin never grows past 90% of the screen: a picture that is too wide is scaled down, and one that is too tall (a scrolling capture) scrolls with the mouse wheel inside the pin.
 
 ### Preferences
 
