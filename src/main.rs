@@ -57,7 +57,7 @@ pub enum Action {
     ScrollingCapture,
     ScrollingCancel,
     ScrollingArea(Result<Option<model::R>, String>),
-    ScrollingFinished(Result<Option<scroll::Outcome>, String>, f32),
+    ScrollingFinished(Result<Option<scroll::Outcome>, String>),
     OcrCaptured(Result<Option<Captured>, String>),
     OcrDone(Result<system::OcrResult, String>),
 }
@@ -347,18 +347,18 @@ impl App {
             self.error("No room for the controls next to that area. Select a smaller area.");
             return;
         };
-        self.scroll = Some(scroll::Session::start(rect, pos, self.pixels_per_point(), self.queue.clone(), self.ctx.clone()));
+        self.scroll = Some(scroll::Session::start(rect, pos, self.queue.clone(), self.ctx.clone()));
         self.grab_escape(true);
         self.ctx.request_repaint();
     }
 
-    fn scrolling_finished(&mut self, res: Result<Option<scroll::Outcome>, String>, scale: f32) {
+    fn scrolling_finished(&mut self, res: Result<Option<scroll::Outcome>, String>) {
         self.scroll = None;
         self.grab_escape(false);
         match res {
             Ok(Some(o)) => {
                 let (frames, capped) = (o.frames, o.capped);
-                let img = o.img;
+                let (img, scale) = (o.img, o.scale);
                 self.handle(Action::Captured(Ok(Some(Captured { img, scale, area: None, mode: CaptureMode::Area }))));
                 if capped {
                     self.say(format!("Stopped at the height limit of {} px", stitch::MAX_HEIGHT));
@@ -567,7 +567,7 @@ impl App {
                 }
             }
             Action::ScrollingArea(res) => self.scrolling_area(res),
-            Action::ScrollingFinished(res, scale) => self.scrolling_finished(res, scale),
+            Action::ScrollingFinished(res) => self.scrolling_finished(res),
             Action::OpenClipboard => match system::clipboard_image() {
                 Ok(img) => {
                     let s = self.pixels_per_point();

@@ -1125,7 +1125,7 @@ impl App {
             let size = (pm.width(), pm.height());
             match &mut self.ed.comp {
                 Some(c) if c.tex.fits(ctx, size) => {
-                    c.tex.update(pm.data(), Alpha::Premultiplied, TEX);
+                    c.tex.update(Some(c.pm.data()), pm.data(), Alpha::Premultiplied, TEX);
                     c.pm = pm;
                     c.key = key;
                 }
@@ -1152,7 +1152,7 @@ impl App {
                         let size = (region.width(), region.height());
                         let tex = match self.ed.overlay.take() {
                             Some(mut o) if o.tex.fits(ctx, size) => {
-                                o.tex.update(region.data(), Alpha::Premultiplied, TEX);
+                                o.tex.update(None, region.data(), Alpha::Premultiplied, TEX);
                                 o.tex
                             }
                             _ => TiledTexture::new(ctx, "overlay", size, region.data(), Alpha::Premultiplied, TEX),

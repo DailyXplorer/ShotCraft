@@ -196,6 +196,7 @@ pub struct Stitcher {
     pos: i64,
     footer_px: Vec<u8>,
     capped: bool,
+    above_start: bool,
     frames_used: u32,
 }
 
@@ -219,6 +220,7 @@ impl Stitcher {
             pos: 0,
             footer_px: vec![],
             capped: false,
+            above_start: false,
             frames_used: 0,
         }
     }
@@ -235,6 +237,11 @@ impl Stitcher {
     /// Frames that counted: the first one and the ones that moved or confirmed the position.
     pub fn frames_used(&self) -> u32 {
         self.frames_used
+    }
+
+    /// True when the page was scrolled above the first frame: that part is not part of the image.
+    pub fn above_start(&self) -> bool {
+        self.above_start
     }
 
     pub fn is_capped(&self) -> bool {
@@ -331,6 +338,7 @@ impl Stitcher {
         }
         self.frames_used += 1;
         self.pos = new_pos;
+        self.above_start |= new_pos < 0;
         self.prev_sig = Some(sig);
         self.remember_footer(frame);
         if body_end <= covered {
@@ -579,6 +587,16 @@ mod tests {
             vec![Push::Unchanged, Push::Appended { rows: 120, offset: 120 }, Push::Unchanged, Push::Unchanged, Push::Appended { rows: 120, offset: 120 }]
         );
         assert_eq!(s.finish().unwrap(), crop(&page, 100, 340 + FRAME_H - 100));
+    }
+
+    #[test]
+    fn scrolling_above_the_first_frame_is_flagged_and_not_added() {
+        let page = text_page(W, 1200, 13);
+        let mut s = Stitcher::new();
+        let pushes = feed(&mut s, &page, &[300, 400, 250, 150, 300, 420], FRAME_H);
+        assert!(s.above_start());
+        assert!(matches!(pushes[3], Push::Revisited { offset: -100 }), "{:?}", pushes[3]);
+        assert_eq!(s.finish().unwrap(), crop(&page, 300, 120 + FRAME_H));
     }
 
     #[test]

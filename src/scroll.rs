@@ -44,7 +44,9 @@ impl GrabRect {
         if r.w() < MIN_SIDE || r.h() < MIN_SIDE {
             return None;
         }
-        Some(GrabRect { x: r.x0.floor() as i32, y: r.y0.floor() as i32, w: r.w().round() as u32, h: r.h().round() as u32 })
+        // Round outwards so that the grabbed area always holds the selected one.
+        let (x, y) = (r.x0.floor() as i32, r.y0.floor() as i32);
+        Some(GrabRect { x, y, w: (r.x1.ceil() as i32 - x) as u32, h: (r.y1.ceil() as i32 - y) as u32 })
     }
 
     pub fn as_r(&self) -> R {
@@ -62,6 +64,8 @@ pub struct Progress {
 /// What a finished capture hands to the app.
 pub struct Outcome {
     pub img: Image,
+    /// Pixels per point of the display the area is on: frame width over area width.
+    pub scale: f32,
     /// Frames that counted. 1 means the page never moved.
     pub frames: u32,
     pub capped: bool,
@@ -74,13 +78,13 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn start(rect: GrabRect, control_pos: [f32; 2], scale: f32, queue: Queue, ctx: Context) -> Session {
+    pub fn start(rect: GrabRect, control_pos: [f32; 2], queue: Queue, ctx: Context) -> Session {
         let stop = Arc::new(AtomicU8::new(RUNNING));
         let progress = Arc::new(Mutex::new(Progress { note: "Scroll the page", ..Progress::default() }));
         let (s, p) = (stop.clone(), progress.clone());
         std::thread::spawn(move || {
             let res = run(rect, &s, &p, &ctx);
-            queue.lock().unwrap().push(Action::ScrollingFinished(res, scale));
+            queue.lock().unwrap().push(Action::ScrollingFinished(res));
             ctx.request_repaint();
         });
         Session { control_pos, stop, progress }
@@ -135,6 +139,7 @@ fn control_ui(ui: &mut egui::Ui, stop: &AtomicU8, progress: &Mutex<Progress>) {
 fn run(rect: GrabRect, stop: &AtomicU8, progress: &Mutex<Progress>, ctx: &Context) -> Result<Option<Outcome>, String> {
     let mut stitcher = Stitcher::new();
     let mut failures = 0;
+    let mut last_error = String::new();
     loop {
         let started = Instant::now();
         // Read before grabbing: a Done pressed now still gets one last frame.
@@ -147,6 +152,7 @@ fn run(rect: GrabRect, stop: &AtomicU8, progress: &Mutex<Progress>, ctx: &Contex
                 failures = 0;
                 let note = match stitcher.push(&frame) {
                     Push::First | Push::Unchanged => "Scroll the page",
+                    Push::Revisited { .. } if stitcher.above_start() => "Above the start: not captured",
                     Push::Appended { .. } | Push::Revisited { .. } => "Capturing",
                     Push::Lost => "Lost track: scroll back a little, slower",
                     Push::SizeMismatch => "The area changed size",
@@ -159,8 +165,13 @@ fn run(rect: GrabRect, stop: &AtomicU8, progress: &Mutex<Progress>, ctx: &Contex
             }
             Err(e) => {
                 failures += 1;
+                last_error = e;
                 if failures >= MAX_FAILURES {
-                    return Err(e);
+                    // Keep what was stitched so far; only report an error when there is nothing.
+                    if stitcher.frames_used() > 1 {
+                        break;
+                    }
+                    return Err(last_error);
                 }
             }
         }
@@ -168,12 +179,17 @@ fn run(rect: GrabRect, stop: &AtomicU8, progress: &Mutex<Progress>, ctx: &Contex
         if state == DONE || stitcher.is_capped() {
             break;
         }
-        std::thread::sleep(FRAME_INTERVAL.saturating_sub(started.elapsed()));
+        // Sleep in short slices so that Done and Cancel react at once.
+        while started.elapsed() < FRAME_INTERVAL && stop.load(Ordering::SeqCst) == RUNNING {
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
+    let _ = last_error;
     let (frames, capped) = (stitcher.frames_used(), stitcher.is_capped());
     let img = stitcher.finish().map_err(|_| "No image was captured.".to_string())?;
     let (w, h) = img.dimensions();
-    Ok(Some(Outcome { img: Image { w, h, px: Arc::new(img.into_raw()) }, frames, capped }))
+    let scale = (w as f32 / rect.w as f32).max(1.0);
+    Ok(Some(Outcome { img: Image { w, h, px: Arc::new(img.into_raw()) }, scale, frames, capped }))
 }
 
 /// One look at the area, as pixels.
@@ -316,10 +332,12 @@ mod tests {
     #[test]
     fn the_grabbed_rectangle_uses_whole_points_and_refuses_tiny_areas() {
         let g = GrabRect::from_area(&r(10.4, 20.6, 510.4, 320.9)).unwrap();
-        assert_eq!(g, GrabRect { x: 10, y: 20, w: 500, h: 300 });
+        assert_eq!(g, GrabRect { x: 10, y: 20, w: 501, h: 301 });
+        let exact = GrabRect::from_area(&r(10.0, 20.0, 510.0, 320.0)).unwrap();
+        assert_eq!(exact, GrabRect { x: 10, y: 20, w: 500, h: 300 });
         assert_eq!(GrabRect::from_area(&r(0.0, 0.0, 30.0, 400.0)), None);
         let back = g.as_r();
-        assert_eq!((back.w(), back.h()), (500.0, 300.0));
+        assert!(back.x0 <= 10.4 && back.y0 <= 20.6 && back.x1 >= 510.4 && back.y1 >= 320.9);
     }
 
     #[test]

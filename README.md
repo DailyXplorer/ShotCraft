@@ -20,7 +20,8 @@ Scrolling capture limits:
 * You scroll by hand. ShotCraft does not scroll for you (that would need the Accessibility permission).
 * Scroll steadily, with every part of the page staying in view in at least two grabs. If the page jumps further than about 90% of the area between two grabs, or the content is blank or strongly repetitive (stripes, grids), that step is dropped and the control says "Lost track"; scroll back a little and continue.
 * Content that animates inside the area (video, ads, a blinking cursor beside the text) can confuse the match; small changes are tolerated.
-* Only vertical scrolling downwards builds the image, and the control window needs room beside the area on the same display.
+* Only scrolling downwards builds the image: content above the point where you started is not added (the control says so), and scrolling back up over what is already captured changes nothing. A blank band at the very top of the page is treated like a fixed header, which is harmless. The control window needs room beside the area on the same display. Esc is taken from other apps while a capture runs; if another ShotCraft hotkey already uses Esc, use the Cancel button.
+* If the screen can't be captured for a moment (screen locked, permission prompt), the capture ends with what was stitched so far.
 * Very tall images are shown in the editor as several textures, so they open at the width of the window; export and copy use the full-resolution image.
 
 ### After a capture

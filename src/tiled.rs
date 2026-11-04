@@ -109,6 +109,19 @@ fn tile_image(px: &[u8], width: u32, pad: PxRect, alpha: Alpha) -> ColorImage {
     }
 }
 
+/// True when the `pad` rectangle holds the same bytes in both buffers.
+fn same_pixels(a: &[u8], b: &[u8], width: u32, pad: PxRect) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let stride = width as usize * 4;
+    (pad.y0..pad.y1).all(|y| {
+        let start = y as usize * stride + pad.x0 as usize * 4;
+        let end = start + pad.w() as usize * 4;
+        a[start..end] == b[start..end]
+    })
+}
+
 impl TiledTexture {
     pub fn new(ctx: &Context, name: &str, size: (u32, u32), px: &[u8], alpha: Alpha, options: TextureOptions) -> TiledTexture {
         let max_side = max_side(ctx);
@@ -128,8 +141,13 @@ impl TiledTexture {
         self.size == size && self.max_side == max_side(ctx)
     }
 
-    pub fn update(&mut self, px: &[u8], alpha: Alpha, options: TextureOptions) {
+    /// Writes new pixels into the textures. Tiles whose pixels equal `old` (the previous contents)
+    /// are not uploaded again, so editing a tall picture only touches the tiles that changed.
+    pub fn update(&mut self, old: Option<&[u8]>, px: &[u8], alpha: Alpha, options: TextureOptions) {
         for (tile, handle) in &mut self.tiles {
+            if old.is_some_and(|o| same_pixels(o, px, self.size.0, tile.pad)) {
+                continue;
+            }
             handle.set(tile_image(px, self.size.0, tile.pad, alpha), options);
         }
     }
@@ -260,6 +278,23 @@ mod tests {
         assert_eq!((sub.y0, sub.y1), (62.0, 124.0));
         assert!((uv[1] - 1.0 / tile.pad.h() as f32).abs() < 1e-6);
         assert!((uv[3] - 63.0 / tile.pad.h() as f32).abs() < 1e-6);
+    }
+
+    #[test]
+    fn only_tiles_with_changed_pixels_are_reuploaded() {
+        let (w, h) = (10u32, 20u32);
+        let a = vec![0u8; (w * h * 4) as usize];
+        let mut b = a.clone();
+        b[(15 * w * 4 + 3 * 4) as usize] = 9; // pixel (3, 15)
+        let tiles = plan(w, h, 8);
+        let changed: Vec<bool> = tiles.iter().map(|t| !same_pixels(&a, &b, w, t.pad)).collect();
+        // Cores are 6 px; the pixel sits in one core, and in the margin of its neighbours only.
+        for (t, c) in tiles.iter().zip(&changed) {
+            let inside = t.pad.x0 <= 3 && 3 < t.pad.x1 && t.pad.y0 <= 15 && 15 < t.pad.y1;
+            assert_eq!(*c, inside, "{t:?}");
+        }
+        assert!(changed.iter().any(|c| *c) && changed.iter().any(|c| !*c));
+        assert!(same_pixels(&a, &a, w, tiles[0].pad));
     }
 
     #[test]
