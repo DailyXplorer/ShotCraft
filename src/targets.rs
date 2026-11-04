@@ -143,6 +143,20 @@ pub fn window_args(id: u32, trim_shadow: bool) -> Vec<String> {
     a
 }
 
+/// What `capture` options add to a non-interactive `screencapture` run: `-C` puts the mouse pointer
+/// in the picture, `-T n` waits `n` seconds before the shot. (`screencapture` ignores `-C` when the
+/// user selects; those runs never get it.)
+pub fn extra_args(cursor: bool, delay_secs: u32) -> Vec<String> {
+    let mut a = Vec::new();
+    if cursor {
+        a.push("-C".to_string());
+    }
+    if delay_secs > 0 {
+        a.extend(["-T".to_string(), delay_secs.to_string()]);
+    }
+    a
+}
+
 pub fn display_args(r: Rect) -> Vec<String> {
     vec!["-x".to_string(), rect_arg(r)]
 }

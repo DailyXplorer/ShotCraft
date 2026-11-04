@@ -5,7 +5,7 @@ use eframe::egui::{self, vec2, Align2, Color32, FontFamily, Key, Ui, ViewportBui
 use std::sync::{Arc, Mutex};
 
 const LABEL_W: f32 = 200.0;
-pub const WINDOW: [f32; 2] = [520.0, 440.0];
+pub const WINDOW: [f32; 2] = [520.0, 520.0];
 
 /// What the Preferences window shares with the app. It runs as its own deferred window, so it can
 /// open while the editor is hidden; the app picks up `settings` whenever `edited` is set.
@@ -213,6 +213,17 @@ impl PrefsState {
             ui.radio_value(&mut s.window_bg, WindowBg::Trimmed, "Trim shadow").on_hover_text("The window cut out without its shadow");
             ui.label(egui::RichText::new("Applies to Active Window and Any Window screenshots, not to Area or Fullscreen.").color(dim).size(11.0));
         });
+        row(ui, "Delayed screenshot", |ui| {
+            ui.horizontal(|ui| {
+                for secs in crate::settings::DELAYS {
+                    ui.radio_value(&mut s.delay_secs, secs, format!("{secs} s"));
+                }
+            });
+        });
+        row(ui, "Mouse pointer", |ui| {
+            ui.checkbox(&mut s.capture_cursor, "Include it in screenshots");
+            ui.label(egui::RichText::new("Fullscreen, Active Window, Delayed and Repeat Area. Not when you select.").color(dim).size(11.0));
+        });
     }
 
     fn prefs_hotkeys(&mut self, ui: &mut Ui, dim: Color32) {
@@ -313,5 +324,29 @@ impl PrefsState {
                 ui.selectable_value(&mut s.confirmation, Confirm::None, "None");
             });
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Draws the General tab. With SHOTCRAFT_TEST_OUT set, the picture is written there.
+    #[test]
+    fn the_general_tab_with_the_capture_rows_fits_the_window() {
+        let queue: crate::Queue = Default::default();
+        let mut state = PrefsState::shared(Settings::default(), queue);
+        let ppp = 2.0;
+        let img = crate::headless::with_rig(|rig| {
+            rig.render_ui((WINDOW[0], WINDOW[1]), ppp, Color32::from_rgb(40, 40, 44), |ui| {
+                state.lock().unwrap().body(ui);
+            })
+        });
+        if let Some(dir) = std::env::var_os("SHOTCRAFT_TEST_OUT") {
+            let name = std::env::var("SHOTCRAFT_TEST_TAG").unwrap_or_else(|_| "general".into());
+            crate::headless::save_png(&img, &std::path::PathBuf::from(dir).join(format!("prefs-{name}.png")));
+        }
+        assert_eq!((img.w, img.h), ((WINDOW[0] * ppp) as u32, (WINDOW[1] * ppp) as u32));
+        let _ = &mut state;
     }
 }

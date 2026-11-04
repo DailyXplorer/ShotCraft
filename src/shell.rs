@@ -3,7 +3,7 @@
 //! The app has no Dock icon, so macOS never shows its main menu: the status item menu is the one
 //! users see and has to carry every command that is not on screen in the editor. The main menu is
 //! still installed because its key equivalents keep working while the editor has focus.
-use crate::settings::{HotkeyAction, Settings};
+use crate::settings::{delayed_label, HotkeyAction, Settings};
 use crate::{Action, Queue};
 use crate::model::Tool;
 use crate::system::CaptureMode;
@@ -20,6 +20,7 @@ pub struct Shell {
     tray: Option<TrayIcon>,
     _menubar: Menu,
     autostart_item: CheckMenuItem,
+    delayed_item: MenuItem,
     auto_updates_item: CheckMenuItem,
     updater: Option<Updater>,
     hotkeys: Option<GlobalHotKeyManager>,
@@ -40,6 +41,7 @@ fn action_for(id: &str) -> Option<Action> {
         "repeat" => Action::Capture(CaptureMode::RepeatArea),
         "window" => Action::Capture(CaptureMode::Window),
         "scrolling" => Action::ScrollingCapture,
+        "scrollingup" => Action::ScrollingCaptureUp,
         "activewindow" => Action::Capture(CaptureMode::ActiveWindow),
         "alldisplays" => Action::Capture(CaptureMode::AllDisplays),
         "delayed" => Action::Capture(CaptureMode::Delayed),
@@ -100,6 +102,7 @@ const MENU_SYMBOLS: &[(&str, &str)] = &[
     ("Repeat Area Capture", "arrow.clockwise"),
     ("Capture Any Window", "macwindow"),
     ("Capture Active Window", "macwindow.on.rectangle"),
+    ("Scrolling Capture (Up)", "arrow.up.square"),
     ("Scrolling Capture", "arrow.up.and.down.square"),
     ("Delayed Screenshot", "timer"),
     ("Recognize Text", "text.viewfinder"),
@@ -289,6 +292,7 @@ impl Shell {
             ],
         )
         .expect("menu");
+        let delayed_item = MenuItem::with_id("delayed", delayed_label(settings.delay()), true, None);
         let tray_menu = Menu::with_items(&[
             &MenuItem::with_id("area", "Area Capture", true, None),
             &MenuItem::with_id("fullscreen", "Fullscreen Screenshot", true, None),
@@ -297,7 +301,8 @@ impl Shell {
             &MenuItem::with_id("window", "Capture Any Window", true, None),
             &MenuItem::with_id("activewindow", "Capture Active Window", true, None),
             &MenuItem::with_id("scrolling", "Scrolling Capture", true, None),
-            &MenuItem::with_id("delayed", "Delayed Screenshot (3s)", true, None),
+            &MenuItem::with_id("scrollingup", "Scrolling Capture (Up)", true, None),
+            &delayed_item,
             &MenuItem::with_id("ocr", "Recognize Text/QR", true, None),
             &MenuItem::with_id("clipboard", "Load From Clipboard", true, None),
             &MenuItem::with_id("open", "Open File…", true, None),
@@ -374,7 +379,7 @@ impl Shell {
             ctx.request_repaint();
         }));
 
-        let mut shell = Shell { tray, _menubar: menubar, autostart_item, auto_updates_item, updater, hotkeys: GlobalHotKeyManager::new().ok(), registered: vec![], show_hotkey_works: false, hotkey_map, escape: None, escape_id, enter: None, enter_id };
+        let mut shell = Shell { tray, _menubar: menubar, autostart_item, delayed_item, auto_updates_item, updater, hotkeys: GlobalHotKeyManager::new().ok(), registered: vec![], show_hotkey_works: false, hotkey_map, escape: None, escape_id, enter: None, enter_id };
         shell.apply_hotkeys(settings);
         shell
     }
@@ -445,6 +450,7 @@ impl Shell {
 
     pub fn sync(&self, settings: &Settings) {
         self.autostart_item.set_checked(settings.autostart);
+        self.delayed_item.set_text(delayed_label(settings.delay()));
         self.refresh_updates();
         if let Some(t) = &self.tray {
             let _ = t.set_visible(settings.menubar_icon_visible(self.show_hotkey_works));

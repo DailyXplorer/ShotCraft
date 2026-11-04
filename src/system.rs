@@ -65,6 +65,10 @@ pub struct CaptureOptions {
     /// The colour of `WindowBg::Solid`, and what Wallpaper falls back to.
     pub solid_color: [u8; 3],
     pub scale: f32,
+    /// The mouse pointer is in the picture of captures that take no selection.
+    pub cursor: bool,
+    /// Seconds Delayed Screenshot waits.
+    pub delay_secs: u32,
     /// What the screen looked like when the capture was asked for.
     pub snapshot: Snapshot,
 }
@@ -96,6 +100,7 @@ fn selection_args(mode: CaptureMode, opt: &CaptureOptions) -> Result<Vec<String>
                 return Err("No area to repeat. Repeat Area Capture takes a screenshot of the previously captured area. You need to perform the area capture first.".into());
             };
             a.push(format!("-R{},{},{},{}", r.x0, r.y0, r.w(), r.h()));
+            a.extend(targets::extra_args(opt.cursor, 0));
         }
         CaptureMode::Window => return Ok(pick_window_args(opt)),
         _ => return Err("This capture needs no selection.".into()),
@@ -115,25 +120,44 @@ fn pick_window_args(opt: &CaptureOptions) -> Vec<String> {
 /// Where a window sits on screen: x, y, width and height in global points.
 type Frame = (f64, f64, f64, f64);
 
+/// The `screencapture` runs that take a resolved target: one per window or display. Delayed
+/// Screenshot waits in its one run; the pointer comes along when the option is on.
+fn target_runs(target: &Target, mode: CaptureMode, opt: &CaptureOptions) -> Vec<Vec<String>> {
+    let mut runs = match target {
+        Target::Window(id, _) => vec![targets::window_args(*id, opt.window_bg == WindowBg::Trimmed)],
+        Target::PickWindow => vec![pick_window_args(opt)],
+        Target::MainDisplay => vec![vec!["-x".to_string(), "-m".to_string()]],
+        Target::Displays(displays) => displays.iter().map(|d| targets::display_args(*d)).collect(),
+    };
+    if !matches!(target, Target::PickWindow) {
+        // Only the one shot of Delayed Screenshot waits: it is never several shots in a row.
+        let extra = targets::extra_args(opt.cursor, if mode == CaptureMode::Delayed { opt.delay_secs } else { 0 });
+        for r in &mut runs {
+            r.extend(extra.iter().cloned());
+        }
+    }
+    runs
+}
+
 /// Non-interactive capture of a resolved target, with the picture's pixels per point and, for a
 /// window, where it was on screen when that is known and needed.
-fn capture_target(target: Target, opt: &CaptureOptions) -> Result<Option<(Image, f32, Option<Frame>)>, String> {
+fn capture_target(target: Target, mode: CaptureMode, opt: &CaptureOptions) -> Result<Option<(Image, f32, Option<Frame>)>, String> {
     let scale = opt.scale;
-    let trim = opt.window_bg == WindowBg::Trimmed;
+    let runs = target_runs(&target, mode, opt);
     Ok(match target {
         Target::Window(id, px_per_point) => {
             let frame = opt.snapshot.windows.iter().find(|w| w.id == id).map(|w| (w.bounds.x, w.bounds.y, w.bounds.w, w.bounds.h));
-            shoot(&targets::window_args(id, trim), |_| ())?.map(|(img, _)| (img, px_per_point as f32, frame))
+            shoot(&runs[0], |_| ())?.map(|(img, _)| (img, px_per_point as f32, frame))
         }
         Target::PickWindow => {
             let want_frame = opt.window_bg == WindowBg::Wallpaper;
-            shoot(&pick_window_args(opt), |p| if want_frame { capture_rect(p) } else { None })?.map(|(img, r)| (img, scale, r.map(frame_of)))
+            shoot(&runs[0], |p| if want_frame { capture_rect(p) } else { None })?.map(|(img, r)| (img, scale, r.map(frame_of)))
         }
-        Target::MainDisplay => shoot(&["-x".to_string(), "-m".to_string()], |_| ())?.map(|(img, _)| (img, scale, None)),
+        Target::MainDisplay => shoot(&runs[0], |_| ())?.map(|(img, _)| (img, scale, None)),
         Target::Displays(displays) => {
             let mut shots = Vec::new();
-            for d in &displays {
-                let Some((img, _)) = shoot(&targets::display_args(*d), |_| ())? else { return Ok(None) };
+            for run in &runs {
+                let Some((img, _)) = shoot(run, |_| ())? else { return Ok(None) };
                 shots.push(img);
             }
             let snap = &opt.snapshot;
@@ -155,10 +179,7 @@ pub fn capture(mode: CaptureMode, opt: &CaptureOptions) -> Result<Option<Capture
     let is_window = matches!(mode, CaptureMode::Window | CaptureMode::ActiveWindow);
     let (img, scale, area, frame) = match targets::resolve(mode, &opt.snapshot) {
         Some(target) => {
-            if mode == CaptureMode::Delayed {
-                std::thread::sleep(std::time::Duration::from_secs(3));
-            }
-            let Some((img, scale, frame)) = capture_target(target, opt)? else { return Ok(None) };
+            let Some((img, scale, frame)) = capture_target(target, mode, opt)? else { return Ok(None) };
             (img, scale, None, frame)
         }
         None => {
@@ -638,7 +659,7 @@ mod window_bg_tests {
     use crate::targets::Rect;
 
     fn options(bg: WindowBg, snapshot: Snapshot) -> CaptureOptions {
-        CaptureOptions { last_area: None, window_bg: bg, solid_color: [10, 20, 30], scale: 2.0, snapshot }
+        CaptureOptions { last_area: None, window_bg: bg, solid_color: [10, 20, 30], scale: 2.0, cursor: false, delay_secs: 3, snapshot }
     }
 
     #[test]
@@ -691,5 +712,65 @@ mod window_bg_tests {
         assert!(!out.has_alpha());
         assert_eq!(&out.get(0, 0)[..3], &[200, 30, 30], "the wallpaper shows in the margin");
         assert_eq!((out.w, out.h), (windowbg::layout(&win).w, windowbg::layout(&win).h));
+    }
+}
+
+#[cfg(test)]
+mod capture_option_tests {
+    use super::*;
+    use crate::targets::Rect;
+
+    fn options(cursor: bool, delay_secs: u32) -> CaptureOptions {
+        CaptureOptions {
+            last_area: Some(R { x0: 10.0, y0: 20.0, x1: 110.0, y1: 220.0 }),
+            window_bg: WindowBg::Transparent,
+            solid_color: [0, 0, 0],
+            scale: 2.0,
+            cursor,
+            delay_secs,
+            snapshot: Snapshot::default(),
+        }
+    }
+
+    fn has(args: &[String], a: &str) -> bool {
+        args.iter().any(|x| x == a)
+    }
+
+    #[test]
+    fn the_pointer_is_left_out_unless_asked_for() {
+        let screen = Target::Displays(vec![Rect::new(0.0, 0.0, 1000.0, 600.0)]);
+        for (target, mode) in [(Target::Window(7, 2.0), CaptureMode::ActiveWindow), (Target::MainDisplay, CaptureMode::Fullscreen), (screen.clone(), CaptureMode::Fullscreen)] {
+            assert!(!has(&target_runs(&target, mode, &options(false, 3))[0], "-C"));
+            assert!(has(&target_runs(&target, mode, &options(true, 3))[0], "-C"));
+        }
+        assert!(has(&selection_args(CaptureMode::RepeatArea, &options(true, 3)).unwrap(), "-C"));
+        assert!(!has(&selection_args(CaptureMode::RepeatArea, &options(false, 3)).unwrap(), "-C"));
+    }
+
+    #[test]
+    fn what_the_user_selects_never_gets_the_pointer_option() {
+        // `screencapture` takes -C only without a selection; the selector would draw it anyway.
+        assert!(!has(&selection_args(CaptureMode::Area, &options(true, 3)).unwrap(), "-C"));
+        assert!(!has(&selection_args(CaptureMode::Window, &options(true, 3)).unwrap(), "-C"));
+        assert!(!has(&target_runs(&Target::PickWindow, CaptureMode::ActiveWindow, &options(true, 3))[0], "-C"));
+    }
+
+    #[test]
+    fn only_the_delayed_screenshot_waits() {
+        let screen = Target::Displays(vec![Rect::new(0.0, 0.0, 1000.0, 600.0)]);
+        let run = &target_runs(&screen, CaptureMode::Delayed, &options(false, 10))[0];
+        let at = run.iter().position(|a| a == "-T").expect("-T");
+        assert_eq!(run[at + 1], "10");
+        for mode in [CaptureMode::Fullscreen, CaptureMode::AllDisplays] {
+            assert!(!has(&target_runs(&screen, mode, &options(false, 10))[0], "-T"), "{mode:?}");
+        }
+        assert!(!has(&target_runs(&Target::MainDisplay, CaptureMode::Fullscreen, &options(true, 10))[0], "-T"));
+        assert!(has(&target_runs(&Target::MainDisplay, CaptureMode::Delayed, &options(true, 5))[0], "-T"));
+    }
+
+    #[test]
+    fn extra_args_are_what_screencapture_takes() {
+        assert_eq!(targets::extra_args(true, 5), ["-C", "-T", "5"]);
+        assert!(targets::extra_args(false, 0).is_empty());
     }
 }
