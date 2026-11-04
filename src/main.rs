@@ -1,4 +1,5 @@
 mod app_mode;
+mod color;
 mod editor;
 #[cfg(test)]
 mod headless;
