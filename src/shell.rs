@@ -1,4 +1,8 @@
-//! Menu bar icon, the app's native menus and the global hotkeys.
+//! Menu bar icon, the app's menus and the global hotkeys.
+//!
+//! The app has no Dock icon, so macOS never shows its main menu: the status item menu is the one
+//! users see and has to carry every command that is not on screen in the editor. The main menu is
+//! still installed because its key equivalents keep working while the editor has focus.
 use crate::settings::{HotkeyAction, Settings};
 use crate::{Action, Queue};
 use crate::model::Tool;
@@ -93,6 +97,7 @@ const MENU_SYMBOLS: &[(&str, &str)] = &[
     ("Undo", "arrow.uturn.backward"),
     ("Redo", "arrow.uturn.forward"),
     ("Reset Crop", "crop"),
+    ("Current Image", "photo"),
     ("Cut", "scissors"),
     ("Paste", "doc.on.clipboard"),
     ("Zoom In", "plus.magnifyingglass"),
@@ -191,8 +196,6 @@ impl Shell {
             true,
             &[
                 &MenuItem::with_id("about", "About ShotCraft", true, None),
-                &updates_item,
-                &auto_updates_item,
                 &PredefinedMenuItem::separator(),
                 &MenuItem::with_id("prefs", "Preferences…", true, acc(cmd, Code::Comma)),
                 &PredefinedMenuItem::separator(),
@@ -277,6 +280,18 @@ impl Shell {
         help.set_as_help_menu_for_nsapp();
 
         let autostart_item = CheckMenuItem::with_id("autostart", "Launch at Startup", true, settings.autostart, None);
+        let image = Submenu::with_items(
+            "Current Image",
+            true,
+            &[
+                &MenuItem::with_id("undo", "Undo", true, None),
+                &MenuItem::with_id("redo", "Redo", true, None),
+                &MenuItem::with_id("resetcrop", "Reset Crop", true, None),
+                &MenuItem::with_id("rasterize", "Rasterize (Merge) Image", true, None),
+                &MenuItem::with_id("saveas", "Save Image As", true, None),
+            ],
+        )
+        .expect("menu");
         let tray_menu = Menu::with_items(&[
             &MenuItem::with_id("area", "Area Capture", true, None),
             &MenuItem::with_id("fullscreen", "Fullscreen Screenshot", true, None),
@@ -288,8 +303,16 @@ impl Shell {
             &MenuItem::with_id("open", "Open File…", true, None),
             &PredefinedMenuItem::separator(),
             &MenuItem::with_id("show", "Show ShotCraft", true, None),
+            &image,
+            &PredefinedMenuItem::separator(),
             &MenuItem::with_id("prefs", "Preferences…", true, None),
             &autostart_item,
+            &PredefinedMenuItem::separator(),
+            &updates_item,
+            &auto_updates_item,
+            &PredefinedMenuItem::separator(),
+            &MenuItem::with_id("about", "About ShotCraft", true, None),
+            &MenuItem::with_id("shortcuts", "Keyboard Shortcuts", true, None),
             &PredefinedMenuItem::separator(),
             &MenuItem::with_id("quit", "Quit ShotCraft", true, None),
         ])
@@ -303,7 +326,7 @@ impl Shell {
             .build()
             .ok();
         if let Some(t) = &tray {
-            let _ = t.set_visible(!settings.hide_menubar_icon);
+            let _ = t.set_visible(settings.menubar_icon_visible());
         }
 
         let q = queue.clone();
@@ -386,7 +409,7 @@ impl Shell {
         self.autostart_item.set_checked(settings.autostart);
         self.refresh_updates();
         if let Some(t) = &self.tray {
-            let _ = t.set_visible(!settings.hide_menubar_icon);
+            let _ = t.set_visible(settings.menubar_icon_visible());
         }
     }
 }

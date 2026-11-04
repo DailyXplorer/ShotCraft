@@ -127,6 +127,12 @@ impl Settings {
         }
     }
 
+    /// The menu bar icon is the only visible part of the app, so the "hide" setting only takes
+    /// effect while the Show ShotCraft hotkey is set: without either, nothing could open it again.
+    pub fn menubar_icon_visible(&self) -> bool {
+        !self.hide_menubar_icon || self.hotkey(HotkeyAction::Show).is_none()
+    }
+
     pub fn hotkey(&self, a: HotkeyAction) -> Option<&str> {
         self.hotkeys.iter().find(|(k, _)| *k == a).map(|(_, v)| v.as_str()).filter(|s| !s.is_empty())
     }
@@ -157,6 +163,17 @@ pub fn pretty_hotkey(s: &str) -> String {
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hidden_menubar_icon_needs_the_show_hotkey() {
+        let mut s = Settings::default();
+        s.hide_menubar_icon = true;
+        assert!(s.menubar_icon_visible(), "no Show hotkey: the icon stays");
+        s.set_hotkey(HotkeyAction::Show, Some("Cmd+Shift+9".into()));
+        assert!(!s.menubar_icon_visible());
+        s.hide_menubar_icon = false;
+        assert!(s.menubar_icon_visible());
+    }
 
     #[test]
     fn default_hotkeys_parse() {
