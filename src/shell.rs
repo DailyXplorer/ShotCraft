@@ -153,36 +153,11 @@ fn add_menu_symbols(menu: &dyn ContextMenu) {
     }
 }
 
+/// The menu bar glyph: black on transparent, 36 px for an 18 pt status item. It is marked as a
+/// template image where the tray icon is built, so macOS tints it for light and dark menu bars.
 fn tray_icon_image() -> tray_icon::Icon {
-    // A small viewfinder: four corners and a dot, drawn as a template image.
-    let n = 36u32;
-    let mut px = vec![0u8; (n * n * 4) as usize];
-    let mut set = |x: u32, y: u32| {
-        let i = ((y * n + x) * 4) as usize;
-        px[i..i + 4].copy_from_slice(&[0, 0, 0, 255]);
-    };
-    let (a, b, l, t) = (4u32, 31u32, 10u32, 3u32);
-    for k in 0..l {
-        for s in 0..t {
-            for (cx, cy, dx, dy) in [(a, a, 1i32, 1i32), (b, a, -1, 1), (a, b, 1, -1), (b, b, -1, -1)] {
-                let hx = (cx as i32 + dx * k as i32) as u32;
-                let hy = (cy as i32 + dy * s as i32) as u32;
-                set(hx, hy);
-                let vx = (cx as i32 + dx * s as i32) as u32;
-                let vy = (cy as i32 + dy * k as i32) as u32;
-                set(vx, vy);
-            }
-        }
-    }
-    for y in 13..23u32 {
-        for x in 13..23u32 {
-            let (dx, dy) = (x as f32 - 17.5, y as f32 - 17.5);
-            if dx * dx + dy * dy <= 22.0 {
-                set(x, y);
-            }
-        }
-    }
-    tray_icon::Icon::from_rgba(px, n, n).expect("icon")
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/menubar.png")).expect("menu bar icon");
+    tray_icon::Icon::from_rgba(icon.rgba, icon.width, icon.height).expect("menu bar icon")
 }
 
 impl Shell {
@@ -428,6 +403,14 @@ impl Shell {
 #[cfg(test)]
 mod tests {
     use super::menu_symbol;
+
+    #[test]
+    fn menu_bar_icon_is_a_36_px_black_template() {
+        let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/menubar.png")).unwrap();
+        assert_eq!((icon.width, icon.height), (36, 36));
+        assert!(icon.rgba.chunks(4).all(|p| p[..3] == [0, 0, 0]), "a template image only uses alpha");
+        assert!(icon.rgba.chunks(4).any(|p| p[3] == 255) && icon.rgba.chunks(4).any(|p| p[3] == 0));
+    }
 
     #[test]
     fn updates_symbol_is_only_for_the_check_item() {

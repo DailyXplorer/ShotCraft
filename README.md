@@ -122,6 +122,8 @@ You only need to do this the first time.
 
 The script runs `cargo build --release`, assembles the app bundle and signs it ad hoc (no developer certificate).
 
+The app icon, window icon and menu bar icon are drawn in `assets/logo/*.svg`. After changing them, run `node scripts/make-icons.mjs` on a Mac (it needs Playwright and `iconutil`) to rewrite `assets/AppIcon.icns`, `assets/window-icon.png` and `assets/menubar.png`.
+
 ## Permissions
 
 macOS asks for the Screen Recording permission on the first capture. If a capture fails, ShotCraft shows a message pointing to System Settings > Privacy & Security > Screen Recording. The code requests no other permission.
@@ -143,7 +145,6 @@ Set the version in `Cargo.toml`, then push a tag such as `v0.1.0`. The Release w
 ## Credits
 
 * [DM Sans](https://github.com/googlefonts/dm-fonts), SIL Open Font License: `assets/fonts/OFL.txt`
-* App icon: the default [eframe](https://github.com/emilk/egui) icon, MIT or Apache-2.0 License
 * [Sparkle](https://sparkle-project.org), MIT License, included in releases
 * [Hugeicons](https://hugeicons.com) free icons, MIT License: `assets/icons/LICENSE-hugeicons.md`
 
