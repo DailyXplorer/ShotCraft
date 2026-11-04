@@ -38,6 +38,7 @@ await browser.close();
 
 if (process.platform === 'darwin') {
   execFileSync('iconutil', ['-c', 'icns', iconset, '-o', path.join(root, 'assets/AppIcon.icns')]);
+  fs.rmSync(path.dirname(iconset), { recursive: true });
 } else {
   console.log(`Run on a Mac: iconutil -c icns ${iconset} -o assets/AppIcon.icns`);
 }
