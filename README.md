@@ -10,7 +10,7 @@ ShotCraft is written in Rust. It is an early version (0.1.0).
 
 * Area, any window, repeat the last area, and full-screen captures. Fullscreen captures the display the mouse pointer is on, and All Displays puts every display in one picture laid out like your desk.
 * Active Window captures the frontmost window of the app you are using, without clicking. Use it from a hotkey, or from the menu bar icon menu, which targets the app that was in front before you opened it. When that app has no capturable window, you pick a window instead.
-* A 3-second delayed capture of the display under the mouse.
+* A 3-second delayed capture of the display the mouse was on when you started it.
 * Window captures can keep a transparent background or use a solid color, and can trim the window shadow.
 * Instant text and QR recognition: select an area and the recognized text goes straight to the clipboard, with no editor.
 * Open an existing image from a file or from the clipboard. The file picker and the command line open PNG, JPEG, GIF, BMP, TIFF and WebP files; saving writes PNG or JPEG. Animated GIFs open as their first frame.
