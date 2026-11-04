@@ -1488,7 +1488,7 @@ impl App {
                         None => (d.base.w as f32, d.base.h as f32),
                     };
                     if let Some(bd) = &mut d.backdrop {
-                        let (mx, my) = backdrop_max_offset(cw, ch, bd);
+                        let (mx, my) = render::backdrop_max_offset(cw, ch, bd);
                         bd.offset = [(bd.offset[0] + delta.x).clamp(-mx, mx), (bd.offset[1] + delta.y).clamp(-my, my)];
                     }
                     d.touch();
