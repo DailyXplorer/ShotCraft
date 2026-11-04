@@ -121,7 +121,8 @@ fn capture_target(target: Target, opt: &CaptureOptions) -> Result<Option<(Image,
                 let Some((img, _)) = shoot(&targets::display_args(*d), |_| ())? else { return Ok(None) };
                 shots.push(img);
             }
-            let px_per_point = displays.iter().zip(&shots).map(|(d, s)| s.w as f32 / d.w as f32).fold(1.0, f32::max);
+            let snap = &opt.snapshot;
+            let px_per_point = displays.iter().map(|d| targets::scale_at(&snap.displays, &snap.scales, *d) as f32).fold(1.0, f32::max);
             if shots.len() == 1 {
                 return Ok(Some((shots.remove(0), px_per_point)));
             }
