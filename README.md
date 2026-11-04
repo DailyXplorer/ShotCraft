@@ -98,9 +98,18 @@ ShotCraft makes no network connections of its own: the source contains no networ
 * macOS 12 or later (`LSMinimumSystemVersion` in `packaging/Info.plist`).
 * The [Rust](https://rustup.rs) toolchain to build from source.
 
-## Build and install
+## Install
 
-No release is published yet. For now ShotCraft is built from source.
+Download `ShotCraft-0.1.0.zip` from the [Releases page](https://github.com/DailyXplorer/ShotCraft/releases/latest), unzip it and move `ShotCraft.app` to `/Applications`. The app is universal (Apple Silicon and Intel).
+
+ShotCraft is signed with its own certificate, not an Apple Developer ID, and it is not notarized, so macOS refuses to open it the first time (`spctl` reports "rejected"). To open it anyway:
+
+* On macOS 15 or later: try to open the app once, then go to System Settings > Privacy & Security, scroll to the message about ShotCraft and click Open Anyway.
+* On macOS 12 to 14: Control-click (right-click) the app, choose Open, then confirm.
+
+You only need to do this the first time.
+
+## Build from source
 
 ```sh
 ./scripts/make-app.sh            # builds target/ShotCraft.app
@@ -119,7 +128,7 @@ This is an early version. Feedback and issues are welcome on the [issue tracker]
 
 ## Updates
 
-Releases are signed with a ShotCraft certificate rather than an Apple Developer ID, so macOS warns about the app the first time you open it. Control-click the app and choose Open.
+Releases are signed with a ShotCraft certificate rather than an Apple Developer ID, so macOS warns about the app the first time you open it (see Install for how to open it).
 
 Updates come through [Sparkle](https://sparkle-project.org), which installs a new version only if its Ed25519 signature matches the key inside the app. On the second launch the app asks whether to check automatically. A check tells GitHub your IP address and the app version, and sends nothing else. Change your choice in the ShotCraft menu, or use Check for Updates at any time. Builds from `make-app.sh` do not include Sparkle.
 
