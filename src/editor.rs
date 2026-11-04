@@ -1,6 +1,7 @@
 use crate::icons::{self, Icon};
 use crate::model::*;
 use crate::render;
+use crate::selection::{self, snap45, square, Corner};
 use crate::tiled::{Alpha, TiledTexture};
 use crate::{Action, App};
 use eframe::egui::{
@@ -83,6 +84,8 @@ enum Drag {
     Select { start: P },
     Crop { start: P },
     Pan { last: Pos2 },
+    /// Z + drag: zoom to the dragged area.
+    Zoom { start: P },
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -300,6 +303,7 @@ fn hit(obj: &Obj, q: P, tol: f32, fonts: &render::Fonts) -> bool {
         Kind::Arrow { a, b, seed } => render::arrow_hit(*a, *b, *seed, &obj.style, q, tol),
         Kind::Line { a, b } | Kind::Ruler { a, b } => seg_dist(*a, *b) <= w * 1.5 + tol,
         Kind::Highlighter { a, b } => seg_dist(*a, *b) <= obj.style.highlight_size() / 2.0 + tol,
+        Kind::Freehand { pts } if pts.len() == 1 => pts[0].dist(q) <= w / 2.0 + tol,
         Kind::Freehand { pts } => pts.windows(2).any(|s| seg_dist(s[0], s[1]) <= w + tol),
         Kind::Rect { r, .. } | Kind::Oval { r, .. } => {
             if matches!(obj.style.fill, Fill::Translucent | Fill::Opaque) {
@@ -323,18 +327,6 @@ fn handles(obj: &Obj) -> Vec<(Handle, P)> {
         ],
         _ => vec![],
     }
-}
-
-fn snap45(a: P, b: P) -> P {
-    let (dx, dy) = (b.x - a.x, b.y - a.y);
-    let len = (dx * dx + dy * dy).sqrt();
-    let ang = (dy.atan2(dx) / std::f32::consts::FRAC_PI_4).round() * std::f32::consts::FRAC_PI_4;
-    p(a.x + len * ang.cos(), a.y + len * ang.sin())
-}
-
-fn square(a: P, b: P) -> P {
-    let s = (b.x - a.x).abs().max((b.y - a.y).abs());
-    p(a.x + s * (b.x - a.x).signum(), a.y + s * (b.y - a.y).signum())
 }
 
 fn set_end(kind: &mut Kind, start: P, q: P, shift: bool) {
@@ -425,6 +417,21 @@ impl App {
             Action::Zoom100 => {
                 let f = (1.0 / ppp) / self.ed.zoom;
                 self.ed.zoom_around(f, center);
+            }
+            Action::ZoomSelection | Action::SelectionTopLeft | Action::SelectionBottomRight => {
+                let Some(r) = self.ed.selection else {
+                    self.say("Select an area first");
+                    return;
+                };
+                let canvas = (self.ed.canvas.width(), self.ed.canvas.height());
+                let (zoom, pan) = match a {
+                    Action::ZoomSelection => selection::zoom_to_rect(canvas, r, ppp),
+                    Action::SelectionTopLeft => selection::zoom_to_corner(canvas, self.ed.zoom, r, Corner::TopLeft, ppp),
+                    _ => selection::zoom_to_corner(canvas, self.ed.zoom, r, Corner::BottomRight, ppp),
+                };
+                self.ed.zoom = zoom;
+                self.ed.pan = vec2(pan.0, pan.1);
+                self.ed.fit = false;
             }
             Action::Tool(t) => self.set_tool(t),
             _ => {}
@@ -601,7 +608,10 @@ impl App {
         }
         for e in &events {
             let egui::Event::Key { key, pressed: true, modifiers, repeat, .. } = e else { continue };
-            let (cmd, shift) = (modifiers.command, modifiers.shift);
+            let (cmd, shift, alt) = (modifiers.command, modifiers.shift, modifiers.alt);
+            let plain = !cmd && !modifiers.ctrl && !alt;
+            let sel_keys = self.ed.tool == Tool::Select && self.ed.selected.is_none() && self.ed.selection.is_some();
+            let tool_now = self.context_tool();
             match key {
                 Key::Z if cmd && shift => self.push(Action::Redo),
                 Key::Z if cmd => self.push(Action::Undo),
@@ -614,6 +624,11 @@ impl App {
                 Key::Minus if cmd => self.push(Action::ZoomOut),
                 Key::Num0 if cmd => self.push(Action::Zoom100),
                 Key::Num1 if cmd => self.push(Action::ZoomFit),
+                Key::Num2 if cmd => self.push(Action::ZoomSelection),
+                Key::Q if plain && self.ed.selection.is_some() => self.push(Action::SelectionTopLeft),
+                Key::W if plain && self.ed.selection.is_some() => self.push(Action::SelectionBottomRight),
+                Key::A if plain && sel_keys => self.smart_select(),
+                Key::B if plain && sel_keys => self.blur_selection(),
                 Key::W if cmd => self.push(Action::Close),
                 Key::Tab => {
                     if let (Some(q), Some(d)) = (self.ed.hover, &self.doc) {
@@ -645,7 +660,10 @@ impl App {
                         self.push(Action::Close);
                     }
                 }
+                Key::Enter if cmd && tool_now == Tool::Freehand => self.update_style(|st| *st = st.next_variability()),
+                Key::Enter if cmd && tool_now == Tool::Highlighter => self.update_style(|st| *st = st.next_cap()),
                 Key::Enter if self.ed.tool == Tool::Crop => self.apply_crop(),
+                Key::Enter if plain && sel_keys => self.crop_selection(),
                 Key::Backspace | Key::Delete => {
                     if self.ed.selected.is_some() {
                         self.delete_selected();
@@ -655,6 +673,15 @@ impl App {
                         st.blur = BlurMode::Erase;
                         d.objs.push(Obj { kind: Kind::Blur { r, text: None }, style: st });
                         self.ed.selection = None;
+                    }
+                }
+                Key::ArrowUp | Key::ArrowDown if alt && !cmd && tool_now == Tool::Freehand => {
+                    let up = *key == Key::ArrowUp;
+                    self.update_style(|st| *st = st.smoother(up));
+                }
+                Key::ArrowLeft | Key::ArrowRight | Key::ArrowUp | Key::ArrowDown if self.ed.selected.is_none() && !alt => {
+                    if let Some(dir) = selection::Arrow::from_key(*key) {
+                        self.edit_selection(|r, bounds| selection::arrow_edit(r, dir, cmd, shift, bounds));
                     }
                 }
                 Key::ArrowLeft | Key::ArrowRight | Key::ArrowUp | Key::ArrowDown if self.ed.selected.is_some() => {
@@ -674,8 +701,17 @@ impl App {
                         d.objs[i].translate(dx, dy);
                     }
                 }
-                Key::CloseBracket if shift => {
-                    self.ed.popover = Popover::Resize(Rect::from_min_size(self.ed.canvas.right_top() + vec2(-300.0, 4.0), vec2(1.0, 1.0)))
+                Key::OpenBracket | Key::CloseBracket | Key::OpenCurlyBracket | Key::CloseCurlyBracket if !cmd && !alt => {
+                    if let Some(n) = selection::bracket_delta(*key, shift) {
+                        self.edit_selection(|r, bounds| selection::grow(r, n, bounds));
+                    }
+                }
+                k if plain && selection::digit(*k).is_some() && tool_now == Tool::Spotlight => {
+                    let st = self.ed.style_for(Tool::Spotlight).with_dim(selection::digit(*k).unwrap());
+                    self.ed.styles.insert(Tool::Spotlight, st);
+                    if let Some(d) = &mut self.doc {
+                        d.set_spotlight_dim(st.dim);
+                    }
                 }
                 Key::P if !cmd => self.settings.logical_points = !self.settings.logical_points,
                 Key::C if !cmd && self.ed.tool == Tool::Select && self.ed.selection.is_some() => {
@@ -696,6 +732,42 @@ impl App {
                 _ => {}
             }
         }
+    }
+
+    /// The selection (or the crop frame while cropping) edited by the keyboard; `f` gets the area
+    /// and the bounds of the picture.
+    fn edit_selection(&mut self, f: impl Fn(R, R) -> R) {
+        let Some(d) = &self.doc else { return };
+        let bounds = R { x0: 0.0, y0: 0.0, x1: d.base.w as f32, y1: d.base.h as f32 };
+        let slot = if self.ed.tool == Tool::Crop { &mut self.ed.crop_draft } else { &mut self.ed.selection };
+        if let Some(r) = *slot {
+            *slot = Some(f(r, bounds));
+        }
+    }
+
+    /// A: the selection snaps to the content inside it.
+    fn smart_select(&mut self) {
+        if let (Some(r), Some(d)) = (self.ed.selection, &self.doc) {
+            self.ed.selection = Some(selection::smart_adjust(&d.base, r));
+        }
+    }
+
+    /// B: blur the selected area with the Blur tool's current mode.
+    fn blur_selection(&mut self) {
+        let (Some(r), Some(d)) = (self.ed.selection, &mut self.doc) else { return };
+        let style = self.ed.style_for(Tool::Blur);
+        d.checkpoint();
+        d.objs.push(Obj { kind: Kind::Blur { r, text: None }, style });
+        self.ed.selection = None;
+        self.ed.selected = Some(d.objs.len() - 1);
+        self.detect_blur_text();
+        self.ed.selected = None;
+    }
+
+    /// Enter: crop to the selection.
+    fn crop_selection(&mut self) {
+        self.ed.crop_draft = self.ed.selection.take();
+        self.apply_crop();
     }
 
     pub fn editor_ui(&mut self, ui: &mut Ui) {
@@ -757,7 +829,7 @@ impl App {
                     ui,
                     &[
                         (Icon::Crop, "Crop", current == Tool::Crop),
-                        (Icon::Resize, "Resize ( ⇧+] )", matches!(self.ed.popover, Popover::Resize(_))),
+                        (Icon::Resize, "Resize", matches!(self.ed.popover, Popover::Resize(_))),
                         (Icon::Ocr, "Recognize Text or QR (⌘O)", current == Tool::Ocr),
                         (Icon::SelSize, "Imprint Selection Size", false),
                         (Icon::Erase, "Erase (Del)", false),
@@ -1336,6 +1408,8 @@ impl App {
 
     fn canvas_input(&mut self, ui: &mut Ui, resp: &Response) {
         let (press, cur, shift, space) = ui.input(|i| (i.pointer.press_origin(), i.pointer.interact_pos(), i.modifiers.shift, i.key_down(Key::Space)));
+        let (alt, cmd, zoom_key) = ui.input(|i| (i.modifiers.alt, i.modifiers.command, i.key_down(Key::Z) && !i.modifiers.command));
+        let zoom_key = zoom_key && !self.ed.editing_text;
         let tol = 6.0 / self.ed.zoom;
         let ruler_hold = self.ruler_axis(ui);
 
@@ -1345,6 +1419,8 @@ impl App {
             let q = self.ed.to_img(start_s);
             if space || ui.input(|i| i.pointer.middle_down()) {
                 self.ed.drag = Drag::Pan { last: start_s };
+            } else if zoom_key {
+                self.ed.drag = Drag::Zoom { start: q };
             } else {
                 self.finish_text();
                 self.begin_drag(q, tol);
@@ -1385,8 +1461,19 @@ impl App {
                             d.touch();
                         }
                     }
-                    Drag::Select { start } => self.ed.selection = Some(R::from_points(start, q)),
-                    Drag::Crop { start } => self.ed.crop_draft = Some(R::from_points(start, q)),
+                    Drag::Select { start } => {
+                        // ⇧ makes it square; holding ⌥ shows the area the selection would snap to.
+                        let mut r = R::from_points(start, if shift { square(start, q) } else { q });
+                        if let (true, Some(d)) = (alt, &self.doc) {
+                            r = selection::smart_adjust(&d.base, r);
+                        }
+                        self.ed.selection = Some(r);
+                    }
+                    Drag::Crop { start } => self.ed.crop_draft = Some(R::from_points(start, if shift { square(start, q) } else { q })),
+                    Drag::Zoom { start } => {
+                        let r = self.ed.rect_screen(&R::from_points(start, q));
+                        ui.painter_at(self.ed.canvas).rect_stroke(r, 0.0, Stroke::new(1.0, Color32::WHITE), StrokeKind::Outside);
+                    }
                     Drag::None => {}
                 }
             }
@@ -1395,6 +1482,16 @@ impl App {
             if matches!(self.ed.drag, Drag::Create { .. } | Drag::Handle { .. }) {
                 self.detect_blur_text();
                 self.keep_lens_inside();
+            }
+            if let (Drag::Zoom { start }, Some(cs)) = (self.ed.drag, cur) {
+                let end = self.ed.to_img(cs);
+                let r = R::from_points(start, end);
+                if r.w().max(r.h()) * self.ed.zoom >= selection::ZOOM_DRAG_MIN {
+                    let (zoom, pan) = selection::zoom_to_rect((self.ed.canvas.width(), self.ed.canvas.height()), r, ui.ctx().pixels_per_point());
+                    self.ed.zoom = zoom;
+                    self.ed.pan = vec2(pan.0, pan.1);
+                    self.ed.fit = false;
+                }
             }
             match self.ed.drag {
                 Drag::Create { .. } => {
@@ -1440,6 +1537,24 @@ impl App {
                 let mut st = self.ed.style_for(Tool::Ruler);
                 st.dashed = self.settings.logical_points;
                 d.objs.push(Obj { kind: Kind::Ruler { a, b }, style: st });
+                return;
+            }
+            if zoom_key {
+                // Z + click: zoom in one step on that spot.
+                let ppp = ui.ctx().pixels_per_point();
+                let target = zoom_key_target(self.ed.zoom * ppp, true) / ppp;
+                let (zoom, pan) = selection::zoom_to_point((self.ed.canvas.width(), self.ed.canvas.height()), target, q, ppp);
+                self.ed.zoom = zoom;
+                self.ed.pan = vec2(pan.0, pan.1);
+                self.ed.fit = false;
+                return;
+            }
+            if cmd && self.ed.tool == Tool::Select {
+                // ⌘-click: the flat area under the pointer becomes the selection.
+                if let Some(d) = &self.doc {
+                    self.ed.selected = None;
+                    self.ed.selection = selection::flood_select(&d.base, q.x.floor() as i32, q.y.floor() as i32, selection::FLOOD_TOLERANCE);
+                }
                 return;
             }
             self.click(q, tol, resp.double_clicked());
@@ -1594,7 +1709,8 @@ impl App {
             return;
         }
         match tool {
-            Tool::Counter | Tool::Text => {
+            // A click with Freehand draws a point.
+            Tool::Counter | Tool::Text | Tool::Freehand => {
                 let style = self.ed.style_for(tool);
                 let d = self.doc.as_mut().unwrap();
                 let kind = new_kind(tool, q, d.next_counter()).unwrap();
@@ -1947,7 +2063,20 @@ impl App {
                         ("⌘O", "Recognize Text or QR"),
                         ("⌘Z  ⌘⇧Z", "Undo, Redo"),
                         ("⌘+  ⌘-  ⌘0  ⌘1", "Zoom in, out, 100%, fit"),
+                        ("⌘2  Q  W", "Zoom to the selection, to its top left, bottom right corner"),
+                        ("Z + click or drag", "Zoom in on a spot or an area"),
                         ("Space + drag", "Move around the picture"),
+                        ("⌘ + click", "Select the flat area under the pointer"),
+                        ("Enter", "Crop to the selection"),
+                        ("A  (hold ⌥ while selecting)", "Snap the selection to its content (preview)"),
+                        ("B", "Blur the selection"),
+                        ("← → ↑ ↓  (⇧ ×10)", "Move the selection or the selected object"),
+                        ("⌘ + ← → ↑ ↓  (⇧ ×10)", "Resize the selection"),
+                        ("[  ]  (⇧ ×10)", "Shrink, grow the selection"),
+                        ("⇧ while drawing", "Square, circle or 45° line"),
+                        ("Freehand: ⌘Enter, ⌥↑ ⌥↓", "Stroke variability, smoothness"),
+                        ("Highlighter: ⌘Enter", "Round or flat ends"),
+                        ("Spotlight: 1 to 9", "How dark the surroundings are"),
                     ] {
                         ui.label(egui::RichText::new(k).family(FontFamily::Name("medium".into())));
                         ui.label(v);
@@ -1957,5 +2086,403 @@ impl App {
             });
             self.shortcuts_open = open;
         }
+    }
+}
+
+/// Key and pointer events through the whole editor, the way a user's input reaches it.
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+    use crate::selection;
+    use egui::{Event, Modifiers, PointerButton};
+    use std::sync::Arc;
+
+    const SIZE: (f32, f32) = (1100.0, 760.0);
+    const PPP: f32 = 2.0;
+    const NONE: Modifiers = Modifiers::NONE;
+
+    fn rgba(w: u32, h: u32, f: impl Fn(u32, u32) -> [u8; 4]) -> Image {
+        let mut px = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                px.extend_from_slice(&f(x, y));
+            }
+        }
+        Image { w, h, px: Arc::new(px) }
+    }
+
+    /// White picture 400×300 with a blue block at (100..220, 80..160).
+    fn picture() -> Image {
+        rgba(400, 300, |x, y| if (100..220).contains(&x) && (80..160).contains(&y) { [20, 60, 200, 255] } else { [255, 255, 255, 255] })
+    }
+
+    struct Rig {
+        ctx: egui::Context,
+        app: App,
+        t: f64,
+    }
+
+    impl Rig {
+        fn new() -> Rig {
+            let ctx = egui::Context::default();
+            crate::setup_fonts(&ctx);
+            ctx.set_pixels_per_point(PPP);
+            let mut app = App::headless(ctx.clone());
+            app.doc = Some(Doc::new(picture(), PPP));
+            let mut rig = Rig { ctx, app, t: 0.0 };
+            for _ in 0..3 {
+                rig.frame(vec![], NONE);
+            }
+            rig
+        }
+
+        fn frame(&mut self, events: Vec<Event>, mods: Modifiers) {
+            self.t += 0.05;
+            let mut input = egui::RawInput::default();
+            input.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, vec2(SIZE.0, SIZE.1)));
+            input.time = Some(self.t);
+            input.events = vec![Event::ModifiersChanged(mods)];
+            input.events.extend(events);
+            let app = &mut self.app;
+            let mut out = self.ctx.run_ui(input, |ui| app.editor_ui(ui));
+            out.textures_delta.clear();
+            let queued: Vec<Action> = std::mem::take(&mut *self.app.queue.lock().unwrap());
+            for a in queued {
+                self.app.editor_action(a);
+            }
+        }
+
+        fn key(&mut self, key: Key, mods: Modifiers) {
+            let ev = |pressed| Event::Key { key, physical_key: Some(key), pressed, repeat: false, modifiers: mods };
+            self.frame(vec![ev(true)], mods);
+            self.frame(vec![ev(false)], NONE);
+        }
+
+        fn hold(&mut self, key: Key) {
+            self.frame(vec![Event::Key { key, physical_key: Some(key), pressed: true, repeat: false, modifiers: NONE }], NONE);
+        }
+
+        fn release(&mut self, key: Key) {
+            self.frame(vec![Event::Key { key, physical_key: Some(key), pressed: false, repeat: false, modifiers: NONE }], NONE);
+        }
+
+        fn at(&self, x: f32, y: f32) -> Pos2 {
+            self.app.ed.to_screen(p(x, y))
+        }
+
+        fn click(&mut self, to: Pos2, mods: Modifiers) {
+            let button = |pressed| Event::PointerButton { pos: to, button: PointerButton::Primary, pressed, modifiers: mods };
+            self.frame(vec![Event::PointerMoved(to)], mods);
+            self.frame(vec![button(true)], mods);
+            self.frame(vec![button(false)], mods);
+        }
+
+        fn drag(&mut self, from: Pos2, to: Pos2, mods: Modifiers) {
+            let button = |pos, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: mods };
+            self.frame(vec![Event::PointerMoved(from)], mods);
+            self.frame(vec![button(from, true)], mods);
+            for i in 1..=4 {
+                self.frame(vec![Event::PointerMoved(from + (to - from) * (i as f32 / 4.0))], mods);
+            }
+            self.frame(vec![button(to, false)], mods);
+            self.frame(vec![], mods);
+        }
+
+        fn sel(&self) -> Option<R> {
+            self.app.ed.selection
+        }
+    }
+
+    fn cmd() -> Modifiers {
+        Modifiers::COMMAND
+    }
+    fn shift() -> Modifiers {
+        Modifiers::SHIFT
+    }
+    fn alt() -> Modifiers {
+        Modifiers::ALT
+    }
+    fn cmd_shift() -> Modifiers {
+        Modifiers { shift: true, ..Modifiers::COMMAND }
+    }
+    fn r(x0: f32, y0: f32, x1: f32, y1: f32) -> R {
+        R { x0, y0, x1, y1 }
+    }
+
+    #[test]
+    fn arrows_nudge_the_selection_and_shift_makes_it_ten_pixels() {
+        let mut t = Rig::new();
+        t.app.ed.selection = Some(r(50.0, 50.0, 110.0, 100.0));
+        t.key(Key::ArrowRight, NONE);
+        assert_eq!(t.sel(), Some(r(51.0, 50.0, 111.0, 100.0)));
+        t.key(Key::ArrowDown, shift());
+        assert_eq!(t.sel(), Some(r(51.0, 60.0, 111.0, 110.0)));
+        t.key(Key::ArrowLeft, NONE);
+        t.key(Key::ArrowUp, NONE);
+        assert_eq!(t.sel(), Some(r(50.0, 59.0, 110.0, 109.0)));
+    }
+
+    #[test]
+    fn command_arrows_resize_the_selection() {
+        let mut t = Rig::new();
+        t.app.ed.selection = Some(r(50.0, 50.0, 110.0, 100.0));
+        t.key(Key::ArrowRight, cmd());
+        assert_eq!(t.sel(), Some(r(50.0, 50.0, 111.0, 100.0)));
+        t.key(Key::ArrowDown, cmd_shift());
+        assert_eq!(t.sel(), Some(r(50.0, 50.0, 111.0, 110.0)));
+        t.key(Key::ArrowLeft, cmd_shift());
+        t.key(Key::ArrowUp, cmd());
+        assert_eq!(t.sel(), Some(r(50.0, 50.0, 101.0, 109.0)));
+    }
+
+    #[test]
+    fn arrows_still_move_a_selected_object_and_leave_the_selection_alone() {
+        let mut t = Rig::new();
+        t.app.ed.selection = Some(r(50.0, 50.0, 110.0, 100.0));
+        let d = t.app.doc.as_mut().unwrap();
+        d.objs.push(Obj { kind: Kind::Rect { r: r(10.0, 10.0, 30.0, 30.0), seed: 1 }, style: Style::default() });
+        t.app.ed.selected = Some(0);
+        t.key(Key::ArrowRight, shift());
+        assert_eq!(t.sel(), Some(r(50.0, 50.0, 110.0, 100.0)));
+        let Kind::Rect { r: moved, .. } = t.app.doc.as_ref().unwrap().objs[0].kind else { panic!() };
+        assert_eq!(moved, r(20.0, 10.0, 40.0, 30.0));
+    }
+
+    #[test]
+    fn brackets_grow_and_shrink_the_selection_and_no_longer_open_resize() {
+        let mut t = Rig::new();
+        t.app.ed.selection = Some(r(50.0, 50.0, 110.0, 100.0));
+        t.key(Key::CloseBracket, NONE);
+        assert_eq!(t.sel(), Some(r(49.0, 49.0, 111.0, 101.0)));
+        t.key(Key::OpenBracket, NONE);
+        t.key(Key::OpenBracket, NONE);
+        assert_eq!(t.sel(), Some(r(51.0, 51.0, 109.0, 99.0)));
+        t.key(Key::CloseBracket, shift());
+        assert_eq!(t.sel(), Some(r(41.0, 41.0, 119.0, 109.0)));
+        assert!(matches!(t.app.ed.popover, Popover::None), "Shift+] is not the Resize shortcut any more");
+        t.key(Key::OpenCurlyBracket, shift());
+        assert_eq!(t.sel(), Some(r(51.0, 51.0, 109.0, 99.0)));
+        t.key(Key::CloseCurlyBracket, NONE);
+        assert_eq!(t.sel(), Some(r(41.0, 41.0, 119.0, 109.0)));
+    }
+
+    #[test]
+    fn selection_keys_do_nothing_without_a_selection() {
+        let mut t = Rig::new();
+        let zoom = t.app.ed.zoom;
+        for (k, m) in [(Key::ArrowRight, NONE), (Key::CloseBracket, NONE), (Key::Q, NONE), (Key::W, NONE), (Key::Num2, cmd()), (Key::Enter, NONE)] {
+            t.key(k, m);
+        }
+        assert_eq!(t.sel(), None);
+        assert_eq!(t.app.ed.zoom, zoom);
+        assert!(t.app.doc.as_ref().unwrap().crop.is_none());
+        assert_eq!(t.app.ed.tool, Tool::Select);
+    }
+
+    #[test]
+    fn command_2_zooms_to_the_selection() {
+        let mut t = Rig::new();
+        let sel = r(100.0, 80.0, 220.0, 160.0);
+        t.app.ed.selection = Some(sel);
+        t.key(Key::Num2, cmd());
+        let canvas = (t.app.ed.canvas.width(), t.app.ed.canvas.height());
+        let (zoom, pan) = selection::zoom_to_rect(canvas, sel, PPP);
+        assert!((t.app.ed.zoom - zoom).abs() < 1e-4);
+        assert!((t.app.ed.pan.x - pan.0).abs() < 1e-3 && (t.app.ed.pan.y - pan.1).abs() < 1e-3);
+        assert!(!t.app.ed.fit);
+        let c = t.app.ed.canvas.center();
+        let mid = t.at(160.0, 120.0);
+        assert!((mid - c).length() < 0.01, "the selection is centred");
+        let s = t.app.ed.rect_screen(&sel);
+        assert!(t.app.ed.canvas.contains_rect(s), "the whole selection is visible");
+    }
+
+    #[test]
+    fn q_and_w_zoom_on_the_corners_of_the_selection() {
+        let mut t = Rig::new();
+        t.app.ed.selection = Some(r(100.0, 80.0, 220.0, 160.0));
+        t.key(Key::Q, NONE);
+        assert!((t.app.ed.zoom * PPP - selection::CORNER_ZOOM).abs() < 1e-3, "{}", t.app.ed.zoom);
+        assert!((t.at(100.0, 80.0) - t.app.ed.canvas.center()).length() < 0.01);
+        t.key(Key::W, NONE);
+        assert!((t.at(220.0, 160.0) - t.app.ed.canvas.center()).length() < 0.01);
+        assert_eq!(t.sel(), Some(r(100.0, 80.0, 220.0, 160.0)), "zooming leaves the selection");
+    }
+
+    #[test]
+    fn the_zoom_menu_actions_work_like_the_keys() {
+        let mut t = Rig::new();
+        t.app.ed.selection = Some(r(100.0, 80.0, 220.0, 160.0));
+        t.app.editor_action(Action::ZoomSelection);
+        let zoom = t.app.ed.zoom;
+        t.app.editor_action(Action::ZoomFit);
+        t.frame(vec![], NONE);
+        t.app.editor_action(Action::SelectionTopLeft);
+        assert!((t.at(100.0, 80.0) - t.app.ed.canvas.center()).length() < 0.01);
+        assert!(zoom > 0.0);
+        t.app.editor_action(Action::SelectionBottomRight);
+        assert!((t.at(220.0, 160.0) - t.app.ed.canvas.center()).length() < 0.01);
+    }
+
+    #[test]
+    fn a_smart_selects_the_content_and_b_blurs_and_enter_crops() {
+        let mut t = Rig::new();
+        t.app.ed.selection = Some(r(60.0, 40.0, 300.0, 250.0));
+        t.key(Key::A, NONE);
+        assert_eq!(t.sel(), Some(r(100.0, 80.0, 220.0, 160.0)));
+        assert_eq!(t.app.ed.tool, Tool::Select);
+        t.key(Key::B, NONE);
+        assert_eq!(t.sel(), None);
+        let d = t.app.doc.as_ref().unwrap();
+        assert!(matches!(d.objs.last().map(|o| &o.kind), Some(Kind::Blur { r: b, .. }) if *b == r(100.0, 80.0, 220.0, 160.0)));
+        t.app.ed.selection = Some(r(100.0, 80.0, 220.0, 160.0));
+        t.key(Key::Enter, NONE);
+        assert_eq!(t.app.doc.as_ref().unwrap().crop, Some(r(100.0, 80.0, 220.0, 160.0)));
+        assert_eq!(t.sel(), None);
+        assert_eq!(t.app.ed.tool, Tool::Select);
+    }
+
+    #[test]
+    fn a_and_b_are_still_tool_letters_without_a_selection() {
+        let mut t = Rig::new();
+        t.key(Key::A, NONE);
+        assert_eq!(t.app.ed.tool, Tool::Arrow);
+        t.key(Key::B, NONE);
+        assert_eq!(t.app.ed.tool, Tool::Blur);
+    }
+
+    #[test]
+    fn dragging_a_selection_with_shift_makes_it_square() {
+        let mut t = Rig::new();
+        let (a, b) = (t.at(30.0, 30.0), t.at(130.0, 70.0));
+        t.drag(a, b, shift());
+        let s = t.sel().expect("a selection");
+        assert!((s.w() - s.h()).abs() < 0.01, "{s:?}");
+        assert!((s.w() - 100.0).abs() < 1.5, "the longer side wins: {s:?}");
+    }
+
+    #[test]
+    fn holding_option_while_selecting_shows_the_snapped_selection() {
+        let mut t = Rig::new();
+        let (a, b) = (t.at(60.0, 40.0), t.at(300.0, 250.0));
+        t.drag(a, b, alt());
+        let s = t.sel().expect("a selection");
+        assert_eq!(s, r(100.0, 80.0, 220.0, 160.0));
+        t.drag(a, b, NONE);
+        let s = t.sel().expect("a selection");
+        assert!(s.w() > 200.0 && s.h() > 150.0, "without ⌥ it is the dragged area: {s:?}");
+    }
+
+    #[test]
+    fn command_click_selects_the_flat_area_under_the_pointer() {
+        let mut t = Rig::new();
+        let to = t.at(150.0, 100.0);
+        t.click(to, cmd());
+        assert_eq!(t.sel(), Some(r(100.0, 80.0, 220.0, 160.0)));
+        let to = t.at(10.0, 10.0);
+        t.click(to, cmd());
+        assert_eq!(t.sel(), Some(r(0.0, 0.0, 400.0, 300.0)));
+    }
+
+    #[test]
+    fn z_click_zooms_in_on_the_spot_and_z_drag_on_the_area() {
+        let mut t = Rig::new();
+        t.app.ed.zoom = 0.5;
+        t.app.ed.fit = false;
+        t.frame(vec![], NONE);
+        let before = t.app.ed.zoom;
+        t.hold(Key::Z);
+        let to = t.at(300.0, 200.0);
+        t.click(to, NONE);
+        t.release(Key::Z);
+        assert!((t.app.ed.zoom * PPP - zoom_key_target(before * PPP, true)).abs() < 1e-3, "one zoom-in step");
+        assert!((t.at(300.0, 200.0) - t.app.ed.canvas.center()).length() < 0.01, "the spot is centred");
+        assert!(t.app.doc.as_ref().unwrap().objs.is_empty() && t.sel().is_none(), "Z does not start a selection or a drawing");
+
+        let mut t = Rig::new();
+        t.hold(Key::Z);
+        let (a, b) = (t.at(100.0, 80.0), t.at(160.0, 120.0));
+        t.drag(a, b, NONE);
+        t.release(Key::Z);
+        let area = r(100.0, 80.0, 160.0, 120.0);
+        let canvas = (t.app.ed.canvas.width(), t.app.ed.canvas.height());
+        let (zoom, _) = selection::zoom_to_rect(canvas, area, PPP);
+        assert!((t.app.ed.zoom - zoom).abs() / zoom < 0.05, "the area fills the canvas: {} vs {zoom}", t.app.ed.zoom);
+        assert!(t.sel().is_none());
+    }
+
+    #[test]
+    fn freehand_keys_change_variability_and_smoothness() {
+        let mut t = Rig::new();
+        t.key(Key::D, NONE);
+        assert_eq!(t.app.ed.tool, Tool::Freehand);
+        t.key(Key::Enter, cmd());
+        assert_eq!(t.app.ed.style_for(Tool::Freehand).vary, 1);
+        t.key(Key::Enter, cmd());
+        t.key(Key::Enter, cmd());
+        assert_eq!(t.app.ed.style_for(Tool::Freehand).vary, 0, "wraps round");
+        t.key(Key::ArrowUp, alt());
+        t.key(Key::ArrowUp, alt());
+        t.key(Key::ArrowDown, alt());
+        assert_eq!(t.app.ed.style_for(Tool::Freehand).smooth, 1);
+        t.key(Key::ArrowDown, alt());
+        t.key(Key::ArrowDown, alt());
+        assert_eq!(t.app.ed.style_for(Tool::Freehand).smooth, 0);
+        assert_eq!(t.sel(), None, "⌥↑ is not a selection nudge");
+    }
+
+    #[test]
+    fn the_keys_change_the_selected_stroke_too() {
+        let mut t = Rig::new();
+        t.app.doc.as_mut().unwrap().objs.push(Obj { kind: Kind::Freehand { pts: vec![p(10.0, 10.0), p(20.0, 30.0), p(40.0, 20.0)] }, style: Style::default() });
+        t.app.ed.selected = Some(0);
+        t.key(Key::ArrowUp, alt());
+        t.key(Key::Enter, cmd());
+        let st = t.app.doc.as_ref().unwrap().objs[0].style;
+        assert_eq!((st.smooth, st.vary), (1, 1));
+        let Kind::Freehand { pts } = &t.app.doc.as_ref().unwrap().objs[0].kind else { panic!() };
+        assert_eq!(pts[0], p(10.0, 10.0), "the points are not moved by ⌥↑");
+    }
+
+    #[test]
+    fn highlighter_command_enter_switches_the_cap() {
+        let mut t = Rig::new();
+        t.key(Key::H, NONE);
+        assert!(!t.app.ed.style_for(Tool::Highlighter).round_cap);
+        t.key(Key::Enter, cmd());
+        assert!(t.app.ed.style_for(Tool::Highlighter).round_cap);
+        t.key(Key::Enter, cmd());
+        assert!(!t.app.ed.style_for(Tool::Highlighter).round_cap);
+    }
+
+    #[test]
+    fn spotlight_digits_set_the_darkness_and_other_tools_ignore_them() {
+        let mut t = Rig::new();
+        t.key(Key::Num5, NONE);
+        assert_eq!(t.app.ed.style_for(Tool::Spotlight).dim, SPOTLIGHT_DIM, "not in the spotlight tool");
+        t.key(Key::S, NONE);
+        assert_eq!(t.app.ed.tool, Tool::Spotlight);
+        t.key(Key::Num3, NONE);
+        assert_eq!(t.app.ed.style_for(Tool::Spotlight).dim, 0.3);
+        t.app.doc.as_mut().unwrap().objs.push(Obj { kind: Kind::Spotlight { r: r(10.0, 10.0, 90.0, 60.0) }, style: t.app.ed.style_for(Tool::Spotlight) });
+        t.key(Key::Num8, NONE);
+        assert_eq!(t.app.doc.as_ref().unwrap().objs[0].style.dim, 0.8);
+        t.key(Key::Num0, NONE);
+        t.key(Key::Num1, cmd());
+        assert_eq!(t.app.doc.as_ref().unwrap().objs[0].style.dim, 0.8, "0 and ⌘1 are not levels");
+    }
+
+    #[test]
+    fn a_click_with_freehand_draws_a_point() {
+        let mut t = Rig::new();
+        t.key(Key::D, NONE);
+        let to = t.at(150.0, 100.0);
+        t.click(to, NONE);
+        let d = t.app.doc.as_ref().unwrap();
+        assert_eq!(d.objs.len(), 1);
+        let Kind::Freehand { pts } = &d.objs[0].kind else { panic!("{:?}", d.objs.len()) };
+        assert_eq!(pts.len(), 1);
+        assert!((pts[0].x - 150.0).abs() < 0.6 && (pts[0].y - 100.0).abs() < 0.6);
+        assert!(hit(&d.objs[0], pts[0], 1.0, &t.app.fonts), "the point can be picked");
     }
 }

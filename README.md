@@ -101,6 +101,20 @@ In the editor:
 | `Del` | Delete the selected object, or erase the selected area |
 | `Esc` | Deselect, then copy and hide (copy on Esc is on by default) |
 | `Space` + drag | Move around the picture |
+| `Z` + click, `Z` + drag | Zoom in on a spot, or on the dragged area |
+| `Cmd+2`, `Q`, `W` | With a selection: zoom to it, to its top left corner, to its bottom right corner |
+| `Cmd` + click | Select the flat area under the pointer (a button, a bar, a background) |
+| `Shift` + drag | Make the selection (or crop frame) square; shapes and lines keep their square / 45 degree constraint |
+| `Opt` + drag | While selecting, preview the selection snapped to the content inside it |
+| `A` | With a selection (Select tool, no object picked): snap it to the content inside |
+| `B` | With a selection: blur it |
+| `Enter` | With a selection: crop to it |
+| `Left` `Right` `Up` `Down` | Move the selection (or the selected object) by 1 pixel, 10 with `Shift` |
+| `Cmd` + arrows | Resize the selection by 1 pixel (right and bottom edge), 10 with `Shift` |
+| `[` `]` | Shrink or grow the selection by 1 pixel on every side, 10 with `Shift` |
+| `Cmd+Enter` | Freehand: next stroke variability (off, light, strong). Highlighter: flat or round ends |
+| `Opt+Up`, `Opt+Down` | Freehand: smoother, rougher strokes |
+| `1` to `9` | Spotlight tool: how dark the surroundings are (10 to 90 percent) |
 
 Keyboard Shortcuts in the menu bar icon menu lists them in the app. `Cmd+,` opens Preferences from the editor.
 

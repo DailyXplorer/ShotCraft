@@ -179,6 +179,14 @@ pub const SPOTLIGHT_DIM: f32 = 0.214;
 pub const MAGNIFIER_ZOOM: f32 = 3.0;
 pub const MAGNIFIER_LENS: P = P { x: 2.2, y: -1.4 };
 pub const DARKEST_AREA: i32 = 20;
+/// Freehand: ⌥↑ / ⌥↓ change the smoothness (0 keeps the stroke as drawn), and every level runs
+/// two passes of a 1-2-1 filter over the points. ⌘Enter steps through the stroke variability:
+/// the line gets thinner where the pen moved fast, by 0, 45 or 80 percent at most.
+pub const FREEHAND_SMOOTH_MAX: u8 = 6;
+pub const FREEHAND_SMOOTH_PASSES: usize = 2;
+pub const FREEHAND_VARY: [f32; 3] = [0.0, 0.45, 0.8];
+pub const FREEHAND_VARY_SPEED: f32 = 14.0;
+pub const FREEHAND_VARY_MIN: f32 = 0.2;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Tool {
@@ -322,6 +330,14 @@ pub struct Style {
     pub shape: Shape,
     pub font: FontKind,
     pub blur: BlurMode,
+    /// Freehand smoothness, 0 to `FREEHAND_SMOOTH_MAX`.
+    pub smooth: u8,
+    /// Freehand stroke variability, an index into `FREEHAND_VARY`.
+    pub vary: u8,
+    /// Highlighter ends: round instead of flat.
+    pub round_cap: bool,
+    /// Spotlight: how dark the area around the lit part is.
+    pub dim: f32,
     /// Pixels per point of the capture: every size table is in points.
     pub scale: f32,
 }
@@ -337,12 +353,36 @@ impl Default for Style {
             shape: Shape::Rect,
             font: FontKind::Sans,
             blur: BlurMode::Blur,
+            smooth: 0,
+            vary: 0,
+            round_cap: false,
+            dim: SPOTLIGHT_DIM,
             scale: 1.0,
         }
     }
 }
 
 impl Style {
+    /// ⌥↑ / ⌥↓: freehand smoothness one level up or down.
+    pub fn smoother(mut self, up: bool) -> Style {
+        self.smooth = if up { (self.smooth + 1).min(FREEHAND_SMOOTH_MAX) } else { self.smooth.saturating_sub(1) };
+        self
+    }
+    /// ⌘Enter on a freehand stroke: the next stroke variability.
+    pub fn next_variability(mut self) -> Style {
+        self.vary = cycle(self.vary, FREEHAND_VARY.len() as u8);
+        self
+    }
+    /// ⌘Enter on a highlighter: the other cap style.
+    pub fn next_cap(mut self) -> Style {
+        self.round_cap = !self.round_cap;
+        self
+    }
+    /// Keys 1 to 9 on a spotlight: how dark everything around it is.
+    pub fn with_dim(mut self, digit: u8) -> Style {
+        self.dim = spotlight_dim(digit);
+        self
+    }
     pub fn width(&self) -> f32 {
         LINE_WIDTHS[self.size as usize] * self.scale
     }
@@ -405,6 +445,10 @@ impl R {
     pub fn expand(&self, m: f32) -> R {
         R { x0: self.x0 - m, y0: self.y0 - m, x1: self.x1 + m, y1: self.y1 + m }
     }
+    /// The box on whole pixels, as the keyboard edits it.
+    pub fn rounded(&self) -> R {
+        R { x0: self.x0.round(), y0: self.y0.round(), x1: self.x1.round(), y1: self.y1.round() }
+    }
     pub fn contains(&self, q: P) -> bool {
         q.x >= self.x0 && q.x <= self.x1 && q.y >= self.y0 && q.y <= self.y1
     }
@@ -417,6 +461,54 @@ impl R {
     pub fn clamp_to(&self, w: f32, h: f32) -> R {
         R { x0: self.x0.clamp(0.0, w), y0: self.y0.clamp(0.0, h), x1: self.x1.clamp(0.0, w), y1: self.y1.clamp(0.0, h) }
     }
+}
+
+/// Spotlight: key 1 to 9 sets how dark the surroundings are, from 10 to 90 percent.
+pub fn spotlight_dim(digit: u8) -> f32 {
+    digit.clamp(1, 9) as f32 / 10.0
+}
+
+/// Next level of a setting that ⌘Enter steps through, wrapping to the first.
+pub fn cycle(level: u8, levels: u8) -> u8 {
+    (level + 1) % levels.max(1)
+}
+
+/// Smoothed freehand points: `level` times two passes of a 1-2-1 filter, with both ends kept.
+pub fn freehand_smooth(pts: &[P], level: u8) -> Vec<P> {
+    let mut out = pts.to_vec();
+    if out.len() < 3 {
+        return out;
+    }
+    for _ in 0..level.min(FREEHAND_SMOOTH_MAX) as usize * FREEHAND_SMOOTH_PASSES {
+        let prev = out.clone();
+        for i in 1..prev.len() - 1 {
+            out[i] = p((prev[i - 1].x + 2.0 * prev[i].x + prev[i + 1].x) / 4.0, (prev[i - 1].y + 2.0 * prev[i].y + prev[i + 1].y) / 4.0);
+        }
+    }
+    out
+}
+
+/// Line width of each segment of a freehand stroke (one less than the points). Level 0 keeps
+/// `base`; above that a segment is thinner the longer it is (the pen moved faster there), and the
+/// widths are averaged with their neighbours so the line does not step.
+pub fn freehand_widths(pts: &[P], base: f32, level: u8, scale: f32) -> Vec<f32> {
+    let n = pts.len().saturating_sub(1);
+    let amount = FREEHAND_VARY.get(level as usize).copied().unwrap_or(0.0);
+    if n == 0 || amount == 0.0 {
+        return vec![base; n];
+    }
+    let raw: Vec<f32> = (0..n)
+        .map(|i| {
+            let fast = (pts[i].dist(pts[i + 1]) / (FREEHAND_VARY_SPEED * scale)).min(1.0);
+            base * (1.0 - amount * fast).max(FREEHAND_VARY_MIN)
+        })
+        .collect();
+    (0..n)
+        .map(|i| {
+            let (lo, hi) = (i.saturating_sub(2), (i + 2).min(n - 1));
+            raw[lo..=hi].iter().sum::<f32>() / (hi - lo + 1) as f32
+        })
+        .collect()
 }
 
 pub fn magnifier_lens(r: &R, lens: P) -> R {
@@ -712,6 +804,20 @@ impl Doc {
         self.version = next_version();
     }
 
+    /// Every spotlight shares one dark layer, so the darkness is set on all of them at once, as one
+    /// undo step. Returns whether there was a spotlight to change.
+    pub fn set_spotlight_dim(&mut self, dim: f32) -> bool {
+        let spots = |d: &Doc| d.objs.iter().any(|o| matches!(o.kind, Kind::Spotlight { .. }) && o.style.dim != dim);
+        if !spots(self) {
+            return false;
+        }
+        self.checkpoint();
+        for o in self.objs.iter_mut().filter(|o| matches!(o.kind, Kind::Spotlight { .. })) {
+            o.style.dim = dim;
+        }
+        true
+    }
+
     fn restore(&mut self, s: Snapshot) {
         self.base = s.base;
         self.objs = s.objs;
@@ -748,5 +854,100 @@ impl Doc {
 
     pub fn next_counter(&self) -> u32 {
         self.objs.iter().filter_map(|o| if let Kind::Counter { n, .. } = o.kind { Some(n) } else { None }).max().unwrap_or(0) + 1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn smoothness_steps_between_zero_and_the_maximum() {
+        let st = Style::default();
+        assert_eq!(st.smooth, 0);
+        assert_eq!(st.smoother(false).smooth, 0, "stops at zero");
+        let mut s = st;
+        for _ in 0..FREEHAND_SMOOTH_MAX + 3 {
+            s = s.smoother(true);
+        }
+        assert_eq!(s.smooth, FREEHAND_SMOOTH_MAX, "stops at the maximum");
+        assert_eq!(s.smoother(false).smooth, FREEHAND_SMOOTH_MAX - 1);
+    }
+
+    #[test]
+    fn variability_cycles_through_every_level_and_wraps() {
+        let mut s = Style::default();
+        let seen: Vec<u8> = (0..FREEHAND_VARY.len() + 1)
+            .map(|_| {
+                let v = s.vary;
+                s = s.next_variability();
+                v
+            })
+            .collect();
+        assert_eq!(seen, vec![0, 1, 2, 0]);
+    }
+
+    #[test]
+    fn highlighter_cap_toggles() {
+        let s = Style::default();
+        assert!(!s.round_cap);
+        assert!(s.next_cap().round_cap);
+        assert!(!s.next_cap().next_cap().round_cap);
+    }
+
+    #[test]
+    fn spotlight_keys_set_the_darkness_and_the_default_is_kept() {
+        assert_eq!(Style::default().dim, SPOTLIGHT_DIM);
+        assert_eq!(Style::default().with_dim(1).dim, 0.1);
+        assert_eq!(Style::default().with_dim(5).dim, 0.5);
+        assert_eq!(Style::default().with_dim(9).dim, 0.9);
+        assert_eq!(spotlight_dim(0), 0.1, "0 is not a level: clamped");
+        assert_eq!(spotlight_dim(200), 0.9);
+    }
+
+    #[test]
+    fn smoothing_keeps_the_ends_and_calms_a_shaky_line() {
+        let shaky: Vec<P> = (0..40).map(|i| p(i as f32 * 4.0, ((i * 7919 % 13) as f32 - 6.0) * 1.5)).collect();
+        let rough = |v: &[P]| v.windows(3).map(|w| (w[0].y - 2.0 * w[1].y + w[2].y).abs()).sum::<f32>();
+        assert_eq!(freehand_smooth(&shaky, 0), shaky);
+        let (l1, l3, l6) = (freehand_smooth(&shaky, 1), freehand_smooth(&shaky, 3), freehand_smooth(&shaky, 6));
+        assert!(rough(&shaky) > rough(&l1) && rough(&l1) > rough(&l3) && rough(&l3) > rough(&l6), "each level is calmer");
+        for out in [&l1, &l3, &l6] {
+            assert_eq!(out.len(), shaky.len());
+            assert_eq!((out[0], out[out.len() - 1]), (shaky[0], shaky[shaky.len() - 1]), "the ends stay");
+        }
+        assert_eq!(freehand_smooth(&shaky, 99).len(), shaky.len(), "levels past the maximum are clamped");
+        let two = vec![p(0.0, 0.0), p(5.0, 5.0)];
+        assert_eq!(freehand_smooth(&two, 4), two);
+    }
+
+    #[test]
+    fn variability_thins_fast_segments_only() {
+        let pts = vec![p(0.0, 0.0), p(1.0, 0.0), p(2.0, 0.0), p(3.0, 0.0), p(4.0, 0.0), p(60.0, 0.0), p(120.0, 0.0), p(180.0, 0.0), p(240.0, 0.0), p(300.0, 0.0)];
+        assert_eq!(freehand_widths(&pts, 10.0, 0, 1.0), vec![10.0; 9]);
+        let w = freehand_widths(&pts, 10.0, 2, 1.0);
+        assert_eq!(w.len(), 9);
+        assert!(w[0] > 8.0, "slow start stays thick: {}", w[0]);
+        assert!(w[7] < 4.0, "fast end is thin: {}", w[7]);
+        assert!(w.iter().all(|v| *v >= 10.0 * FREEHAND_VARY_MIN - 1e-4 && *v <= 10.0));
+        let mild = freehand_widths(&pts, 10.0, 1, 1.0);
+        assert!(mild[7] > w[7], "level 1 thins less than level 2");
+        assert!(freehand_widths(&[p(0.0, 0.0)], 10.0, 2, 1.0).is_empty());
+    }
+
+    #[test]
+    fn spotlight_darkness_is_set_on_every_spotlight_in_one_undo_step() {
+        let img = Image { w: 4, h: 4, px: std::sync::Arc::new(vec![0; 64]) };
+        let mut d = Doc::new(img, 1.0);
+        let r = R { x0: 0.0, y0: 0.0, x1: 2.0, y1: 2.0 };
+        d.objs.push(Obj { kind: Kind::Spotlight { r }, style: Style::default() });
+        d.objs.push(Obj { kind: Kind::Line { a: p(0.0, 0.0), b: p(3.0, 3.0) }, style: Style::default() });
+        d.objs.push(Obj { kind: Kind::Spotlight { r }, style: Style::default() });
+        assert!(d.set_spotlight_dim(0.6));
+        assert_eq!([d.objs[0].style.dim, d.objs[1].style.dim, d.objs[2].style.dim], [0.6, SPOTLIGHT_DIM, 0.6]);
+        assert!(!d.set_spotlight_dim(0.6), "nothing changes the second time, so no undo step");
+        assert_eq!(d.undo.len(), 1);
+        d.undo();
+        assert_eq!(d.objs[0].style.dim, SPOTLIGHT_DIM);
     }
 }
