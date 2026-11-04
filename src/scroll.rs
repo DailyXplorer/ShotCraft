@@ -58,7 +58,23 @@ impl GrabRect {
 pub struct Progress {
     pub height: u32,
     pub frames: u32,
+    pub lost: u32,
     pub note: &'static str,
+    /// When Esc was pressed once; a second press within `ESC_WINDOW` cancels.
+    esc_at: Option<Instant>,
+}
+
+/// Esc can be a key meant for the page being scrolled, so a capture with something in it needs two presses.
+const ESC_WINDOW: Duration = Duration::from_secs(2);
+
+/// Esc: cancels at once when nothing is captured yet, otherwise asks for a second press.
+fn press_escape(stop: &AtomicU8, progress: &Mutex<Progress>) {
+    let mut p = progress.lock().unwrap();
+    if p.frames <= 1 || p.esc_at.is_some_and(|t| t.elapsed() < ESC_WINDOW) {
+        stop.store(CANCEL, Ordering::SeqCst);
+    } else {
+        p.esc_at = Some(Instant::now());
+    }
 }
 
 /// What a finished capture hands to the app.
@@ -68,6 +84,8 @@ pub struct Outcome {
     pub scale: f32,
     /// Frames that counted. 1 means the page never moved.
     pub frames: u32,
+    /// Frames dropped because the offset could not be found.
+    pub lost: u32,
     pub capped: bool,
 }
 
@@ -83,7 +101,8 @@ impl Session {
         let progress = Arc::new(Mutex::new(Progress { note: "Scroll the page", ..Progress::default() }));
         let (s, p) = (stop.clone(), progress.clone());
         std::thread::spawn(move || {
-            let res = run(rect, &s, &p, &ctx);
+            // A panic must not leave the control window up for ever: report it like any other error.
+            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(rect, &s, &p, &ctx))).unwrap_or_else(|_| Err("The scrolling capture stopped unexpectedly.".to_string()));
             queue.lock().unwrap().push(Action::ScrollingFinished(res));
             ctx.request_repaint();
         });
@@ -95,9 +114,9 @@ impl Session {
         let _ = self.stop.compare_exchange(RUNNING, DONE, Ordering::SeqCst, Ordering::SeqCst);
     }
 
-    /// Ends the capture and drops everything.
-    pub fn cancel(&self) {
-        self.stop.store(CANCEL, Ordering::SeqCst);
+    /// The Esc key.
+    pub fn press_escape(&self) {
+        press_escape(&self.stop, &self.progress);
     }
 
     /// Draws the control window's content. `body` runs on the deferred viewport, so it only takes shared state.
@@ -110,12 +129,17 @@ impl Session {
 fn control_ui(ui: &mut egui::Ui, stop: &AtomicU8, progress: &Mutex<Progress>) {
     let (height, frames, note) = {
         let p = progress.lock().unwrap();
-        (p.height, p.frames, p.note)
+        let asked = p.esc_at.is_some_and(|t| t.elapsed() < ESC_WINDOW);
+        (p.height, p.frames, if asked { "Press Esc again to cancel" } else { p.note })
     };
     let rect = ui.max_rect();
     ui.painter().rect_filled(rect, 10.0, Color32::from_gray(30));
     let mut done = false;
-    let mut cancel = ui.input(|i| i.key_pressed(egui::Key::Escape));
+    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        press_escape(stop, progress);
+        ui.ctx().request_repaint_after(ESC_WINDOW);
+    }
+    let mut cancel = false;
     ui.scope_builder(egui::UiBuilder::new().max_rect(rect.shrink(12.0)), |ui| {
         ui.visuals_mut().override_text_color = Some(Color32::WHITE);
         ui.label(egui::RichText::new(format!("Scrolling capture · {height} px")).strong());
@@ -123,7 +147,7 @@ fn control_ui(ui: &mut egui::Ui, stop: &AtomicU8, progress: &Mutex<Progress>) {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             done = ui.button("Done").clicked();
-            cancel |= ui.button("Cancel (Esc)").clicked();
+            cancel |= ui.button("Cancel").clicked();
         });
     });
     if cancel {
@@ -138,8 +162,7 @@ fn control_ui(ui: &mut egui::Ui, stop: &AtomicU8, progress: &Mutex<Progress>) {
 
 fn run(rect: GrabRect, stop: &AtomicU8, progress: &Mutex<Progress>, ctx: &Context) -> Result<Option<Outcome>, String> {
     let mut stitcher = Stitcher::new();
-    let mut failures = 0;
-    let mut last_error = String::new();
+    let (mut failures, mut lost) = (0, 0);
     loop {
         let started = Instant::now();
         // Read before grabbing: a Done pressed now still gets one last frame.
@@ -154,24 +177,30 @@ fn run(rect: GrabRect, stop: &AtomicU8, progress: &Mutex<Progress>, ctx: &Contex
                     Push::First | Push::Unchanged => "Scroll the page",
                     Push::Revisited { .. } if stitcher.above_start() => "Above the start: not captured",
                     Push::Appended { .. } | Push::Revisited { .. } => "Capturing",
-                    Push::Lost => "Lost track: scroll back a little, slower",
-                    Push::SizeMismatch => "The area changed size",
+                    Push::Lost => {
+                        lost += 1;
+                        "Lost track: scroll back a little, slower"
+                    }
+                    Push::SizeMismatch => {
+                        lost += 1;
+                        "The area changed size"
+                    }
                     Push::Capped => "Height limit reached",
                 };
                 let mut p = progress.lock().unwrap();
                 p.height = stitcher.height();
                 p.frames = stitcher.frames_used();
+                p.lost = lost;
                 p.note = note;
             }
             Err(e) => {
                 failures += 1;
-                last_error = e;
                 if failures >= MAX_FAILURES {
                     // Keep what was stitched so far; only report an error when there is nothing.
-                    if stitcher.frames_used() > 1 {
+                    if stitcher.frames_used() >= 1 {
                         break;
                     }
-                    return Err(last_error);
+                    return Err(e);
                 }
             }
         }
@@ -184,24 +213,24 @@ fn run(rect: GrabRect, stop: &AtomicU8, progress: &Mutex<Progress>, ctx: &Contex
             std::thread::sleep(Duration::from_millis(20));
         }
     }
-    let _ = last_error;
     let (frames, capped) = (stitcher.frames_used(), stitcher.is_capped());
     let img = stitcher.finish().map_err(|_| "No image was captured.".to_string())?;
     let (w, h) = img.dimensions();
     let scale = (w as f32 / rect.w as f32).max(1.0);
-    Ok(Some(Outcome { img: Image { w, h, px: Arc::new(img.into_raw()) }, scale, frames, capped }))
+    Ok(Some(Outcome { img: Image { w, h, px: Arc::new(img.into_raw()) }, scale, frames, lost, capped }))
 }
 
 /// One look at the area, as pixels.
 fn grab(rect: &GrabRect) -> Result<RgbaImage, String> {
     let path = system::temp_png("scroll");
-    Command::new("/usr/sbin/screencapture")
+    let _ = std::fs::remove_file(&path);
+    let status = Command::new("/usr/sbin/screencapture")
         .arg("-x")
         .arg(format!("-R{},{},{},{}", rect.x, rect.y, rect.w, rect.h))
         .arg(&path)
         .status()
         .map_err(|e| format!("Can't take a screenshot: {e}"))?;
-    if !path.exists() {
+    if !status.success() || !path.exists() {
         return Err("Can't take a screenshot. ShotCraft needs the Screen Recording permission: System Settings → Privacy & Security → Screen Recording.".into());
     }
     let frame = image::open(&path).map_err(|e| format!("Can't read the captured frame: {e}"));

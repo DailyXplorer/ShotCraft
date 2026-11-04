@@ -67,6 +67,8 @@ pub enum StitchError {
 struct Sig {
     blocks: usize,
     rows: Vec<u8>,
+    /// Per row: does it help to tell shifts apart (see `informative`)?
+    inf: Vec<bool>,
 }
 
 impl Sig {
@@ -83,7 +85,9 @@ impl Sig {
                 rows[y * blocks + b] = (sum / (x1 - x0) as u32) as u8;
             }
         }
-        Sig { blocks, rows }
+        let mut sig = Sig { blocks, rows, inf: vec![] };
+        sig.inf = (0..h).map(|y| sig.informative(y)).collect();
+        sig
     }
 
     fn row(&self, y: usize) -> &[u8] {
@@ -128,24 +132,21 @@ fn estimate(prev: &Sig, cur: &Sig, top: usize, bot: usize) -> Estimate {
     let min_overlap = (body / 8).max(24).min(body - 1);
     let dmax = (body - min_overlap) as i32;
     let step = (body / 160).max(1);
-    // Rows that carry information, counted per range: an overlap of blank rows matches anything and
-    // proves nothing, so shifts with too few of them are not candidates.
-    let mut informative = vec![0usize; cur.rows.len() / blocks + 1];
-    for y in 0..informative.len() - 1 {
-        informative[y + 1] = informative[y] + cur.informative(y) as usize;
-    }
+    // An overlap of blank rows matches anything and proves nothing: only rows that carry information
+    // in both frames count as evidence, and a shift needs enough of them to be a candidate.
     let mut costs = Vec::with_capacity(2 * dmax as usize + 1);
     for d in -dmax..=dmax {
         let lo = top + (-d).max(0) as usize;
         let hi = bot - d.max(0) as usize;
-        let (mut sum, mut n) = (0u64, 0u64);
+        let (mut sum, mut n, mut evidence) = (0u64, 0u64, 0usize);
         let mut y = lo;
         while y < hi {
-            sum += cur.diff(y, prev, (y as i32 + d) as usize) as u64;
+            let py = (y as i32 + d) as usize;
+            sum += cur.diff(y, prev, py) as u64;
+            evidence += (cur.inf[y] && prev.inf[py]) as usize;
             n += 1;
             y += step;
         }
-        let evidence = informative[hi] - informative[lo];
         costs.push(if evidence >= MIN_INFORMATIVE_ROWS { sum as f32 / (n.max(1) * blocks as u64) as f32 } else { f32::MAX });
     }
     let at = |i: usize| i as i32 - dmax;
@@ -167,8 +168,10 @@ fn estimate(prev: &Sig, cur: &Sig, top: usize, bot: usize) -> Estimate {
     let lo = top + (-d).max(0) as usize;
     let hi = bot - d.max(0) as usize;
     let rows = hi - lo;
+    let both = |y: usize| cur.inf[y] && prev.inf[(y as i32 + d) as usize];
     let matched = (lo..hi).filter(|&y| cur.same_row(y, prev, (y as i32 + d) as usize)).count();
-    if (matched as f32) < MIN_MATCHED * rows as f32 {
+    let (matched_inf, total_inf) = (lo..hi).filter(|&y| both(y)).fold((0, 0), |(m, t), y| (m + cur.same_row(y, prev, (y as i32 + d) as usize) as usize, t + 1));
+    if (matched as f32) < MIN_MATCHED * rows as f32 || (matched_inf as f32) < MIN_MATCHED * total_inf as f32 {
         return Estimate::Lost;
     }
     if d == 0 {
@@ -285,6 +288,10 @@ impl Stitcher {
         let cap = h * MAX_BAND_PERCENT / 100;
         let header = (0..cap).take_while(|&y| first.same_row(y, &sig, y)).count();
         let footer = (0..cap).take_while(|&i| first.same_row(h - 1 - i, &sig, h - 1 - i)).count();
+        // A fixed bar ends in an edge. Blank rows that merely look alike in both frames (page margins)
+        // continue past the band, so they are not a bar.
+        let header = if header > 0 && first.same_row(header - 1, first, header) { 0 } else { header };
+        let footer = if footer > 0 && first.same_row(h - footer, first, h - footer - 1) { 0 } else { footer };
         match estimate(first, &sig, header, h - footer) {
             Estimate::Same => Push::Unchanged,
             Estimate::Lost => Push::Lost,
@@ -298,7 +305,7 @@ impl Stitcher {
                 self.out_rows = (h - footer) as u32;
                 self.first = vec![];
                 self.pos = 0;
-                self.prev_sig = Some(Sig { blocks: first.blocks, rows: first.rows.clone() });
+                self.prev_sig = Some(Sig { blocks: first.blocks, rows: first.rows.clone(), inf: first.inf.clone() });
                 self.apply_offset(frame, sig, d)
             }
         }
@@ -571,6 +578,29 @@ mod tests {
         assert_eq!(out.dimensions(), expected.dimensions());
         assert!(out == expected, "stitched image differs from the page with one header and one footer");
         export_pngs("stitch-fixed-header-footer", &frames[..4], &out);
+    }
+
+    #[test]
+    fn blank_page_margins_are_not_taken_for_a_fixed_header() {
+        let mut page = RgbaImage::from_pixel(W, 1700, Rgba([250, 250, 247, 255]));
+        paste(&mut page, &text_page(W, 1450, 14), 250);
+        let ys = [0, 120, 240, 360, 480, 600, 720];
+        let mut s = Stitcher::new();
+        let pushes = feed(&mut s, &page, &ys, FRAME_H);
+        assert!(pushes[1..].iter().all(|p| matches!(p, Push::Appended { rows: 120, .. })), "{pushes:?}");
+        assert_eq!(s.finish().unwrap(), crop(&page, 0, 720 + FRAME_H));
+    }
+
+    #[test]
+    fn a_blank_first_frame_gives_no_anchor() {
+        let mut page = RgbaImage::from_pixel(W, 1200, Rgba([250, 250, 247, 255]));
+        paste(&mut page, &text_page(W, 900, 15), 300);
+        let mut s = Stitcher::new();
+        let pushes = feed(&mut s, &page, &[0, 20, 250], FRAME_H);
+        // Frame 3 shows a few text rows against a blank reference: not enough to place it.
+        assert_eq!(pushes[0], Push::First);
+        assert!(pushes[2..].iter().all(|p| matches!(p, Push::Lost)), "{pushes:?}");
+        assert_eq!(s.height(), FRAME_H);
     }
 
     #[test]

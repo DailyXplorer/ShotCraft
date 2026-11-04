@@ -357,11 +357,13 @@ impl App {
         self.grab_escape(false);
         match res {
             Ok(Some(o)) => {
-                let (frames, capped) = (o.frames, o.capped);
+                let (frames, lost, capped) = (o.frames, o.lost, o.capped);
                 let (img, scale) = (o.img, o.scale);
                 self.handle(Action::Captured(Ok(Some(Captured { img, scale, area: None, mode: CaptureMode::Area }))));
                 if capped {
                     self.say(format!("Stopped at the height limit of {} px", stitch::MAX_HEIGHT));
+                } else if frames <= 1 && lost > 0 {
+                    self.say("Lost track while scrolling, so this is only the first view. Scroll slower and try again");
                 } else if frames <= 1 {
                     self.say("The page didn't scroll, so this is a regular screenshot");
                 }
@@ -563,7 +565,7 @@ impl App {
             Action::ScrollingCapture => self.start_scrolling(),
             Action::ScrollingCancel => {
                 if let Some(s) = &self.scroll {
-                    s.cancel();
+                    s.press_escape();
                 }
             }
             Action::ScrollingArea(res) => self.scrolling_area(res),
