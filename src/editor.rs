@@ -1645,7 +1645,12 @@ impl App {
                         if let Some(i) = self.ed.selected {
                             let free = self.doc.as_ref().map_or(true, |d| matches!(d.objs[i].kind, Kind::Freehand { .. } | Kind::Counter { .. } | Kind::Text { .. }));
                             let rect = self.doc.as_ref().map_or(false, |d| handles(&d.objs[i]).len() == 4);
-                            let q = if shift || free { q } else { self.snap_pointer(q, i, rect.then_some(start)) };
+                            let q = if shift || free {
+                                self.ed.snap_guides.clear();
+                                q
+                            } else {
+                                self.snap_pointer(q, i, rect.then_some(start))
+                            };
                             if let Some(d) = &mut self.doc {
                                 set_end(&mut d.objs[i].kind, start, q, shift);
                                 d.touch();
@@ -1653,12 +1658,17 @@ impl App {
                         }
                     }
                     Drag::Move { idx, last } => {
-                        self.snap_move_object(idx, q, last);
+                        self.snap_move_object(idx, q, last, !shift);
                         self.ed.drag = Drag::Move { idx, last: q };
                     }
                     Drag::Handle { idx, h, anchor } => {
                         let rect = matches!(h, Handle::Corner(_));
-                        let q = if shift { q } else { self.snap_pointer(q, idx, rect.then_some(anchor)) };
+                        let q = if shift {
+                            self.ed.snap_guides.clear();
+                            q
+                        } else {
+                            self.snap_pointer(q, idx, rect.then_some(anchor))
+                        };
                         if let Some(d) = &mut self.doc {
                             match (&mut d.objs[idx].kind, h) {
                                 (Kind::Arrow { a, .. } | Kind::Line { a, .. } | Kind::Ruler { a, .. } | Kind::Highlighter { a, .. }, Handle::A) => *a = q,
@@ -1886,7 +1896,7 @@ impl App {
     /// Drags the annotation at `idx` as the pointer would, for the headless pictures of the guides.
     #[cfg(test)]
     pub(crate) fn preview_snap_drag(&mut self, idx: usize, from: P, to: P) {
-        self.snap_move_object(idx, to, from);
+        self.snap_move_object(idx, to, from, true);
     }
 
     fn snap_opts(&self) -> snap::Opts {
@@ -1902,8 +1912,8 @@ impl App {
     }
 
     /// Moves the annotation by the pointer's step and lets its edges and centres fall onto the others.
-    fn snap_move_object(&mut self, idx: usize, q: P, last: P) {
-        let opts = self.snap_opts();
+    fn snap_move_object(&mut self, idx: usize, q: P, last: P, snapping: bool) {
+        let opts = if snapping { self.snap_opts() } else { snap::Opts::default() };
         let tol = snap::SNAP_POINTS / self.ed.zoom;
         let others = if opts.any() { self.snap_targets(idx) } else { vec![] };
         let (cx, cy) = self.ed.snap_carry;
@@ -2535,6 +2545,17 @@ mod key_tests {
     }
 
     #[test]
+    fn shift_moves_an_annotation_without_snapping() {
+        let mut t = Rig::new();
+        two_boxes(&mut t);
+        t.app.settings.snap_objects = true;
+        let (a, b) = (t.at(35.0, 10.0), t.at(35.0 + 192.0, 10.0 + 87.0));
+        t.drag(a, b, shift());
+        let m = rect_of(&t, 0);
+        assert!((m.x0 - 202.0).abs() < 0.01 && (m.y0 - 97.0).abs() < 0.01, "{m:?}");
+    }
+
+    #[test]
     fn snapping_can_be_switched_off() {
         let mut t = Rig::new();
         two_boxes(&mut t);
@@ -2553,10 +2574,10 @@ mod key_tests {
         two_boxes(&mut t);
         t.app.settings.snap_objects = true;
         let (q0, q1, q2) = (p(35.0, 10.0), p(35.0 + 192.0, 10.0 + 87.0), p(35.0 + 222.0, 10.0 + 87.0));
-        t.app.snap_move_object(0, q1, q0);
+        t.app.snap_move_object(0, q1, q0, true);
         let m = rect_of(&t, 0);
         assert_eq!((m.x0, m.y0), (200.0, 100.0));
-        t.app.snap_move_object(0, q2, q1);
+        t.app.snap_move_object(0, q2, q1, true);
         let m = rect_of(&t, 0);
         assert_eq!((m.x0, m.y0), (232.0, 100.0), "x follows the pointer, y is still held by the other box: {m:?}");
         assert_eq!(t.app.ed.snap_carry.0, 0.0, "no leftover pull on x");
