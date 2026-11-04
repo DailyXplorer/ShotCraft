@@ -97,6 +97,8 @@ pub struct Settings {
     pub hide_menubar_icon: bool,
     pub hotkeys: Vec<(HotkeyAction, String)>,
     pub last_area: Option<[f32; 4]>,
+    /// The backdrop configuration used last; new backdrops start from it.
+    pub backdrop: Option<crate::model::Backdrop>,
 }
 
 impl Default for Settings {
@@ -131,6 +133,7 @@ impl Default for Settings {
                 (HotkeyAction::Ocr, "control+alt+super+KeyO".into()),
             ],
             last_area: None,
+            backdrop: None,
         }
     }
 }

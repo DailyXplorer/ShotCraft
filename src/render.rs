@@ -1333,10 +1333,16 @@ fn mesh_pixmap(w: u32, h: u32, stops: &[(f32, Rgba)], seed: u64) -> Pixmap {
     out
 }
 
+/// The flat or gradient paint behind the screenshot (no picture).
 pub fn gradient_pixmap(w: u32, h: u32, bd: &Backdrop) -> Pixmap {
-    let mut stops = gradient_stops(bd.gradient);
+    let mut stops = bd.stops();
     if bd.reverse {
         stops = stops.into_iter().rev().map(|(s, c)| (1.0 - s, c)).collect();
+    }
+    if bd.fill == BackdropFill::Solid {
+        let mut pm = Pixmap::new(w.max(1), h.max(1)).unwrap();
+        pm.fill(color([bd.solid[0], bd.solid[1], bd.solid[2], 255], 1.0));
+        return pm;
     }
     if bd.kind == GradientKind::Mesh {
         return mesh_pixmap(w, h, &stops, MESH_SEED_BASE + bd.gradient as u64);
@@ -1365,8 +1371,59 @@ pub fn gradient_pixmap(w: u32, h: u32, bd: &Backdrop) -> Pixmap {
     pm
 }
 
-pub fn apply_backdrop(content: &Pixmap, bd: &Backdrop) -> Pixmap {
-    let (cw, ch) = (content.width() as f32, content.height() as f32);
+/// A picture scaled to cover `w` × `h` (cropped around its centre), then blurred by `blur_radius`
+/// (a Gaussian sigma, in 1000-pixel units so a preview and an export look alike).
+pub fn image_backdrop_pixmap(w: u32, h: u32, img: &Image, blur_radius: f32) -> Pixmap {
+    let (w, h) = (w.max(1), h.max(1));
+    let src = image::RgbaImage::from_raw(img.w, img.h, img.px.to_vec()).unwrap_or_else(|| image::RgbaImage::new(1, 1));
+    let up = (w as f32 / img.w.max(1) as f32).max(h as f32 / img.h.max(1) as f32) > 1.0;
+    let filter = if up { image::imageops::FilterType::CatmullRom } else { image::imageops::FilterType::Triangle };
+    let dynimg = image::DynamicImage::ImageRgba8(src).resize_to_fill(w, h, filter).to_rgba8();
+    let mut pm = to_pixmap(&Image { w, h, px: Arc::new(dynimg.into_raw()) });
+    let sigma = blur_radius * (w.max(h) as f32 / 1000.0).max(1.0);
+    if sigma >= 0.5 {
+        box_blur(&mut pm, &R { x0: 0.0, y0: 0.0, x1: w as f32, y1: h as f32 }, sigma.round().max(1.0) as i32, 3);
+    }
+    pm
+}
+
+/// The part of `pm` left after trimming the border rows and columns that are all the colour of the
+/// top-left pixel (a see-through margin, a flat page edge).
+pub fn autocrop_rect(pm: &Pixmap) -> R {
+    let (w, h) = (pm.width() as usize, pm.height() as usize);
+    let d = pm.data();
+    let reference: [u8; 4] = [d[0], d[1], d[2], d[3]];
+    let same = |x: usize, y: usize| {
+        let i = (y * w + x) * 4;
+        (0..4).all(|c| (d[i + c] as i32 - reference[c] as i32).abs() <= 6)
+    };
+    let row_empty = |y: usize| (0..w).all(|x| same(x, y));
+    let col_empty = |x: usize, y0: usize, y1: usize| (y0..y1).all(|y| same(x, y));
+    let mut top = 0;
+    while top < h && row_empty(top) {
+        top += 1;
+    }
+    if top == h {
+        return R { x0: 0.0, y0: 0.0, x1: w as f32, y1: h as f32 };
+    }
+    let mut bottom = h;
+    while bottom > top + 1 && row_empty(bottom - 1) {
+        bottom -= 1;
+    }
+    let mut left = 0;
+    while left + 1 < w && col_empty(left, top, bottom) {
+        left += 1;
+    }
+    let mut right = w;
+    while right > left + 1 && col_empty(right - 1, top, bottom) {
+        right -= 1;
+    }
+    R { x0: left as f32, y0: top as f32, x1: right as f32, y1: bottom as f32 }
+}
+
+/// The output size of a backdrop around a picture of `cw` × `ch`, and where the framed picture
+/// (inset included, `iw` × `ih`) sits in it.
+pub fn backdrop_layout(cw: f32, ch: f32, bd: &Backdrop) -> (u32, u32, f32, f32, f32, f32) {
     let inset = bd.inset_px();
     let (iw, ih) = (cw + inset * 2.0, ch + inset * 2.0);
     let pad = bd.padding_px();
@@ -1379,11 +1436,31 @@ pub fn apply_backdrop(content: &Pixmap, bd: &Backdrop) -> Pixmap {
         }
     }
     let (w, h) = (w.round() as u32, h.round() as u32);
+    // The picture may be moved off-centre, but not out of the backdrop.
+    let max_x = ((w as f32 - iw) / 2.0).max(0.0);
+    let max_y = ((h as f32 - ih) / 2.0).max(0.0);
+    let ox = (((w as f32 - iw) / 2.0) + bd.offset[0].clamp(-max_x, max_x)).round();
+    let oy = (((h as f32 - ih) / 2.0) + bd.offset[1].clamp(-max_y, max_y)).round();
+    (w, h, ox, oy, iw, ih)
+}
+
+pub fn apply_backdrop(content: &Pixmap, bd: &Backdrop) -> Pixmap {
+    let trimmed;
+    let content = if bd.autocrop {
+        trimmed = crop_pixmap(content, &autocrop_rect(content));
+        &trimmed
+    } else {
+        content
+    };
+    let (cw, ch) = (content.width() as f32, content.height() as f32);
+    let inset = bd.inset_px();
+    let (w, h, ox, oy, iw, ih) = backdrop_layout(cw, ch, bd);
     let tf = Transform::identity();
     let pp = tiny_skia::PixmapPaint::default();
-    let mut pm = gradient_pixmap(w, h, bd);
-    let ox = ((w as f32 - iw) / 2.0).round();
-    let oy = ((h as f32 - ih) / 2.0).round();
+    let mut pm = match &bd.image {
+        Some(i) => image_backdrop_pixmap(w, h, &i.img, bd.blur_radius()),
+        None => gradient_pixmap(w, h, bd),
+    };
     let frame = R { x0: ox, y0: oy, x1: ox + iw, y1: oy + ih };
     let shadow = bd.shadow_amount();
     let (inner_r, outer_r) = (bd.inner_radius_px(), bd.outer_radius_px());
@@ -1565,6 +1642,128 @@ mod tests {
             }
         }
         Image { w, h, px: Arc::new(px) }
+    }
+
+    fn flat(w: u32, h: u32, c: [u8; 4]) -> Image {
+        Image { w, h, px: Arc::new((0..w * h).flat_map(|_| c).collect()) }
+    }
+
+    fn px(pm: &Pixmap, x: u32, y: u32) -> [u8; 4] {
+        let i = ((y * pm.width() + x) * 4) as usize;
+        [pm.data()[i], pm.data()[i + 1], pm.data()[i + 2], pm.data()[i + 3]]
+    }
+
+    #[test]
+    fn autocrop_trims_a_see_through_or_flat_border() {
+        let mut pm = Pixmap::new(100, 60).unwrap();
+        // Transparent margin around an opaque block at x 20..70, y 10..40.
+        for y in 10..40 {
+            for x in 20..70 {
+                let i = ((y * 100 + x) * 4) as usize;
+                pm.data_mut()[i..i + 4].copy_from_slice(&[10, 20, 30, 255]);
+            }
+        }
+        let r = autocrop_rect(&pm);
+        assert_eq!((r.x0, r.y0, r.x1, r.y1), (20.0, 10.0, 70.0, 40.0));
+        // A flat page-coloured border goes too.
+        let mut pm = Pixmap::new(30, 30).unwrap();
+        pm.fill(tiny_skia::Color::from_rgba8(250, 250, 250, 255));
+        let i = ((12 * 30 + 5) * 4) as usize;
+        pm.data_mut()[i..i + 4].copy_from_slice(&[0, 0, 0, 255]);
+        let r = autocrop_rect(&pm);
+        assert_eq!((r.x0, r.y0, r.x1, r.y1), (5.0, 12.0, 6.0, 13.0));
+        // Nothing but border: left alone.
+        let mut pm = Pixmap::new(8, 8).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        let r = autocrop_rect(&pm);
+        assert_eq!((r.w(), r.h()), (8.0, 8.0));
+    }
+
+    #[test]
+    fn autocrop_changes_the_backdrop_size() {
+        let mut pm = Pixmap::new(200, 100).unwrap();
+        let i = ((50 * 200 + 100) * 4) as usize;
+        pm.data_mut()[i..i + 4].copy_from_slice(&[0, 0, 0, 255]);
+        let mut bd = Backdrop::default();
+        bd.padding = 0.0;
+        bd.inset = 0.0;
+        bd.outer_radius = 0.0;
+        bd.inner_radius = 0.0;
+        assert_eq!((apply_backdrop(&pm, &bd).width(), apply_backdrop(&pm, &bd).height()), (200, 100));
+        bd.autocrop = true;
+        let out = apply_backdrop(&pm, &bd);
+        assert_eq!((out.width(), out.height()), (1, 1));
+    }
+
+    #[test]
+    fn picture_backdrop_covers_the_canvas_and_blur_smooths_it() {
+        // Left half red, right half blue, wider than the canvas: cover crops the sides.
+        let mut img = flat(200, 100, [255, 0, 0, 255]);
+        {
+            let px = Arc::make_mut(&mut img.px);
+            for y in 0..100 {
+                for x in 100..200 {
+                    let i = (y * 200 + x) * 4;
+                    px[i..i + 4].copy_from_slice(&[0, 0, 255, 255]);
+                }
+            }
+        }
+        let sharp = image_backdrop_pixmap(100, 100, &img, 0.0);
+        assert_eq!((sharp.width(), sharp.height()), (100, 100));
+        assert!(px(&sharp, 5, 50)[0] > 240 && px(&sharp, 94, 50)[2] > 240);
+        assert!(px(&sharp, 5, 0)[3] == 255 && px(&sharp, 99, 99)[3] == 255, "no transparent edges");
+        let blurred = image_backdrop_pixmap(100, 100, &img, 4.0);
+        let (a, b) = (px(&sharp, 46, 50), px(&blurred, 46, 50));
+        assert!(a[2] < 30 && b[2] > 30 + 20, "blur bleeds the edge: sharp {a:?} blurred {b:?}");
+        assert!(px(&blurred, 0, 0)[3] == 255 && px(&blurred, 99, 99)[3] == 255, "edges stay opaque");
+    }
+
+    #[test]
+    fn backdrop_paints_a_picture_a_flat_colour_and_a_custom_gradient() {
+        let content = Pixmap::new(40, 40).unwrap();
+        let mut bd = Backdrop::default();
+        bd.padding = 10.0;
+        bd.shadow = 0.0;
+        bd.outer_radius = 0.0;
+        bd.kind = GradientKind::Vertical;
+        // Flat colour.
+        bd.fill = BackdropFill::Solid;
+        let out = apply_backdrop(&content, &bd);
+        assert_eq!(px(&out, 2, 2), [0x60, 0x80, 0xA0, 255]);
+        assert_eq!(px(&out, out.width() - 3, out.height() - 3), [0x60, 0x80, 0xA0, 255]);
+        // Two colours: top is the first, bottom the second.
+        bd.fill = BackdropFill::Custom;
+        let out = apply_backdrop(&content, &bd);
+        let (top, bottom) = (px(&out, 2, 2), px(&out, 2, out.height() - 3));
+        assert!(top[2] < bottom[2] && top[0] < bottom[0], "{top:?} -> {bottom:?}");
+        bd.reverse = true;
+        let rev = apply_backdrop(&content, &bd);
+        assert!(px(&rev, 2, 2)[0] > px(&rev, 2, rev.height() - 3)[0], "reverse swaps the colours");
+        // A picture replaces the gradient.
+        bd.reverse = false;
+        bd.image = Some(BackdropImage::new(flat(64, 64, [0, 255, 0, 255])));
+        let out = apply_backdrop(&content, &bd);
+        assert_eq!(px(&out, 2, 2), [0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn backdrop_layout_centres_and_keeps_the_offset_inside() {
+        let mut bd = Backdrop::default();
+        bd.padding = 10.0; // 50 px
+        bd.inset = 0.0;
+        let (w, h, ox, oy, iw, ih) = backdrop_layout(100.0, 60.0, &bd);
+        assert_eq!((w, h, iw, ih), (200, 160, 100.0, 60.0));
+        assert_eq!((ox, oy), (50.0, 50.0));
+        bd.offset = [20.0, -10.0];
+        let (_, _, ox, oy, _, _) = backdrop_layout(100.0, 60.0, &bd);
+        assert_eq!((ox, oy), (70.0, 40.0));
+        bd.offset = [500.0, -500.0];
+        let (_, _, ox, oy, _, _) = backdrop_layout(100.0, 60.0, &bd);
+        assert_eq!((ox, oy), (100.0, 0.0), "cannot leave the backdrop");
+        bd.ratio = Some(2.0);
+        bd.offset = [0.0, 0.0];
+        let (w, h, ..) = backdrop_layout(100.0, 60.0, &bd);
+        assert_eq!((w, h), (320, 160), "ratio widens the canvas, picture stays centred");
     }
 
     #[test]

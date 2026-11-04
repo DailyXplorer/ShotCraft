@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -585,7 +586,7 @@ impl Obj {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum GradientKind {
     Mesh,
     Vertical,
@@ -638,8 +639,47 @@ pub fn gradient_stops(i: usize) -> Vec<(f32, Rgba)> {
     st.into_iter().zip(cols).collect()
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+/// What the backdrop is painted with.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum BackdropFill {
+    /// One of the preset gradients.
+    Preset,
+    /// A gradient between two chosen colours.
+    Custom,
+    /// One flat colour.
+    Solid,
+}
+
+/// A picture used as the backdrop. Cheap to clone; compared by identity.
+#[derive(Clone)]
+pub struct BackdropImage {
+    pub img: Image,
+    id: u64,
+}
+
+impl BackdropImage {
+    pub fn new(img: Image) -> Self {
+        BackdropImage { img, id: next_version() }
+    }
+}
+
+impl PartialEq for BackdropImage {
+    fn eq(&self, o: &Self) -> bool {
+        self.id == o.id
+    }
+}
+
+impl std::fmt::Debug for BackdropImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "BackdropImage({}x{})", self.img.w, self.img.h)
+    }
+}
+
+/// The backdrop configuration. Serialisable (the picture itself stays out: only its file path is kept).
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Backdrop {
+    pub fill: BackdropFill,
     pub gradient: usize,
     pub kind: GradientKind,
     pub padding: f32,
@@ -649,11 +689,25 @@ pub struct Backdrop {
     pub inner_radius: f32,
     pub ratio: Option<f32>,
     pub reverse: bool,
+    pub custom_from: [u8; 3],
+    pub custom_to: [u8; 3],
+    pub solid: [u8; 3],
+    /// Image blur slider, 0…7: Gaussian radius 2 × v.
+    pub blur: f32,
+    /// File the background picture was loaded from; empty for no picture.
+    pub image_path: String,
+    #[serde(skip)]
+    pub image: Option<BackdropImage>,
+    /// Trim the empty border (see-through or one flat colour) off the screenshot first.
+    pub autocrop: bool,
+    /// Where the screenshot sits relative to the centre of the backdrop, in output pixels.
+    pub offset: [f32; 2],
 }
 
 impl Default for Backdrop {
     fn default() -> Self {
         Backdrop {
+            fill: BackdropFill::Preset,
             gradient: 0,
             kind: GradientKind::Mesh,
             padding: 12.0,
@@ -663,12 +717,28 @@ impl Default for Backdrop {
             inner_radius: 20.0,
             ratio: None,
             reverse: false,
+            custom_from: [0x22, 0x14, 0x48],
+            custom_to: [0x91, 0x9B, 0xD2],
+            solid: [0x60, 0x80, 0xA0],
+            blur: 0.0,
+            image_path: String::new(),
+            image: None,
+            autocrop: false,
+            offset: [0.0, 0.0],
         }
     }
 }
 
 /// Backdrop sliders run 0…20; these turn a slider position into pixels.
 pub const BACKDROP_SLIDER_MAX: f32 = 20.0;
+/// The image blur slider runs 0…7.
+pub const BACKDROP_BLUR_MAX: f32 = 7.0;
+/// A backdrop is refused on pictures above this many pixels (crop or resize first).
+pub const BACKDROP_MAX_PIXELS: u64 = 15_000_000;
+
+pub fn backdrop_too_large(w: u32, h: u32) -> bool {
+    w as u64 * h as u64 > BACKDROP_MAX_PIXELS
+}
 
 impl Backdrop {
     /// Padding: round(v² × 0.5)
@@ -691,6 +761,78 @@ impl Backdrop {
     pub fn inner_radius_px(&self) -> f32 {
         self.inner_radius * 2.0
     }
+    /// Image blur: Gaussian radius 2 × v
+    pub fn blur_radius(&self) -> f32 {
+        self.blur * 2.0
+    }
+    /// Puts the screenshot back at the centre.
+    pub fn recenter(&mut self) {
+        self.offset = [0.0, 0.0];
+    }
+    /// The colour stops of the gradient fills (before `reverse`).
+    pub fn stops(&self) -> Vec<(f32, Rgba)> {
+        match self.fill {
+            BackdropFill::Custom => {
+                let c = |v: [u8; 3]| [v[0], v[1], v[2], 255];
+                vec![(0.0, c(self.custom_from)), (1.0, c(self.custom_to))]
+            }
+            BackdropFill::Solid => vec![(0.0, [self.solid[0], self.solid[1], self.solid[2], 255]); 2],
+            BackdropFill::Preset => gradient_stops(self.gradient),
+        }
+    }
+    /// Forgets the background picture.
+    pub fn forget_image(&mut self) {
+        self.image = None;
+        self.image_path.clear();
+    }
+    /// Reloads the picture from `image_path` (after the configuration came back from the settings file).
+    pub fn restore_image(&mut self) {
+        if self.image.is_none() && !self.image_path.is_empty() {
+            match load_backdrop_image(std::path::Path::new(&self.image_path)) {
+                Some(i) => self.image = Some(i),
+                None => self.image_path.clear(),
+            }
+        }
+    }
+}
+
+/// Longest side kept for a background picture.
+pub const BACKDROP_IMAGE_MAX_SIDE: u32 = 4096;
+
+/// Reads a picture file for use as a backdrop; very large pictures are scaled down.
+pub fn load_backdrop_image(path: &std::path::Path) -> Option<BackdropImage> {
+    let mut img = image::open(path).ok()?;
+    if img.width().max(img.height()) > BACKDROP_IMAGE_MAX_SIDE {
+        img = img.resize(BACKDROP_IMAGE_MAX_SIDE, BACKDROP_IMAGE_MAX_SIDE, image::imageops::FilterType::Triangle);
+    }
+    let rgba = img.to_rgba8();
+    Some(BackdropImage::new(Image { w: rgba.width(), h: rgba.height(), px: Arc::new(rgba.into_raw()) }))
+}
+
+/// Keeps a copy of a picked background picture in `dir` (so it survives the original being moved) and
+/// returns its path. Only the newest `keep` copies are kept.
+pub fn store_backdrop_image(src: &std::path::Path, dir: &std::path::Path, keep: usize) -> Option<std::path::PathBuf> {
+    let img = load_backdrop_image(src)?;
+    std::fs::create_dir_all(dir).ok()?;
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    let path = dir.join(format!("backdrop-{stamp}.jpg"));
+    let rgb = image::RgbImage::from_fn(img.img.w, img.img.h, |x, y| {
+        let p = img.img.get(x as i32, y as i32);
+        let a = p[3] as u32;
+        image::Rgb([0, 1, 2].map(|i| ((p[i] as u32 * a + 255 * (255 - a)) / 255) as u8))
+    });
+    rgb.save_with_format(&path, image::ImageFormat::Jpeg).ok()?;
+    let mut files: Vec<_> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("backdrop-"))
+        .collect();
+    files.sort_by_key(|e| e.file_name());
+    while files.len() > keep {
+        let old = files.remove(0);
+        let _ = std::fs::remove_file(old.path());
+    }
+    Some(path)
 }
 
 pub const RATIOS: [(&str, Option<f32>); 10] = [
@@ -787,7 +929,7 @@ impl Doc {
     }
 
     fn snap(&self) -> Snapshot {
-        Snapshot { base: self.base.clone(), objs: self.objs.clone(), crop: self.crop, backdrop: self.backdrop }
+        Snapshot { base: self.base.clone(), objs: self.objs.clone(), crop: self.crop, backdrop: self.backdrop.clone() }
     }
 
     /// Call before a user-visible change so it can be undone.
@@ -822,7 +964,7 @@ impl Doc {
         self.base = s.base;
         self.objs = s.objs;
         self.crop = s.crop;
-        self.backdrop = s.backdrop;
+        self.backdrop = s.backdrop.clone();
         self.version = next_version();
     }
 
@@ -860,6 +1002,86 @@ impl Doc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backdrop_config_round_trips_through_json() {
+        let mut bd = Backdrop::default();
+        bd.fill = BackdropFill::Custom;
+        bd.kind = GradientKind::Radial;
+        bd.custom_from = [1, 2, 3];
+        bd.blur = 4.0;
+        bd.ratio = Some(1.5);
+        bd.autocrop = true;
+        bd.image_path = "/tmp/x.jpg".into();
+        bd.image = Some(BackdropImage::new(Image { w: 1, h: 1, px: Arc::new(vec![0, 0, 0, 255]) }));
+        let json = serde_json::to_string(&bd).unwrap();
+        assert!(!json.contains("\"image\""), "the picture itself is not written: {json}");
+        let back: Backdrop = serde_json::from_str(&json).unwrap();
+        assert!(back.image.is_none());
+        let mut expect = bd.clone();
+        expect.image = None;
+        assert_eq!(back, expect);
+        // Old or partial files still load.
+        let partial: Backdrop = serde_json::from_str("{\"padding\": 5.0}").unwrap();
+        assert_eq!(partial.padding, 5.0);
+        assert_eq!(partial.shadow, Backdrop::default().shadow);
+    }
+
+    #[test]
+    fn backdrop_is_refused_above_fifteen_megapixels() {
+        assert!(!backdrop_too_large(5000, 3000));
+        assert!(backdrop_too_large(5000, 3001));
+        assert!(backdrop_too_large(20_000, 1_000));
+        assert!(!backdrop_too_large(3840, 2160));
+    }
+
+    #[test]
+    fn blur_slider_is_a_radius_of_twice_its_value_and_recenter_resets_the_offset() {
+        let mut bd = Backdrop::default();
+        bd.blur = 3.0;
+        assert_eq!(bd.blur_radius(), 6.0);
+        bd.offset = [10.0, -4.0];
+        bd.recenter();
+        assert_eq!(bd.offset, [0.0, 0.0]);
+    }
+
+    #[test]
+    fn stops_follow_the_fill() {
+        let mut bd = Backdrop::default();
+        assert_eq!(bd.stops().len(), gradient_stops(0).len());
+        bd.fill = BackdropFill::Custom;
+        assert_eq!(bd.stops(), vec![(0.0, [0x22, 0x14, 0x48, 255]), (1.0, [0x91, 0x9B, 0xD2, 255])]);
+        bd.fill = BackdropFill::Solid;
+        assert!(bd.stops().iter().all(|(_, c)| *c == [0x60, 0x80, 0xA0, 255]));
+    }
+
+    #[test]
+    fn a_picked_picture_is_stored_reloaded_and_old_copies_are_dropped() {
+        let dir = std::env::temp_dir().join(format!("shotcraft-bd-{}", next_version()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("pick.png");
+        image::RgbaImage::from_pixel(40, 20, image::Rgba([200, 30, 30, 255])).save(&src).unwrap();
+        let store = dir.join("backdrops");
+        let mut last = None;
+        for _ in 0..4 {
+            std::thread::sleep(std::time::Duration::from_millis(3));
+            last = store_backdrop_image(&src, &store, 2);
+        }
+        let last = last.unwrap();
+        assert_eq!(std::fs::read_dir(&store).unwrap().count(), 2, "only the newest copies stay");
+        let mut bd = Backdrop::default();
+        bd.image_path = last.display().to_string();
+        bd.restore_image();
+        let img = bd.image.as_ref().expect("reloaded from its path").img.clone();
+        assert_eq!((img.w, img.h), (40, 20));
+        assert!(img.get(10, 10)[0] > 150, "colour survives the jpeg copy");
+        bd.forget_image();
+        assert!(bd.image.is_none() && bd.image_path.is_empty());
+        bd.image_path = "/no/such/file.png".into();
+        bd.restore_image();
+        assert!(bd.image.is_none() && bd.image_path.is_empty(), "a missing file is forgotten");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn smoothness_steps_between_zero_and_the_maximum() {
