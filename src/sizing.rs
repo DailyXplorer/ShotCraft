@@ -73,37 +73,31 @@ pub fn pin_max(screen: Size) -> Size {
 /// A pin never gets narrower than this when the wheel zooms it out (a smaller picture can still
 /// be zoomed in).
 pub const PIN_MIN_WIDTH: f32 = 100.0;
-/// Smallest zoom the wheel steps down to, in percent.
-pub const PIN_MIN_ZOOM_PCT: u32 = 5;
 /// A trackpad swipe moves the pin one zoom step per this many points of scrolling.
 pub const PIN_WHEEL_THRESHOLD: f32 = 20.0;
 
-/// One wheel step is a third of an octave: three steps double or halve the pin.
-const PIN_ZOOM_FACTOR: f32 = 1.259_921;
+/// The zooms the wheel steps through, in percent of the picture at its own size: about 20 % apart,
+/// and including the 50, 100 and 200 % of the pin menu. One table for both directions, so a notch
+/// up followed by a notch down always comes back.
+pub const PIN_ZOOM_STOPS: [u32; 31] = [
+    5, 10, 15, 20, 25, 30, 40, 50, 60, 70, 80, 90, 100, 125, 150, 175, 200, 250, 300, 350, 400, 500, 600, 700, 800, 1000, 1200, 1500, 2000, 3000, 4000,
+];
 
-/// The zoom (in percent of the picture at its own size) one wheel step away, or `None` when the pin
-/// is at its limit. `shown_width` is the pin's width now and `max_width` the widest it may get.
-/// The factor is applied to the percent, which is then snapped to a multiple of 5 up to 90 and of 25
-/// above. Zooming in snaps down and zooming out snaps to the nearest, so a notch up then a notch
-/// down comes back to where it started (100, 125, 150, 175, 200, 250, ...).
+/// The zoom (in percent) one wheel step away from `current_pct`, or `None` when the pin is at its
+/// limit. `shown_width` is the pin's width now and `max_width` the widest it may get. A zoom that
+/// is not on the table (the pin was capped by the screen) goes to the next stop in that direction.
 pub fn pin_zoom_step(current_pct: u32, zoom_in: bool, shown_width: f32, max_width: f32) -> Option<u32> {
     if !shown_width.is_finite() || !max_width.is_finite() {
         return None;
     }
-    let cur = current_pct.max(PIN_MIN_ZOOM_PCT);
-    if zoom_in && shown_width >= max_width || !zoom_in && (shown_width <= PIN_MIN_WIDTH || cur <= PIN_MIN_ZOOM_PCT) {
+    if zoom_in && shown_width >= max_width || !zoom_in && shown_width <= PIN_MIN_WIDTH {
         return None;
     }
-    let target = cur as f32 * if zoom_in { PIN_ZOOM_FACTOR } else { 1.0 / PIN_ZOOM_FACTOR };
-    let grid: u32 = if target > 90.0 { 25 } else { 5 };
-    let cells = target / grid as f32;
-    let snapped = (if zoom_in { cells.floor() } else { cells.round() } as u32 * grid).max(PIN_MIN_ZOOM_PCT);
-    // Snapping must never turn a step into no step at all.
-    Some(if zoom_in {
-        snapped.max(cur + grid.min(5))
+    if zoom_in {
+        PIN_ZOOM_STOPS.iter().copied().find(|&z| z > current_pct)
     } else {
-        snapped.min(cur.saturating_sub(grid.min(5))).max(PIN_MIN_ZOOM_PCT)
-    })
+        PIN_ZOOM_STOPS.iter().rev().copied().find(|&z| z < current_pct)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -395,39 +389,32 @@ mod tests {
     }
 
     #[test]
-    fn zoom_steps_land_on_round_values() {
-        let mut z = 100;
-        let mut up = vec![];
-        for _ in 0..4 {
-            z = pin_zoom_step(z, true, 300.0, 5000.0).unwrap();
-            up.push(z);
+    fn zoom_steps_walk_a_ladder_in_both_directions() {
+        let up = |z| pin_zoom_step(z, true, 300.0, 5000.0);
+        let down = |z| pin_zoom_step(z, false, 300.0, 5000.0);
+        assert_eq!(up(100), Some(125));
+        assert_eq!(down(100), Some(90));
+        assert_eq!(up(50), Some(60));
+        assert_eq!(down(200), Some(175));
+        // off the table (capped by the screen): next stop that way
+        assert_eq!(up(259), Some(300));
+        assert_eq!(down(259), Some(250));
+        for pct in PIN_ZOOM_STOPS {
+            if let Some(u) = up(pct) {
+                assert!(u > pct && down(u) == Some(pct), "{pct} up then down");
+            }
         }
-        assert_eq!(up, [125, 150, 175, 200]);
-        // and back down the same ladder
-        let mut back = vec![];
-        for _ in 0..4 {
-            z = pin_zoom_step(z, false, 300.0, 5000.0).unwrap();
-            back.push(z);
-        }
-        assert_eq!(back, [150, 125, 100, 80]);
-        let mut z = 100;
-        let mut down = vec![];
-        for _ in 0..5 {
-            z = pin_zoom_step(z, false, 400.0, 5000.0).unwrap();
-            down.push(z);
-        }
-        assert_eq!(down, [80, 65, 50, 40, 30]);
+        assert_eq!(up(4000), None);
+        assert_eq!(down(5), None);
     }
 
     #[test]
-    fn zoom_steps_always_move_and_stay_in_range() {
-        for cur in 5..400u32 {
-            let up = pin_zoom_step(cur, true, 300.0, 5000.0).unwrap();
-            assert!(up > cur, "{cur} -> {up}");
-            match pin_zoom_step(cur, false, 300.0, 5000.0) {
-                Some(d) => assert!(d < cur && d >= PIN_MIN_ZOOM_PCT, "{cur} -> {d}"),
-                None => assert_eq!(cur, PIN_MIN_ZOOM_PCT),
-            }
+    fn zoom_steps_are_about_twenty_percent_apart_and_cover_the_menu_sizes() {
+        for w in PIN_ZOOM_STOPS.windows(2) {
+            assert!(w[1] > w[0] && w[1] as f32 / w[0] as f32 <= 2.0 + 1e-3, "{w:?}");
+        }
+        for menu in [50, 100, 200] {
+            assert!(PIN_ZOOM_STOPS.contains(&menu));
         }
     }
 
