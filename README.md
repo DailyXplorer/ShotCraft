@@ -17,3 +17,7 @@ The app is signed ad hoc, and macOS asks for the Screen Recording permission on 
 
 * [DM Sans](https://github.com/googlefonts/dm-fonts), SIL Open Font License: `assets/fonts/OFL.txt`
 * [Hugeicons](https://hugeicons.com) free icons, MIT License: `assets/icons/LICENSE-hugeicons.md`
+
+## License
+
+ShotCraft is released under the [MIT License](LICENSE). The fonts and icons listed in Credits keep their own licenses.
