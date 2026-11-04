@@ -462,7 +462,7 @@ impl App {
                 }
             },
             Action::OpenFile => {
-                let picked = rfd::FileDialog::new().add_filter("Images", &["png", "jpg", "jpeg", "gif", "bmp", "tiff", "webp"]).pick_file();
+                let picked = rfd::FileDialog::new().add_filter("Images", system::OPEN_EXTENSIONS).pick_file();
                 if let Some(path) = picked {
                     match system::load_image_file(&path) {
                         Ok(img) => self.open_image(img, 1.0, false),
