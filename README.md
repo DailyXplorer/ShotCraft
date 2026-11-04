@@ -14,7 +14,7 @@ ShotCraft is written in Rust. It is an early version (0.1.0).
 * Window captures can keep a transparent background or use a solid color, and can trim the window shadow.
 * Instant text and QR recognition: select an area and the recognized text goes straight to the clipboard, with no editor.
 * Open an existing image from a file or from the clipboard. The file picker and the command line open PNG, JPEG, GIF, BMP, TIFF and WebP files; saving writes PNG or JPEG. Animated GIFs open as their first frame.
-* Runs from the menu bar. The capture commands are in the menu bar icon menu, and global hotkeys work while the editor is hidden.
+* Lives in the menu bar only: no Dock icon, and starting the app (Finder, Launch at startup, `open`) shows no window. Windows appear when you capture, open a file, open Preferences, pin an image or check for updates. Every command, including Preferences, Check for Updates, Check for Updates Automatically, About and Quit, is in the menu bar icon menu. The app has no menu bar of its own and no Cmd+Tab entry; global hotkeys work at any time.
 
 ### After a capture
 
@@ -57,7 +57,7 @@ A pinned image is a borderless window that stays above other windows. Drag it an
 
 * General: what happens after a screenshot (editor, thumbnail or nothing; copy; save), thumbnail auto-close, launch at startup, screenshots folder, save format, Retina downscale, window screenshot background and shadow.
 * Hotkeys: record or clear a shortcut for each of the eight actions listed under Keyboard shortcuts. ShotCraft flags a shortcut that macOS refuses because another app uses it.
-* Advanced: OCR line breaks, hide the menu bar icon, keep the main window on top, zoom direction, default zoom level, what Esc does when hiding the editor (copy and/or save), and confirmation style (custom notification, system notification or none).
+* Advanced: OCR line breaks, hide the menu bar icon (only while a Show ShotCraft hotkey is set and registered, since the icon is the way back into the app), keep the main window on top, zoom direction, default zoom level, what Esc does when hiding the editor (copy and/or save), and confirmation style (custom notification, system notification or none).
 
 Settings are stored in `~/Library/Application Support/ShotCraft/settings.json`.
 
@@ -91,7 +91,7 @@ In the editor:
 | `Esc` | Deselect, then copy and hide (copy on Esc is on by default) |
 | `Space` + drag | Move around the picture |
 
-Help > Keyboard Shortcuts lists them in the app.
+Keyboard Shortcuts in the menu bar icon menu lists them in the app. `Cmd+,` opens Preferences from the editor.
 
 ## Privacy
 
@@ -134,7 +134,7 @@ This is an early version. Feedback and issues are welcome on the [issue tracker]
 
 Releases are signed with a ShotCraft certificate rather than an Apple Developer ID, so macOS warns about the app the first time you open it (see Install for how to open it).
 
-Updates come through [Sparkle](https://sparkle-project.org), which installs a new version only if its Ed25519 signature matches the key inside the app. On the second launch the app asks whether to check automatically. A check tells GitHub your IP address and the app version, and sends nothing else. Change your choice in the ShotCraft menu, or use Check for Updates at any time. Builds from `make-app.sh` do not include Sparkle.
+Updates come through [Sparkle](https://sparkle-project.org), which installs a new version only if its Ed25519 signature matches the key inside the app. On the second launch the app asks whether to check automatically. A check tells GitHub your IP address and the app version, and sends nothing else. Change your choice with Check for Updates Automatically in the menu bar icon menu, or use Check for Updates there at any time. Builds from `make-app.sh` do not include Sparkle.
 
 ## Releasing
 

@@ -44,6 +44,8 @@ impl Updater {
     }
 
     pub fn check_now(&self) {
+        // Sparkle's windows belong to this app, which the system does not bring forward by itself.
+        crate::app_mode::activate();
         let nil: *const AnyObject = std::ptr::null();
         let _: () = unsafe { msg_send![&*self.controller, checkForUpdates: nil] };
     }

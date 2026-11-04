@@ -3596,6 +3596,7 @@ dependencies = [
  "serde_json",
  "tiny-skia",
  "tray-icon",
+ "winit",
 ]
 
 [[package]]
