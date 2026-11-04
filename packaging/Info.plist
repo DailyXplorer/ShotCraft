@@ -28,5 +28,9 @@
 	<string>12</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>SUFeedURL</key>
+	<string>https://github.com/DailyXplorer/ShotCraft/releases/latest/download/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>Fl+XlNbHlRTz1tg2Km8HDSgHaaL1yE+t6dqd1/LjTlg=</string>
 </dict>
 </plist>

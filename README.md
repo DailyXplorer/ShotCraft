@@ -1,6 +1,6 @@
 # ShotCraft
 
-A simple, private screenshot tool for macOS. Capture an area, a window or the full screen, then annotate, blur, measure, read text (OCR) and pin the result on screen. Everything stays on your Mac: no account, no upload, no telemetry.
+A simple, private screenshot tool for macOS. Capture an area, a window or the full screen, then annotate, blur, measure, read text (OCR) and pin the result on screen. Everything stays on your Mac: no account, no upload, no telemetry. The only network access is the update check in release builds, which the app asks about first.
 
 ShotCraft is written in Rust. It is an early version (0.1.0).
 
@@ -91,7 +91,7 @@ Help > Keyboard Shortcuts lists them in the app.
 
 ## Privacy
 
-ShotCraft makes no network connections: the source contains no networking code and no HTTP client is among its dependencies. There is no account, no upload and no telemetry. Captures are taken with the system `screencapture` tool, text recognition runs through the macOS Vision framework, and images stay in memory or in the folder you choose. Temporary capture files live in the system temporary folder and are deleted after loading. Besides your screenshots, ShotCraft writes only its settings file and, if you turn on Launch at startup, a login item at `~/Library/LaunchAgents/app.shotcraft.launcher.plist`.
+ShotCraft makes no network connections of its own: the source contains no networking code and no HTTP client is among its dependencies. The one exception is the update check that [Sparkle](https://sparkle-project.org) runs in release builds (see Updates), which the app asks about first and which `make-app.sh` builds do not include. There is no account, no upload and no telemetry. Captures are taken with the system `screencapture` tool, text recognition runs through the macOS Vision framework, and images stay in memory or in the folder you choose. Temporary capture files live in the system temporary folder and are deleted after loading. Besides your screenshots, ShotCraft writes only its settings file and, if you turn on Launch at startup, a login item at `~/Library/LaunchAgents/app.shotcraft.launcher.plist`.
 
 ## Requirements
 
@@ -117,9 +117,20 @@ macOS asks for the Screen Recording permission on the first capture. If a captur
 
 This is an early version. Feedback and issues are welcome on the [issue tracker](https://github.com/DailyXplorer/ShotCraft/issues).
 
+## Updates
+
+Releases are signed with a ShotCraft certificate rather than an Apple Developer ID, so macOS warns about the app the first time you open it. Control-click the app and choose Open.
+
+Updates come through [Sparkle](https://sparkle-project.org), which installs a new version only if its Ed25519 signature matches the key inside the app. On the second launch the app asks whether to check automatically. A check tells GitHub your IP address and the app version, and sends nothing else. Change your choice in the ShotCraft menu, or use Check for Updates at any time. Builds from `make-app.sh` do not include Sparkle.
+
+## Releasing
+
+Set the version in `Cargo.toml`, then push a tag such as `v0.1.0`. The Release workflow tests, signs and publishes the app. The tag must match the version.
+
 ## Credits
 
 * [DM Sans](https://github.com/googlefonts/dm-fonts), SIL Open Font License: `assets/fonts/OFL.txt`
+* [Sparkle](https://sparkle-project.org), MIT License, included in releases
 * [Hugeicons](https://hugeicons.com) free icons, MIT License: `assets/icons/LICENSE-hugeicons.md`
 
 ## License
