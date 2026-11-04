@@ -280,6 +280,7 @@ impl PrefsState {
         });
         row(ui, "Menubar icon", |ui| {
             ui.checkbox(&mut s.hide_menubar_icon, "Hide menubar icon");
+            ui.label(egui::RichText::new("Needs a working Show ShotCraft hotkey").color(dim).size(11.0));
         });
         row(ui, "Main window", |ui| {
             ui.checkbox(&mut s.always_on_top, "Always on top");

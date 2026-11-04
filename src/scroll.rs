@@ -26,6 +26,9 @@ const RUNNING: u8 = 0;
 const DONE: u8 = 1;
 const CANCEL: u8 = 2;
 
+/// Window title of the control; `app_mode::bring_to_front` finds the window by it.
+pub const CONTROL_TITLE: &str = "ShotCraft Scrolling Capture";
+
 pub fn control_id() -> ViewportId {
     ViewportId::from_hash_of("scroll-control")
 }

@@ -1,3 +1,4 @@
+mod app_mode;
 mod editor;
 mod icons;
 mod model;
@@ -13,6 +14,7 @@ mod shell;
 #[cfg(target_os = "macos")]
 mod updater;
 mod system;
+mod targets;
 
 use eframe::egui::{self, Color32, ViewportBuilder, ViewportCommand, ViewportId};
 use model::{Doc, Image, Tool};
@@ -89,6 +91,12 @@ fn send(ctx: &egui::Context, queue: &Queue, action: Action) {
     ctx.request_repaint_of(ViewportId::ROOT);
 }
 
+/// Title of the editor window; the other windows have their own.
+pub const EDITOR_TITLE: &str = "ShotCraft";
+
+/// How long the editor stays on screen, transparent, before it is hidden again.
+const HIDE_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+
 const WINDOW_MARGIN: f32 = 48.0;
 const WINDOW_MIN_HEIGHT_RATIO: f32 = 0.9;
 
@@ -128,12 +136,21 @@ pub struct App {
     pub prefs: Arc<Mutex<prefs::PrefsState>>,
     pub toast: Option<(String, f64)>,
     screenshot: Option<(PathBuf, u32)>,
-    background: bool,
     open_at_start: Option<PathBuf>,
     started: bool,
     quitting: bool,
+    /// The editor window is not on screen. True from launch until the user asks for it.
     pub hidden: bool,
-    hide_pending: bool,
+    /// The editor is on screen, transparent, and will be hidden again: eframe's first paint shows it.
+    startup_hide: bool,
+    /// A brief invisible show of the editor is under way, so that eframe runs the pass that
+    /// creates a new window (see `wake_ui`).
+    waking: bool,
+    /// When the editor was last made invisible-but-on-screen (startup or `wake_ui`).
+    woke_at: Instant,
+    /// Passes left in which the app and its windows are brought to the front.
+    front_until: Option<Instant>,
+    front_title: &'static str,
     scroll: Option<scroll::Session>,
     ocr_running: bool,
     busy: bool,
@@ -169,7 +186,7 @@ fn setup_fonts(ctx: &egui::Context) {
 }
 
 impl App {
-    fn new(cc: &eframe::CreationContext<'_>, screenshot: Option<PathBuf>, background: bool, open_at_start: Option<PathBuf>) -> App {
+    fn new(cc: &eframe::CreationContext<'_>, screenshot: Option<PathBuf>, show_at_start: bool, open_at_start: Option<PathBuf>) -> App {
         setup_fonts(&cc.egui_ctx);
         let settings = Settings::load();
         system::refresh_autostart(settings.autostart);
@@ -187,12 +204,15 @@ impl App {
             thumb: None,
             toast: None,
             screenshot: screenshot.map(|p| (p, 0)),
-            background,
             open_at_start,
             started: false,
             quitting: false,
-            hidden: background,
-            hide_pending: false,
+            hidden: !show_at_start,
+            startup_hide: false,
+            waking: false,
+            woke_at: Instant::now(),
+            front_until: None,
+            front_title: "",
             scroll: None,
             ocr_running: false,
             busy: false,
@@ -236,37 +256,66 @@ impl App {
 
     fn show_window(&mut self) {
         self.hidden = false;
-        self.hide_pending = false;
-        self.ctx.send_viewport_cmd(ViewportCommand::Visible(true));
-        self.ctx.send_viewport_cmd(ViewportCommand::Focus);
+        self.waking = false;
+        self.startup_hide = false;
+        app_mode::set_editor_alpha(1.0);
+        self.ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Visible(true));
+        self.ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Focus);
+        self.bring_to_front(EDITOR_TITLE);
     }
 
     fn hide_window(&mut self) {
         self.hidden = true;
-        self.hide_pending = true;
+        self.ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Visible(false));
         self.ctx.request_repaint();
     }
 
-    /// eframe stops running the UI pass once no window is visible, and new windows can only be
-    /// created in that pass. While the editor is hidden, a 1×1 transparent window keeps it running
-    /// so Preferences, pins and the thumbnail open by themselves.
-    fn keep_ui_alive(&mut self, ctx: &egui::Context) {
+    /// Activates the app and puts its windows in front over the next few frames, the window with
+    /// this title in focus. An app without a Dock icon is never activated by the system.
+    fn bring_to_front(&mut self, title: &'static str) {
+        app_mode::activate();
+        self.front_until = Some(Instant::now() + std::time::Duration::from_secs(3));
+        self.front_title = title;
+        self.ctx.request_repaint();
+    }
+
+    /// While the editor is hidden eframe runs no UI pass, and a new window (Preferences, a pin,
+    /// the thumbnail) can only be created in one. So the editor is shown for a few frames,
+    /// fully transparent, and hidden again once the new window exists; the windows that are open
+    /// keep the passes running after that.
+    fn wake_ui(&mut self) {
         if !self.hidden {
             return;
         }
-        let builder = ViewportBuilder::default()
-            .with_title("ShotCraft")
-            .with_inner_size([1.0, 1.0])
-            .with_position([0.0, 0.0])
-            .with_decorations(false)
-            .with_resizable(false)
-            .with_transparent(true)
-            .with_has_shadow(false)
-            .with_mouse_passthrough(true)
-            .with_active(false);
-        ctx.show_viewport_immediate(ViewportId::from_hash_of("keep-ui-alive"), builder, |_, _| {});
-        if std::mem::take(&mut self.hide_pending) {
-            ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+        app_mode::set_editor_alpha(0.0);
+        self.waking = true;
+        self.woke_at = Instant::now();
+        self.ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Visible(true));
+        self.ctx.request_repaint();
+    }
+
+    /// End of every UI pass: the delayed steps of the three helpers above.
+    fn settle_windows(&mut self) {
+        if let Some(until) = self.front_until {
+            // The window may not exist yet; keep at it until it is in front, or for a few seconds.
+            if app_mode::bring_to_front(self.front_title) || Instant::now() > until {
+                self.front_until = None;
+            } else {
+                self.ctx.request_repaint_after(std::time::Duration::from_millis(40));
+            }
+        }
+        // The editor stays up, transparent, for a minimum time, so that eframe has shown it (at
+        // startup) or created the new window (see `wake_ui`) before it is hidden.
+        if self.startup_hide || self.waking {
+            if self.woke_at.elapsed() >= HIDE_DELAY {
+                self.startup_hide = false;
+                self.waking = false;
+                if self.hidden {
+                    self.hide_window();
+                }
+            } else {
+                self.ctx.request_repaint_after(std::time::Duration::from_millis(30));
+            }
         }
     }
 
@@ -279,6 +328,7 @@ impl App {
             return;
         }
         self.busy = true;
+        let snapshot = system::snapshot(mode);
         let was_visible = !self.hidden;
         if was_visible {
             self.hide_window();
@@ -289,6 +339,7 @@ impl App {
             trim_shadow: self.settings.trim_shadow,
             solid_bg: solid,
             scale: self.pixels_per_point(),
+            snapshot,
         };
         let q = self.queue.clone();
         let ctx = self.ctx.clone();
@@ -352,6 +403,10 @@ impl App {
         };
         self.scroll = Some(scroll::Session::start(rect, pos, self.queue.clone(), self.ctx.clone()));
         self.grab_escape(true);
+        // The control is a new window and the app has no Dock icon: wake the UI pass that creates it
+        // while the editor is hidden, and bring it to the front.
+        self.wake_ui();
+        self.bring_to_front(scroll::CONTROL_TITLE);
         self.ctx.request_repaint();
     }
 
@@ -379,7 +434,7 @@ impl App {
     fn scroll_ui(&mut self, ctx: &egui::Context) {
         let Some(s) = &self.scroll else { return };
         let builder = ViewportBuilder::default()
-            .with_title("ShotCraft Scrolling Capture")
+            .with_title(scroll::CONTROL_TITLE)
             .with_inner_size(scroll::CONTROL_SIZE)
             .with_position(s.control_pos)
             .with_decorations(false)
@@ -472,7 +527,8 @@ impl App {
         let id = self.next_pin;
         self.next_pin += 1;
         self.pins.push(Arc::new(Mutex::new(Pin { id, img, scale, zoom: 1.0, semi: false, scroll: 0.0, tex: None, open: true })));
-        self.ctx.request_repaint();
+        self.wake_ui();
+        self.bring_to_front("ShotCraft Pin");
     }
 
     pub fn pin_current(&mut self) {
@@ -521,6 +577,11 @@ impl App {
     }
 
     fn handle(&mut self, a: Action) {
+        // These come from the status item menu too. They change the current image, so the editor
+        // is shown to make the change visible.
+        if self.hidden && self.doc.is_some() && matches!(a, Action::Undo | Action::Redo | Action::ResetCrop | Action::Rasterize | Action::SaveAs) {
+            self.show_window();
+        }
         match a {
             Action::Capture(m) => self.start_capture(m, false),
             Action::InstantOcr => self.start_capture(CaptureMode::Area, true),
@@ -532,7 +593,7 @@ impl App {
                             self.settings.last_area = Some([r.x0, r.y0, r.x1, r.y1]);
                             self.settings.save();
                         }
-                        let full = c.mode == CaptureMode::Fullscreen || c.mode == CaptureMode::Delayed;
+                        let full = matches!(c.mode, CaptureMode::Fullscreen | CaptureMode::Delayed | CaptureMode::AllDisplays);
                         self.doc = Some(Doc::new(c.img.clone(), c.scale));
                         if self.settings.after_copy {
                             self.copy();
@@ -544,6 +605,7 @@ impl App {
                             AfterShow::Editor => self.open_image(c.img, c.scale, full),
                             AfterShow::Thumbnail => {
                                 self.ed.reset_for_new_doc(false);
+                                self.wake_ui();
                                 self.thumb = Some(Arc::new(Mutex::new(Thumb { img: c.img, scale: c.scale, tex: None, born: Instant::now(), hovered: false, focused: false, blurred: false })));
                             }
                             AfterShow::Nothing => self.ed.reset_for_new_doc(false),
@@ -646,7 +708,9 @@ impl App {
         let mut p = self.prefs.lock().unwrap();
         p.focus = p.open;
         p.open = true;
-        self.ctx.request_repaint();
+        drop(p);
+        self.wake_ui();
+        self.bring_to_front("Preferences");
     }
 
     pub fn sync_shell(&mut self) {
@@ -937,8 +1001,12 @@ impl eframe::App for App {
                 });
             }
             self.apply_window_level();
-            if self.background {
-                self.hide_window();
+            if self.hidden {
+                // eframe shows the window once it has painted a first frame. Keep it transparent
+                // until the next one, then hide it: nothing appears on screen.
+                app_mode::set_editor_alpha(0.0);
+                self.startup_hide = true;
+                self.woke_at = Instant::now();
             }
             if let Some(path) = self.open_at_start.take() {
                 match system::load_image_file(&path) {
@@ -968,7 +1036,7 @@ impl eframe::App for App {
         self.thumb_ui(&ctx);
         self.scroll_ui(&ctx);
         self.prefs_ui(&ctx);
-        self.keep_ui_alive(&ctx);
+        self.settle_windows();
         self.screenshot_tick(ui);
     }
 
@@ -989,14 +1057,16 @@ fn main() -> eframe::Result {
             }
         }
     }
-    let screenshot = args.iter().position(|a| a == "--screenshot").and_then(|i| args.get(i + 1)).map(PathBuf::from);
-    let background = args.iter().any(|a| a == "--background");
-    let open = args.iter().skip(1).find(|a| !a.starts_with("--") && Some(a.as_str()) != screenshot.as_ref().and_then(|p| p.to_str())).map(PathBuf::from);
+    // No launch shows a window unless it is asked to render or open something; the login item's
+    // `--background` flag is accepted and changes nothing.
+    let launch = app_mode::Launch::parse(&args);
+    let show_at_start = launch.shows_window();
+    let app_mode::Launch { screenshot, open } = launch;
     // Test hook: size the main window like Preferences so --screenshot shows its real layout.
     let (size, min) = if std::env::var_os("SHOTCRAFT_PREFS_TAB").is_some() { (prefs::WINDOW, prefs::WINDOW) } else { ([1180.0, 760.0], [editor::MIN_W, 420.0]) };
     let options = eframe::NativeOptions {
         viewport: ViewportBuilder::default()
-            .with_title("ShotCraft")
+            .with_title(EDITOR_TITLE)
             .with_inner_size(size)
             .with_min_inner_size(min)
             .with_fullsize_content_view(true)
@@ -1005,5 +1075,7 @@ fn main() -> eframe::Result {
             .with_transparent(true),
         ..Default::default()
     };
-    eframe::run_native("ShotCraft", options, Box::new(move |cc| Ok(Box::new(App::new(cc, screenshot, background, open)))))
+    #[cfg(target_os = "macos")]
+    let options = eframe::NativeOptions { event_loop_builder: Some(app_mode::event_loop_hook(show_at_start)), ..options };
+    eframe::run_native("ShotCraft", options, Box::new(move |cc| Ok(Box::new(App::new(cc, screenshot, show_at_start, open)))))
 }

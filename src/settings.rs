@@ -26,6 +26,8 @@ pub enum HotkeyAction {
     Fullscreen,
     Area,
     Window,
+    ActiveWindow,
+    AllDisplays,
     RepeatArea,
     Ocr,
     Show,
@@ -33,13 +35,24 @@ pub enum HotkeyAction {
 }
 
 impl HotkeyAction {
-    pub const ALL: [HotkeyAction; 7] =
-        [HotkeyAction::Fullscreen, HotkeyAction::Area, HotkeyAction::Window, HotkeyAction::RepeatArea, HotkeyAction::Ocr, HotkeyAction::Show, HotkeyAction::Scrolling];
+    pub const ALL: [HotkeyAction; 9] = [
+        HotkeyAction::Fullscreen,
+        HotkeyAction::AllDisplays,
+        HotkeyAction::Area,
+        HotkeyAction::Window,
+        HotkeyAction::ActiveWindow,
+        HotkeyAction::RepeatArea,
+        HotkeyAction::Ocr,
+        HotkeyAction::Show,
+        HotkeyAction::Scrolling,
+    ];
     pub fn label(self) -> &'static str {
         match self {
             HotkeyAction::Fullscreen => "Fullscreen screenshot",
+            HotkeyAction::AllDisplays => "All displays screenshot",
             HotkeyAction::Area => "Area screenshot",
             HotkeyAction::Window => "Any window screenshot",
+            HotkeyAction::ActiveWindow => "Active window screenshot",
             HotkeyAction::RepeatArea => "Repeat area screenshot",
             HotkeyAction::Ocr => "Instant Text/QR Recognition",
             HotkeyAction::Show => "Show ShotCraft",
@@ -103,6 +116,7 @@ impl Default for Settings {
             hotkeys: vec![
                 (HotkeyAction::Fullscreen, "super+shift+Digit1".into()),
                 (HotkeyAction::Area, "super+shift+Digit2".into()),
+                (HotkeyAction::ActiveWindow, "control+alt+super+KeyW".into()),
                 (HotkeyAction::Ocr, "control+alt+super+KeyO".into()),
             ],
             last_area: None,
@@ -127,6 +141,12 @@ impl Settings {
         if let Ok(b) = serde_json::to_vec_pretty(self) {
             let _ = std::fs::write(p, b);
         }
+    }
+
+    /// The menu bar icon is the only visible part of the app, so the "hide" setting only takes
+    /// effect while the Show ShotCraft hotkey works: without either, nothing could open it again.
+    pub fn menubar_icon_visible(&self, show_hotkey_works: bool) -> bool {
+        !self.hide_menubar_icon || !show_hotkey_works
     }
 
     pub fn hotkey(&self, a: HotkeyAction) -> Option<&str> {
@@ -159,6 +179,16 @@ pub fn pretty_hotkey(s: &str) -> String {
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hidden_menubar_icon_needs_the_show_hotkey() {
+        let mut s = Settings::default();
+        s.hide_menubar_icon = true;
+        assert!(s.menubar_icon_visible(false), "no working Show hotkey: the icon stays");
+        assert!(!s.menubar_icon_visible(true));
+        s.hide_menubar_icon = false;
+        assert!(s.menubar_icon_visible(true));
+    }
 
     #[test]
     fn default_hotkeys_parse() {

@@ -1,4 +1,8 @@
-//! Menu bar icon, the app's native menus and the global hotkeys.
+//! Menu bar icon, the app's menus and the global hotkeys.
+//!
+//! The app has no Dock icon, so macOS never shows its main menu: the status item menu is the one
+//! users see and has to carry every command that is not on screen in the editor. The main menu is
+//! still installed because its key equivalents keep working while the editor has focus.
 use crate::settings::{HotkeyAction, Settings};
 use crate::{Action, Queue};
 use crate::model::Tool;
@@ -20,6 +24,7 @@ pub struct Shell {
     updater: Option<Updater>,
     hotkeys: Option<GlobalHotKeyManager>,
     registered: Vec<HotKey>,
+    show_hotkey_works: bool,
     hotkey_map: Arc<Mutex<HashMap<u32, HotkeyAction>>>,
     /// Esc, registered only while a scrolling capture runs so that it can be cancelled from any app.
     escape: Option<HotKey>,
@@ -33,6 +38,8 @@ fn action_for(id: &str) -> Option<Action> {
         "repeat" => Action::Capture(CaptureMode::RepeatArea),
         "window" => Action::Capture(CaptureMode::Window),
         "scrolling" => Action::ScrollingCapture,
+        "activewindow" => Action::Capture(CaptureMode::ActiveWindow),
+        "alldisplays" => Action::Capture(CaptureMode::AllDisplays),
         "delayed" => Action::Capture(CaptureMode::Delayed),
         "ocr" => Action::InstantOcr,
         "clipboard" => Action::OpenClipboard,
@@ -84,8 +91,10 @@ const MENU_SYMBOLS: &[(&str, &str)] = &[
     ("Launch at Startup", "power"),
     ("Area Capture", "rectangle.dashed"),
     ("Fullscreen Screenshot", "display"),
+    ("All Displays Screenshot", "display.2"),
     ("Repeat Area Capture", "arrow.clockwise"),
     ("Capture Any Window", "macwindow"),
+    ("Capture Active Window", "macwindow.on.rectangle"),
     ("Scrolling Capture", "arrow.up.and.down.square"),
     ("Delayed Screenshot", "timer"),
     ("Recognize Text", "text.viewfinder"),
@@ -99,6 +108,7 @@ const MENU_SYMBOLS: &[(&str, &str)] = &[
     ("Undo", "arrow.uturn.backward"),
     ("Redo", "arrow.uturn.forward"),
     ("Reset Crop", "crop"),
+    ("Current Image", "photo"),
     ("Cut", "scissors"),
     ("Paste", "doc.on.clipboard"),
     ("Zoom In", "plus.magnifyingglass"),
@@ -197,8 +207,6 @@ impl Shell {
             true,
             &[
                 &MenuItem::with_id("about", "About ShotCraft", true, None),
-                &updates_item,
-                &auto_updates_item,
                 &PredefinedMenuItem::separator(),
                 &MenuItem::with_id("prefs", "Preferences…", true, acc(cmd, Code::Comma)),
                 &PredefinedMenuItem::separator(),
@@ -283,11 +291,25 @@ impl Shell {
         help.set_as_help_menu_for_nsapp();
 
         let autostart_item = CheckMenuItem::with_id("autostart", "Launch at Startup", true, settings.autostart, None);
+        let image = Submenu::with_items(
+            "Current Image",
+            true,
+            &[
+                &MenuItem::with_id("undo", "Undo", true, None),
+                &MenuItem::with_id("redo", "Redo", true, None),
+                &MenuItem::with_id("resetcrop", "Reset Crop", true, None),
+                &MenuItem::with_id("rasterize", "Rasterize (Merge) Image", true, None),
+                &MenuItem::with_id("saveas", "Save Image As", true, None),
+            ],
+        )
+        .expect("menu");
         let tray_menu = Menu::with_items(&[
             &MenuItem::with_id("area", "Area Capture", true, None),
             &MenuItem::with_id("fullscreen", "Fullscreen Screenshot", true, None),
+            &MenuItem::with_id("alldisplays", "All Displays Screenshot", true, None),
             &MenuItem::with_id("repeat", "Repeat Area Capture", true, None),
             &MenuItem::with_id("window", "Capture Any Window", true, None),
+            &MenuItem::with_id("activewindow", "Capture Active Window", true, None),
             &MenuItem::with_id("scrolling", "Scrolling Capture", true, None),
             &MenuItem::with_id("delayed", "Delayed Screenshot (3s)", true, None),
             &MenuItem::with_id("ocr", "Recognize Text/QR", true, None),
@@ -295,8 +317,16 @@ impl Shell {
             &MenuItem::with_id("open", "Open File…", true, None),
             &PredefinedMenuItem::separator(),
             &MenuItem::with_id("show", "Show ShotCraft", true, None),
+            &image,
+            &PredefinedMenuItem::separator(),
             &MenuItem::with_id("prefs", "Preferences…", true, None),
             &autostart_item,
+            &PredefinedMenuItem::separator(),
+            &updates_item,
+            &auto_updates_item,
+            &PredefinedMenuItem::separator(),
+            &MenuItem::with_id("about", "About ShotCraft", true, None),
+            &MenuItem::with_id("shortcuts", "Keyboard Shortcuts", true, None),
             &PredefinedMenuItem::separator(),
             &MenuItem::with_id("quit", "Quit ShotCraft", true, None),
         ])
@@ -340,6 +370,8 @@ impl Shell {
                 HotkeyAction::Fullscreen => Action::Capture(CaptureMode::Fullscreen),
                 HotkeyAction::Area => Action::Capture(CaptureMode::Area),
                 HotkeyAction::Window => Action::Capture(CaptureMode::Window),
+                HotkeyAction::ActiveWindow => Action::Capture(CaptureMode::ActiveWindow),
+                HotkeyAction::AllDisplays => Action::Capture(CaptureMode::AllDisplays),
                 HotkeyAction::RepeatArea => Action::Capture(CaptureMode::RepeatArea),
                 HotkeyAction::Ocr => Action::InstantOcr,
                 HotkeyAction::Show => Action::Show,
@@ -349,7 +381,7 @@ impl Shell {
             ctx.request_repaint();
         }));
 
-        let mut shell = Shell { tray, _menubar: menubar, autostart_item, auto_updates_item, updater, hotkeys: GlobalHotKeyManager::new().ok(), registered: vec![], hotkey_map, escape: None, escape_id };
+        let mut shell = Shell { tray, _menubar: menubar, autostart_item, auto_updates_item, updater, hotkeys: GlobalHotKeyManager::new().ok(), registered: vec![], show_hotkey_works: false, hotkey_map, escape: None, escape_id };
         shell.apply_hotkeys(settings);
         shell
     }
@@ -372,6 +404,8 @@ impl Shell {
                 _ => failed.push(a),
             }
         }
+        self.show_hotkey_works = settings.hotkey(HotkeyAction::Show).is_some() && !failed.contains(&HotkeyAction::Show);
+        self.sync(settings);
         failed
     }
 
@@ -417,7 +451,7 @@ impl Shell {
         self.autostart_item.set_checked(settings.autostart);
         self.refresh_updates();
         if let Some(t) = &self.tray {
-            let _ = t.set_visible(!settings.hide_menubar_icon);
+            let _ = t.set_visible(settings.menubar_icon_visible(self.show_hotkey_works));
         }
     }
 }

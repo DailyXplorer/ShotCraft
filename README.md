@@ -8,12 +8,14 @@ ShotCraft is written in Rust. It is an early version (0.1.0).
 
 ### Capture
 
-* Area, any window, full screen (main display), repeat the last area, and a 3-second delayed full-screen capture.
+* Area, any window, repeat the last area, and full-screen captures. Fullscreen captures the display the mouse pointer is on, and All Displays puts every display in one picture laid out like your desk.
+* Active Window captures the frontmost window of the app you are using, without clicking. Use it from a hotkey, or from the menu bar icon menu, which targets the app that was in front before you opened it. When that app has no capturable window, you pick a window instead.
+* A 3-second delayed capture of the display the mouse was on when you started it.
 * Scrolling capture: pick an area, scroll the page yourself, and ShotCraft stitches what the area showed into one tall image that opens in the editor. A small always-on-top control next to the area shows the live height and has Done and Cancel; `Esc` cancels. The area is grabbed about four to five times per second. Fixed headers and footers are kept once, scrolling back up adds nothing, and the image stops at 20,000 px. Start it from the menu bar icon or with its hotkey (not set by default); pressing the hotkey again acts as Done.
 * Window captures can keep a transparent background or use a solid color, and can trim the window shadow.
 * Instant text and QR recognition: select an area and the recognized text goes straight to the clipboard, with no editor.
 * Open an existing image from a file or from the clipboard. The file picker and the command line open PNG, JPEG, GIF, BMP, TIFF and WebP files; saving writes PNG or JPEG. Animated GIFs open as their first frame.
-* Runs from the menu bar. The capture commands are in the menu bar icon menu, and global hotkeys work while the editor is hidden.
+* Lives in the menu bar only: no Dock icon, and starting the app (Finder, Launch at startup, `open`) shows no window. Windows appear when you capture, open a file, open Preferences, pin an image or check for updates. Every command, including Preferences, Check for Updates, Check for Updates Automatically, About and Quit, is in the menu bar icon menu. The app has no menu bar of its own and no Cmd+Tab entry; global hotkeys work at any time.
 
 Scrolling capture limits:
 
@@ -64,8 +66,8 @@ A pinned image is a borderless window that stays above other windows. Drag it an
 ### Preferences
 
 * General: what happens after a screenshot (editor, thumbnail or nothing; copy; save), thumbnail auto-close, launch at startup, screenshots folder, save format, Retina downscale, window screenshot background and shadow.
-* Hotkeys: record or clear a shortcut for each of the seven actions listed under Keyboard shortcuts. ShotCraft flags a shortcut that macOS refuses because another app uses it.
-* Advanced: OCR line breaks, hide the menu bar icon, keep the main window on top, zoom direction, default zoom level, what Esc does when hiding the editor (copy and/or save), and confirmation style (custom notification, system notification or none).
+* Hotkeys: record or clear a shortcut for each of the nine actions listed under Keyboard shortcuts. ShotCraft flags a shortcut that macOS refuses because another app uses it.
+* Advanced: OCR line breaks, hide the menu bar icon (only while a Show ShotCraft hotkey is set and registered, since the icon is the way back into the app), keep the main window on top, zoom direction, default zoom level, what Esc does when hiding the editor (copy and/or save), and confirmation style (custom notification, system notification or none).
 
 Settings are stored in `~/Library/Application Support/ShotCraft/settings.json`.
 
@@ -75,11 +77,13 @@ Global hotkeys (editable in Preferences, Hotkeys):
 
 | Action | Default |
 | --- | --- |
-| Fullscreen screenshot | `Cmd+Shift+1` |
+| Fullscreen screenshot (display under the mouse) | `Cmd+Shift+1` |
+| All displays screenshot | not set |
 | Area screenshot | `Cmd+Shift+2` |
 | Any window screenshot | not set |
+| Active window screenshot | `Ctrl+Opt+Cmd+W` |
 | Repeat area screenshot | not set |
-| Instant Text/QR Recognition | not set |
+| Instant Text/QR Recognition | `Ctrl+Opt+Cmd+O` |
 | Show ShotCraft | not set |
 | Scrolling screenshot | not set |
 
@@ -98,7 +102,7 @@ In the editor:
 | `Esc` | Deselect, then copy and hide (copy on Esc is on by default) |
 | `Space` + drag | Move around the picture |
 
-Help > Keyboard Shortcuts lists them in the app.
+Keyboard Shortcuts in the menu bar icon menu lists them in the app. `Cmd+,` opens Preferences from the editor.
 
 ## Privacy
 
@@ -141,7 +145,7 @@ This is an early version. Feedback and issues are welcome on the [issue tracker]
 
 Releases are signed with a ShotCraft certificate rather than an Apple Developer ID, so macOS warns about the app the first time you open it (see Install for how to open it).
 
-Updates come through [Sparkle](https://sparkle-project.org), which installs a new version only if its Ed25519 signature matches the key inside the app. On the second launch the app asks whether to check automatically. A check tells GitHub your IP address and the app version, and sends nothing else. Change your choice in the ShotCraft menu, or use Check for Updates at any time. Builds from `make-app.sh` do not include Sparkle.
+Updates come through [Sparkle](https://sparkle-project.org), which installs a new version only if its Ed25519 signature matches the key inside the app. On the second launch the app asks whether to check automatically. A check tells GitHub your IP address and the app version, and sends nothing else. Change your choice with Check for Updates Automatically in the menu bar icon menu, or use Check for Updates there at any time. Builds from `make-app.sh` do not include Sparkle.
 
 ## Releasing
 
