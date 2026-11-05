@@ -94,6 +94,9 @@ pub enum Popover {
 
 struct Comp {
     key: (u64, Option<usize>),
+    /// Where the composite's pixel (0, 0) lies in picture coordinates: the canvas can reach past
+    /// the picture's top and left edges.
+    origin: P,
     pm: Pixmap,
     tex: TiledTexture,
 }
@@ -122,6 +125,8 @@ pub struct Editor {
     hover: Option<P>,
     pub(crate) hover_color: Rgba,
     comp: Option<Comp>,
+    /// The canvas the document exports to (see `render::canvas_rect`), kept per document version.
+    extent: Option<(u64, R)>,
     overlay: Option<Overlay>,
     preview: Option<(u64, (u32, u32), TiledTexture)>,
     pub popover: Popover,
@@ -169,6 +174,7 @@ impl Default for Editor {
             hover: None,
             hover_color: [255, 255, 255, 255],
             comp: None,
+            extent: None,
             overlay: None,
             preview: None,
             popover: Popover::None,
@@ -285,6 +291,26 @@ impl Editor {
 
     fn to_screen(&self, q: P) -> Pos2 {
         self.canvas.min + self.pan + vec2(q.x, q.y) * self.zoom
+    }
+
+    /// The canvas of `d`: its picture, grown to hold annotations that reach past the edges.
+    fn canvas_of(&mut self, d: &Doc, fonts: &render::Fonts) -> R {
+        match self.extent {
+            Some((v, r)) if v == d.version => r,
+            _ => {
+                let r = render::canvas_rect(d, fonts);
+                self.extent = Some((d.version, r));
+                r
+            }
+        }
+    }
+
+    /// What the editor shows and exports: the crop, else the canvas as of the last repaint.
+    fn view_area(&self, d: &Doc) -> R {
+        d.crop.unwrap_or_else(|| match self.extent {
+            Some((v, r)) if v == d.version => r,
+            _ => d.view_rect(),
+        })
     }
 
     fn to_img(&self, s: Pos2) -> P {
@@ -515,6 +541,9 @@ impl App {
                     d.checkpoint();
                     render::rasterize(d, &self.fonts);
                     self.ed.selected = None;
+                    // A grown canvas moved the picture's origin: nothing in the old coordinates holds.
+                    self.ed.selection = None;
+                    self.ed.fit = true;
                 }
             }
             Action::ZoomIn | Action::ZoomOut => {
@@ -627,6 +656,9 @@ impl App {
     fn cut_out(&mut self, r: R) {
         if let Some(d) = &mut self.doc {
             d.checkpoint();
+            // Rasterizing onto a grown canvas moves the origin: the selection moves with it.
+            let cv = render::canvas_rect(d, &self.fonts);
+            let r = r.translate(-cv.x0, -cv.y0);
             render::rasterize(d, &self.fonts);
             d.base = render::cut_out(&d.base, &r);
             d.crop = None;
@@ -971,7 +1003,7 @@ impl App {
             0 => self.set_tool(Tool::Crop),
             1 => {
                 if let Some(d) = &self.doc {
-                    let v = d.view_rect();
+                    let v = self.ed.view_area(d);
                     self.ed.resize_w = format!("{}", v.w().round());
                     self.ed.resize_h = format!("{}", v.h().round());
                 }
@@ -1142,6 +1174,12 @@ impl App {
                 }
             });
         });
+    }
+
+    /// Fits the view to the picture again (headless pictures).
+    #[cfg(test)]
+    pub(crate) fn ed_fit(&mut self) {
+        self.ed.fit = true;
     }
 
     /// Selects object `i` with the Select tool (a freshly pasted picture).
@@ -1352,10 +1390,8 @@ impl App {
     /// Backdrops are refused on pictures above 15 megapixels: says so and returns false.
     fn backdrop_allowed(&mut self) -> bool {
         let Some(d) = &self.doc else { return false };
-        let (w, h) = match d.crop {
-            Some(r) => (r.w() as u32, r.h() as u32),
-            None => (d.base.w, d.base.h),
-        };
+        let v = d.crop.unwrap_or_else(|| render::canvas_rect(d, &self.fonts));
+        let (w, h) = (v.w() as u32, v.h() as u32);
         if backdrop_too_large(w, h) {
             self.error("The image is too large. Crop or resize to 15 megapixel first.");
             return false;
@@ -1564,7 +1600,7 @@ impl App {
             self.ed.popover = if matches!(self.ed.popover, Popover::Color(_)) { Popover::None } else { Popover::Color(r) };
         }
         sep(ui, &mut x);
-        let sel = self.ed.selection.or(self.ed.crop_draft).or_else(|| self.doc.as_ref().map(|d| d.view_rect()));
+        let sel = self.ed.selection.or(self.ed.crop_draft).or_else(|| self.doc.as_ref().map(|d| self.ed.view_area(d)));
         let pts = self.settings.logical_points;
         let scale = self.doc.as_ref().map(|d| d.scale_factor).unwrap_or(1.0);
         let size_txt = sel.map_or("—".to_string(), |s| {
@@ -1630,7 +1666,8 @@ impl App {
             self.ed.popover = if matches!(self.ed.popover, Popover::Zoom(_)) { Popover::None } else { Popover::Zoom(r) };
         }
         if let Some(d) = &self.doc {
-            let info = format!("{} × {} px", d.base.w, d.base.h);
+            let v = self.ed.view_area(d);
+            let info = format!("{} × {} px", v.w().round(), v.h().round());
             let info_w = ui.painter().layout_no_wrap(info.clone(), small.clone(), t.dim).size().x;
             if x + 16.0 + info_w <= rect.right() - 12.0 {
                 ui.painter().text(pos2(rect.right() - 12.0, rect.center().y), Align2::RIGHT_CENTER, info, small, t.dim);
@@ -1647,17 +1684,20 @@ impl App {
         let skip = sel.filter(|i| !matches!(d.objs[*i].kind, Kind::Spotlight { .. }));
         let key = (d.version, skip);
         if self.ed.comp.as_ref().map_or(true, |c| c.key != key) {
-            let pm = render::compose(d, &self.fonts, skip);
+            let cv = self.ed.canvas_of(d, &self.fonts);
+            let pm = render::compose_canvas(d, &self.fonts, skip, &cv);
+            let origin = p(cv.x0, cv.y0);
             let size = (pm.width(), pm.height());
             match &mut self.ed.comp {
                 Some(c) if c.tex.fits(ctx, size) => {
                     c.tex.update(Some(c.pm.data()), pm.data(), Alpha::Premultiplied, TEX);
                     c.pm = pm;
                     c.key = key;
+                    c.origin = origin;
                 }
                 _ => {
                     let tex = TiledTexture::new(ctx, "composite", size, pm.data(), Alpha::Premultiplied, TEX);
-                    self.ed.comp = Some(Comp { key, pm, tex });
+                    self.ed.comp = Some(Comp { key, origin, pm, tex });
                 }
             }
         }
@@ -1668,12 +1708,14 @@ impl App {
                 let fresh = self.ed.overlay.as_ref().map_or(true, |o| o.obj != *obj || o.version != comp.key.0);
                 if fresh {
                     let (w, h) = (comp.pm.width() as f32, comp.pm.height() as f32);
-                    let b = render::bounds(obj, &self.fonts).expand(2.0).clamp_to(w, h);
+                    let o = comp.origin;
+                    // `b` is in composite pixels; the overlay's `rect` goes back to picture coordinates.
+                    let b = render::bounds(obj, &self.fonts).expand(2.0).translate(-o.x, -o.y).clamp_to(w, h);
                     let b = R { x0: b.x0.floor(), y0: b.y0.floor(), x1: b.x1.ceil(), y1: b.y1.ceil() };
                     if b.w() >= 1.0 && b.h() >= 1.0 {
                         let mut region = render::crop_pixmap(&comp.pm, &b);
                         let mut local = obj.clone();
-                        local.translate(-b.x0, -b.y0);
+                        local.translate(-b.x0 - o.x, -b.y0 - o.y);
                         render::draw_obj(&mut region, &local, &self.fonts, d.scale_factor);
                         let size = (region.width(), region.height());
                         let tex = match self.ed.overlay.take() {
@@ -1683,7 +1725,7 @@ impl App {
                             }
                             _ => TiledTexture::new(ctx, "overlay", size, region.data(), Alpha::Premultiplied, TEX),
                         };
-                        self.ed.overlay = Some(Overlay { obj: obj.clone(), version: comp.key.0, rect: b, tex });
+                        self.ed.overlay = Some(Overlay { obj: obj.clone(), version: comp.key.0, rect: b.translate(o.x, o.y), tex });
                     } else {
                         self.ed.overlay = None;
                     }
@@ -1715,7 +1757,7 @@ impl App {
         let (iw, ih, view) = {
             let d = self.doc.as_ref().unwrap();
             let full = R { x0: 0.0, y0: 0.0, x1: d.base.w as f32, y1: d.base.h as f32 };
-            let v = if crop_mode { full } else { d.view_rect() };
+            let v = if crop_mode { full } else { self.ed.view_area(d) };
             (d.base.w as f32, d.base.h as f32, v)
         };
         let fit_target = if backdrop_mode {
@@ -1724,7 +1766,10 @@ impl App {
         } else {
             view
         };
-        if self.ed.fit {
+        // While an annotation is being dragged the view stays put even if the canvas grows under it;
+        // "fit" catches up on release.
+        let editing = matches!(self.ed.drag, Drag::Create { .. } | Drag::Move { .. } | Drag::Handle { .. });
+        if self.ed.fit && !editing {
             let avail = rect.size() - vec2(48.0, 48.0);
             let fitz = (avail.x / fit_target.w()).min(avail.y / fit_target.h()).max(0.01);
             let hundred = 1.0 / ppp;
@@ -1758,10 +1803,8 @@ impl App {
                 }
                 if resp.dragged() {
                     let delta = resp.drag_delta() / self.ed.zoom;
-                    let (cw, ch) = match d.crop {
-                        Some(r) => (r.w(), r.h()),
-                        None => (d.base.w as f32, d.base.h as f32),
-                    };
+                    let v = d.crop.unwrap_or_else(|| render::canvas_rect(d, &self.fonts));
+                    let (cw, ch) = (v.w(), v.h());
                     if let Some(bd) = &mut d.backdrop {
                         let (mx, my) = render::backdrop_max_offset(cw, ch, bd);
                         bd.offset = [(bd.offset[0] + delta.x).clamp(-mx, mx), (bd.offset[1] + delta.y).clamp(-my, my)];
@@ -1776,12 +1819,15 @@ impl App {
         // The canvas is a plain colour. A checkerboard shows only behind the picture itself, and
         // only when the picture has see-through pixels (a window with its shadow, a logo): there it
         // is what tells transparent from white. An opaque picture covers it and gets an outline.
-        let see_through = self.picture_has_alpha();
+        let grown = !crop_mode && self.doc.as_ref().map_or(false, |d| d.crop.is_none() && view != R { x0: 0.0, y0: 0.0, x1: d.base.w as f32, y1: d.base.h as f32 });
+        let see_through = grown || self.picture_has_alpha();
         if see_through {
             self.paint_checker(ui, view_screen.intersect(rect), view_screen.min);
         }
         if let Some(c) = &self.ed.comp {
-            c.tex.paint(&painter, &view, |r| self.ed.rect_screen(r), Color32::WHITE);
+            // The composite starts at `origin` in picture coordinates.
+            let (ox, oy) = (c.origin.x, c.origin.y);
+            c.tex.paint(&painter, &view.translate(-ox, -oy), |r| self.ed.rect_screen(&r.translate(ox, oy)), Color32::WHITE);
         }
         if !see_through {
             painter.rect_stroke(view_screen, 0.0, Stroke::new(1.0, t.line), StrokeKind::Outside);
@@ -1794,7 +1840,7 @@ impl App {
         let pointer = ui.input(|i| i.pointer.hover_pos());
         self.ed.hover = pointer.filter(|p| view_screen.contains(*p) && rect.contains(*p)).map(|p| self.ed.to_img(p));
         if let (Some(q), Some(c)) = (self.ed.hover, &self.ed.comp) {
-            let (x, y) = (q.x.floor() as i32, q.y.floor() as i32);
+            let (x, y) = ((q.x - c.origin.x).floor() as i32, (q.y - c.origin.y).floor() as i32);
             if x >= 0 && y >= 0 && (x as u32) < c.pm.width() && (y as u32) < c.pm.height() {
                 let px = c.pm.pixel(x as u32, y as u32).unwrap().demultiply();
                 self.ed.hover_color = [px.red(), px.green(), px.blue(), 255];
@@ -2553,7 +2599,7 @@ impl App {
     }
 
     fn resize_helper(&mut self, ui: &mut Ui) {
-        let Some((w0, h0)) = self.doc.as_ref().map(|d| (d.view_rect().w(), d.view_rect().h())) else { return };
+        let Some((w0, h0)) = self.doc.as_ref().map(|d| { let v = self.ed.view_area(d); (v.w(), v.h()) }) else { return };
         ui.horizontal(|ui| {
             let wr = ui.add_sized([60.0, 22.0], egui::TextEdit::singleline(&mut self.ed.resize_w));
             ui.label("×");
@@ -2775,6 +2821,35 @@ mod key_tests {
     }
     fn r(x0: f32, y0: f32, x1: f32, y1: f32) -> R {
         R { x0, y0, x1, y1 }
+    }
+
+    #[test]
+    fn cut_out_and_rasterize_on_a_grown_canvas_keep_the_selection_where_it_was() {
+        let mut t = Rig::new();
+        let (w0, h0) = {
+            let d = t.app.doc.as_ref().unwrap();
+            (d.base.w, d.base.h)
+        };
+        let before = {
+            let d = t.app.doc.as_mut().unwrap();
+            let mut st = Style::default();
+            st.color = [230, 40, 40, 255];
+            d.objs.push(Obj { kind: Kind::Line { a: p(30.0, 20.0), b: p(-100.0, 20.0) }, style: st });
+            d.touch();
+            d.base.clone()
+        };
+        let cv = render::canvas_rect(t.app.doc.as_ref().unwrap(), &t.app.fonts);
+        assert!(cv.x0 <= -100.0, "{cv:?}");
+        // Cut out a band of the picture's own pixels (columns 40..50 in picture coordinates).
+        t.app.cut_out(r(40.0, 0.0, 50.0, h0 as f32 + 40.0));
+        let d = t.app.doc.as_ref().unwrap();
+        let grown_w = (w0 as f32 - cv.x0) as u32;
+        assert_eq!(d.base.w, grown_w - 10);
+        // Column 39 of the picture is the column left of the cut; it sits `-cv.x0` into the canvas.
+        let ox = (-cv.x0) as i32;
+        assert_eq!(d.base.get(ox + 39, 100), before.get(39, 100));
+        assert_eq!(d.base.get(ox + 40, 100), before.get(50, 100), "what was right of the cut moved in");
+        assert!(w0 > 50);
     }
 
     fn two_boxes(t: &mut Rig) {

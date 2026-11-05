@@ -931,6 +931,35 @@ impl Image {
     }
 }
 
+/// How far annotations may stick out of the picture on one side before the canvas stops growing.
+pub const MAX_OVERHANG: f32 = 4096.0;
+/// The most pixels an enlarged canvas may have; beyond that the picture keeps its own size.
+pub const MAX_CANVAS_PIXELS: f64 = 64_000_000.0;
+
+/// The canvas a picture `base` needs so that every `ink` rectangle (the painted extent of an
+/// annotation) fits: `base` grown to hold them all, in whole pixels, each side by at most
+/// `MAX_OVERHANG`. Anything over `MAX_CANVAS_PIXELS` is not granted: the result is `base` itself.
+pub fn grow_canvas(base: R, inks: impl IntoIterator<Item = R>) -> R {
+    let mut r = base;
+    for i in inks {
+        if [i.x0, i.y0, i.x1, i.y1].iter().all(|v| v.is_finite()) {
+            r = r.union(&i);
+        }
+    }
+    // Whole pixels; less than half a pixel of overhang (antialiasing at the edge) grows nothing.
+    let r = R {
+        x0: r.x0.max(base.x0 - MAX_OVERHANG).round(),
+        y0: r.y0.max(base.y0 - MAX_OVERHANG).round(),
+        x1: r.x1.min(base.x1 + MAX_OVERHANG).round(),
+        y1: r.y1.min(base.y1 + MAX_OVERHANG).round(),
+    };
+    if r.w() as f64 * r.h() as f64 > MAX_CANVAS_PIXELS {
+        base
+    } else {
+        r
+    }
+}
+
 /// Where a picture of `w` × `h` goes when pasted over `view`: centred, at 100 % or fitted inside
 /// `view` (keeping its proportions) when larger.
 pub fn overlay_rect(w: u32, h: u32, view: &R) -> R {
@@ -1318,5 +1347,31 @@ mod tests {
         assert!(d.undo());
         assert_eq!((d.base.w, d.base.h), (4, 2));
         assert_eq!(d.crop, Some(R { x0: 0.0, y0: 0.0, x1: 2.0, y1: 2.0 }));
+    }
+
+    #[test]
+    fn the_canvas_grows_to_hold_what_sticks_out_and_only_that() {
+        let base = R { x0: 0.0, y0: 0.0, x1: 100.0, y1: 50.0 };
+        assert_eq!(grow_canvas(base, []), base);
+        let inside = R { x0: 10.0, y0: 10.0, x1: 20.0, y1: 20.0 };
+        assert_eq!(grow_canvas(base, [inside]), base);
+        let out = R { x0: 90.0, y0: -7.0, x1: 130.0, y1: 20.0 };
+        assert_eq!(grow_canvas(base, [inside, out]), R { x0: 0.0, y0: -7.0, x1: 130.0, y1: 50.0 });
+        // Antialiasing fuzz at the edge is not a reason to grow.
+        let fuzz = R { x0: -0.4, y0: 0.0, x1: 100.4, y1: 50.3 };
+        assert_eq!(grow_canvas(base, [fuzz]), base);
+    }
+
+    #[test]
+    fn the_canvas_has_limits() {
+        let base = R { x0: 0.0, y0: 0.0, x1: 100.0, y1: 50.0 };
+        let far = R { x0: 0.0, y0: 0.0, x1: 1.0e6, y1: 10.0 };
+        assert_eq!(grow_canvas(base, [far]).x1, 100.0 + MAX_OVERHANG);
+        let bad = R { x0: f32::NAN, y0: 0.0, x1: f32::INFINITY, y1: 10.0 };
+        assert_eq!(grow_canvas(base, [bad]), base);
+        // Too many pixels in all: the picture keeps its own size.
+        let big = R { x0: 0.0, y0: 0.0, x1: 7000.0, y1: 7000.0 };
+        let wide = R { x0: -MAX_OVERHANG, y0: -MAX_OVERHANG, x1: 7000.0 + MAX_OVERHANG, y1: 7000.0 + MAX_OVERHANG };
+        assert_eq!(grow_canvas(big, [wide]), big);
     }
 }

@@ -49,3 +49,34 @@ fn pasted_picture_and_added_capture_for_the_eyes() {
         save_png(&shots.1, &dir.join("add-capture.png"));
     }
 }
+
+#[test]
+fn an_arrow_dragged_past_the_edge_enlarges_the_canvas_for_the_eyes() {
+    let size = (1100.0, 760.0);
+    let ppp = 2.0;
+    let (shot, before, after) = with_rig(|rig| {
+        let mut app = rig.app();
+        app.doc = Some(Doc::new(page(420, 260, [226, 232, 242]), ppp));
+        app.ed_fit();
+        let before = rig.render_editor(&mut app, size, ppp, false);
+        let d = app.doc.as_mut().unwrap();
+        d.checkpoint();
+        let mut st = Style::default();
+        st.color = [230, 40, 40, 255];
+        d.objs.push(Obj { kind: Kind::Arrow { a: p(120.0, 200.0), b: p(300.0, 120.0), seed: 3 }, style: st });
+        d.objs.push(Obj { kind: Kind::Arrow { a: p(120.0, 200.0), b: p(560.0, 120.0), seed: 3 }, style: st });
+        d.objs.push(Obj { kind: Kind::Arrow { a: p(300.0, 40.0), b: p(-70.0, -50.0), seed: 3 }, style: st });
+        d.touch();
+        app.ed_fit();
+        let shot = rig.render_editor(&mut app, size, ppp, false);
+        let exported = crate::render::export(app.doc.as_ref().unwrap(), &crate::render::Fonts::load());
+        (exported, before, shot)
+    });
+    assert!(shot.w > 420 + 100 && shot.h > 260 + 30, "{}x{}", shot.w, shot.h);
+    assert!(before.px != after.px);
+    if let Some(dir) = out_dir() {
+        save_png(&before, &dir.join("canvas-before.png"));
+        save_png(&after, &dir.join("canvas-grown-editor.png"));
+        save_png(&shot, &dir.join("canvas-grown-export.png"));
+    }
+}
