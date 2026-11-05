@@ -11,18 +11,11 @@ use eframe::egui::{
 use std::collections::HashMap;
 use tiny_skia::Pixmap;
 
-pub const TOOLBAR_H: f32 = 38.0;
-pub const OPTIONS_H: f32 = 44.0;
-pub const STATUS_H: f32 = 34.0;
-pub const MIN_W: f32 = 940.0;
-const TRAFFIC_LIGHTS_W: f32 = 78.0;
-const SEG_W: f32 = 30.0;
-const GROUP_GAP: f32 = 10.0;
-const TOOLBAR_EDGE: f32 = 12.0;
-
-fn seg_group_w(items: usize) -> f32 {
-    SEG_W * items as f32 + 4.0
-}
+pub use crate::sizing::{OPTIONS_H, STATUS_H, TOOLBAR_H};
+use crate::sizing::{seg_group_w, toolbar_fit, TOOLBAR_EDGE, TOOLBAR_GROUP_GAP as GROUP_GAP, TOOLBAR_SEG_W as SEG_W, TRAFFIC_LIGHTS_W};
+/// Narrowest width the editor window can have.
+pub const MIN_W: f32 = crate::sizing::EDITOR_MIN_SIZE.0;
+pub const MIN_H: f32 = crate::sizing::EDITOR_MIN_SIZE.1;
 
 #[derive(Clone, Copy)]
 pub struct Th {
@@ -407,6 +400,35 @@ fn text_segments(ui: &mut Ui, labels: &[&str], selected: usize, t: &Th) -> Optio
         x += widths[i];
     }
     clicked
+}
+
+/// Frame of the floating panels (Keyboard Shortcuts, About): the bar colour, fully opaque, so the
+/// editor behind never shows through.
+fn panel_frame(ctx: &egui::Context, t: &Th) -> egui::Frame {
+    let mut frame = egui::Frame::window(&ctx.global_style());
+    frame.fill = Color32::from_rgb(t.bar.r(), t.bar.g(), t.bar.b());
+    frame.stroke = Stroke::new(1.0, t.line);
+    frame
+}
+
+/// One row of the toolbar's overflow menu: icon, name, highlighted when it is the active tool.
+fn menu_row(ui: &mut Ui, icon: Icon, label: &str, selected: bool, enabled: bool, t: &Th) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width().max(140.0), 26.0), if enabled { Sense::click() } else { Sense::hover() });
+    let fg = if !enabled {
+        t.dim
+    } else if selected {
+        Color32::WHITE
+    } else {
+        t.text
+    };
+    if selected {
+        ui.painter().rect_filled(rect, 6.0, t.accent);
+    } else if resp.hovered() && enabled {
+        ui.painter().rect_filled(rect, 6.0, t.hover);
+    }
+    icons::draw(ui.painter(), Rect::from_center_size(pos2(rect.left() + 18.0, rect.center().y), vec2(17.0, 17.0)), icon, fg);
+    ui.painter().text(pos2(rect.left() + 36.0, rect.center().y), Align2::LEFT_CENTER, label, FontId::new(13.0, FontFamily::Proportional), fg);
+    resp
 }
 
 fn hit(obj: &Obj, q: P, tol: f32, fonts: &render::Fonts) -> bool {
@@ -953,6 +975,62 @@ impl App {
         }
     }
 
+    /// The selection actions at the right of the tools: icon, tooltip, active.
+    fn toolbar_actions(&self) -> [(Icon, &'static str, bool); crate::sizing::TOOLBAR_ACTION_ITEMS] {
+        let current = self.ed.tool;
+        [
+            (Icon::Crop, "Crop", current == Tool::Crop),
+            (Icon::Resize, "Resize", matches!(self.ed.popover, Popover::Resize(_))),
+            (Icon::Ocr, "Recognize Text or QR (⌘O)", current == Tool::Ocr),
+            (Icon::SelSize, "Imprint Selection Size", false),
+            (Icon::Erase, "Erase (Del)", false),
+            (Icon::Scissors, "Cut Out", current == Tool::Cut),
+            (Icon::Reset, "Reset Selection (Esc)", false),
+        ]
+    }
+
+    /// Runs the `i`th selection action of the toolbar; `anchor` is where the Resize popover opens.
+    fn toolbar_action(&mut self, i: usize, anchor: Rect) {
+        let current = self.ed.tool;
+        match i {
+            0 if current == Tool::Crop => self.apply_crop(),
+            0 => self.set_tool(Tool::Crop),
+            1 => {
+                if let Some(d) = &self.doc {
+                    let v = self.ed.view_area(d);
+                    self.ed.resize_w = format!("{}", v.w().round());
+                    self.ed.resize_h = format!("{}", v.h().round());
+                }
+                self.ed.popover = if matches!(self.ed.popover, Popover::Resize(_)) { Popover::None } else { Popover::Resize(anchor) };
+            }
+            2 => self.set_tool(Tool::Ocr),
+            3 => {
+                if let (Some(r), Some(d)) = (self.ed.selection, &mut self.doc) {
+                    d.checkpoint();
+                    let mut st = self.ed.style_for(Tool::Ruler);
+                    st.dashed = self.settings.logical_points;
+                    d.objs.push(Obj { kind: Kind::Ruler { a: p(r.x0, r.y1 + 14.0), b: p(r.x1, r.y1 + 14.0) }, style: st });
+                    d.objs.push(Obj { kind: Kind::Ruler { a: p(r.x1 + 14.0, r.y0), b: p(r.x1 + 14.0, r.y1) }, style: st });
+                } else {
+                    self.say("Select an area first");
+                }
+            }
+            4 => {
+                if self.ed.selected.is_some() || self.ed.selection.is_some() {
+                    self.delete_selected_or_erase();
+                } else {
+                    self.say("Select an area or an object first");
+                }
+            }
+            5 => self.set_tool(Tool::Cut),
+            _ => {
+                self.ed.selection = None;
+                self.ed.selected = None;
+                self.ed.tool = Tool::Select;
+            }
+        }
+    }
+
     fn toolbar(&mut self, ui: &mut Ui, t: &Th) {
         let rect = ui.max_rect();
         let bg = ui.interact(rect, ui.id().with("titlebar-drag"), Sense::click_and_drag());
@@ -965,11 +1043,15 @@ impl App {
         }
         ui.painter().line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, t.line));
         let has_doc = self.doc.is_some();
+        // Every tool is shown when the window is wide enough; a narrower one moves the last ones
+        // (the selection actions first) into the "More" menu.
+        let fit = toolbar_fit(rect.width());
         ui.scope_builder(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(0.0, 5.0))), |ui| {
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = GROUP_GAP;
-                let groups_w = seg_group_w(3) + seg_group_w(Tool::TOOLBAR.len()) + seg_group_w(7) + GROUP_GAP * 2.0;
-                let free = rect.width() - TRAFFIC_LIGHTS_W - seg_group_w(1) - TOOLBAR_EDGE;
+                // The groups are centred between the traffic lights and the right edge.
+                let free = rect.width() - TRAFFIC_LIGHTS_W - seg_group_w(1) - GROUP_GAP - TOOLBAR_EDGE;
+                let groups_w = fit.width() - seg_group_w(1) - GROUP_GAP - GROUP_GAP;
                 ui.add_space(TRAFFIC_LIGHTS_W + ((free - groups_w) / 2.0).max(0.0));
                 if let Some(i) = segments(
                     ui,
@@ -981,60 +1063,68 @@ impl App {
                 }
                 let current = self.ed.tool;
                 let tools: Vec<(Icon, &str, bool)> = Tool::TOOLBAR.iter().map(|x| (Icon::for_tool(*x), x.tooltip(), current == *x)).collect();
-                if let (Some(i), true) = (segments(ui, &tools, t, SEG_W), has_doc) {
-                    self.set_tool(Tool::TOOLBAR[i]);
+                if fit.tools() > 0 {
+                    if let (Some(i), true) = (segments(ui, &tools[..fit.tools()], t, SEG_W), has_doc) {
+                        self.set_tool(Tool::TOOLBAR[i]);
+                    }
                 }
-                let picked = segments(
-                    ui,
-                    &[
-                        (Icon::Crop, "Crop", current == Tool::Crop),
-                        (Icon::Resize, "Resize", matches!(self.ed.popover, Popover::Resize(_))),
-                        (Icon::Ocr, "Recognize Text or QR (⌘O)", current == Tool::Ocr),
-                        (Icon::SelSize, "Imprint Selection Size", false),
-                        (Icon::Erase, "Erase (Del)", false),
-                        (Icon::Scissors, "Cut Out", current == Tool::Cut),
-                        (Icon::Reset, "Reset Selection (Esc)", false),
-                    ],
-                    t,
-                    SEG_W,
-                );
-                if let (Some(i), true) = (picked, has_doc) {
-                    let anchor = Rect::from_min_size(ui.min_rect().right_bottom() + vec2(-180.0, 4.0), vec2(1.0, 1.0));
-                    match i {
-                        0 if current == Tool::Crop => self.apply_crop(),
-                        0 => self.set_tool(Tool::Crop),
-                        1 => {
-                            if let Some(d) = &self.doc {
-                                let v = self.ed.view_area(d);
-                                self.ed.resize_w = format!("{}", v.w().round());
-                                self.ed.resize_h = format!("{}", v.h().round());
-                            }
-                            self.ed.popover = if matches!(self.ed.popover, Popover::Resize(_)) { Popover::None } else { Popover::Resize(anchor) };
-                        }
-                        2 => self.set_tool(Tool::Ocr),
-                        3 => {
-                            if let (Some(r), Some(d)) = (self.ed.selection, &mut self.doc) {
-                                d.checkpoint();
-                                let mut st = self.ed.style_for(Tool::Ruler);
-                                st.dashed = self.settings.logical_points;
-                                d.objs.push(Obj { kind: Kind::Ruler { a: p(r.x0, r.y1 + 14.0), b: p(r.x1, r.y1 + 14.0) }, style: st });
-                                d.objs.push(Obj { kind: Kind::Ruler { a: p(r.x1 + 14.0, r.y0), b: p(r.x1 + 14.0, r.y1) }, style: st });
-                            } else {
-                                self.say("Select an area first");
-                            }
-                        }
-                        4 => {
-                            if self.ed.selected.is_some() || self.ed.selection.is_some() {
-                                self.delete_selected_or_erase();
-                            } else {
-                                self.say("Select an area or an object first");
-                            }
-                        }
-                        5 => self.set_tool(Tool::Cut),
-                        _ => {
-                            self.ed.selection = None;
-                            self.ed.selected = None;
-                            self.ed.tool = Tool::Select;
+                let actions = self.toolbar_actions();
+                if fit.actions() > 0 {
+                    let picked = segments(ui, &actions[..fit.actions()], t, SEG_W);
+                    if let (Some(i), true) = (picked, has_doc) {
+                        let anchor = Rect::from_min_size(ui.min_rect().right_bottom() + vec2(-180.0, 4.0), vec2(1.0, 1.0));
+                        self.toolbar_action(i, anchor);
+                    }
+                }
+                if fit.overflows() {
+                    let (r, resp) = ui.allocate_exact_size(vec2(seg_group_w(1), 28.0), Sense::click());
+                    ui.painter().rect_filled(r, 7.0, t.seg);
+                    ui.painter().rect_stroke(r, 7.0, Stroke::new(0.5, t.line), StrokeKind::Inside);
+                    let hidden_active = Tool::TOOLBAR[fit.tools()..].contains(&current) || actions[fit.actions()..].iter().any(|a| a.2);
+                    if hidden_active {
+                        ui.painter().rect_filled(r.shrink(2.0), 5.0, t.accent);
+                    } else if resp.hovered() {
+                        ui.painter().rect_filled(r.shrink(2.0), 5.0, t.hover);
+                    }
+                    icons::draw(ui.painter(), Rect::from_center_size(r.center(), vec2(17.0, 17.0)), Icon::ChevronDown, if hidden_active { Color32::WHITE } else { t.text });
+                    let resp = resp.on_hover_text("More tools");
+                    let mut chosen = None;
+                    let hidden_tools = &Tool::TOOLBAR[fit.tools()..];
+                    let hidden_actions = &actions[fit.actions()..];
+                    // Two columns keep the menu short enough for the smallest window.
+                    egui::Popup::menu(&resp)
+                        .align(egui::RectAlign::BOTTOM_END)
+                        .align_alternatives(&[])
+                        .frame(panel_frame(ui.ctx(), t).inner_margin(6).corner_radius(10.0))
+                        .show(|ui| {
+                            ui.spacing_mut().item_spacing = vec2(4.0, 2.0);
+                            let rows: Vec<(Icon, String, bool, Result<usize, usize>)> = hidden_tools
+                                .iter()
+                                .enumerate()
+                                .map(|(i, x)| (Icon::for_tool(*x), x.name().to_string(), current == *x, Err(fit.tools() + i)))
+                                .chain(hidden_actions.iter().enumerate().map(|(i, (icon, tip, sel))| {
+                                    (*icon, tip.split(" (").next().unwrap_or(tip).to_string(), *sel, Ok(fit.actions() + i))
+                                }))
+                                .collect();
+                            let per_col = rows.len().div_ceil(2);
+                            ui.horizontal_top(|ui| {
+                                for col in rows.chunks(per_col) {
+                                    ui.vertical(|ui| {
+                                        ui.set_width(180.0);
+                                        for (icon, label, sel, id) in col {
+                                            if menu_row(ui, *icon, label, *sel, has_doc, t).clicked() {
+                                                chosen = Some(*id);
+                                            }
+                                        }
+                                    });
+                                }
+                            });
+                        });
+                    if has_doc {
+                        match chosen {
+                            Some(Err(i)) => self.set_tool(Tool::TOOLBAR[i]),
+                            Some(Ok(i)) => self.toolbar_action(i, Rect::from_min_size(resp.rect.left_bottom() + vec2(-180.0, 4.0), vec2(1.0, 1.0))),
+                            None => {}
                         }
                     }
                 }
@@ -1063,16 +1153,20 @@ impl App {
     fn options_bar(&mut self, ui: &mut Ui, t: &Th) {
         let rect = ui.max_rect();
         ui.painter().line_segment([pos2(rect.left() - 10.0, rect.bottom()), pos2(rect.right() + 10.0, rect.bottom())], Stroke::new(1.0, t.line));
-        ui.horizontal_centered(|ui| {
-            ui.spacing_mut().item_spacing.x = 10.0;
-            ui.add_space(((rect.width() - self.ed.options_w) / 2.0).max(0.0));
-            let start = ui.cursor().left();
-            self.options_content(ui, t);
-            let w = ui.min_rect().right() - start;
-            if (w - self.ed.options_w).abs() > 0.5 {
-                self.ed.options_w = w;
-                ui.ctx().request_discard("centre the options bar");
-            }
+        // The contents are centred; in a window too narrow for them the bar scrolls sideways
+        // instead of cutting them off.
+        egui::ScrollArea::horizontal().id_salt("options-scroll").auto_shrink([false, false]).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded).show(ui, |ui| {
+            ui.horizontal_centered(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                ui.add_space(((rect.width() - self.ed.options_w) / 2.0).max(0.0));
+                let start = ui.cursor().left();
+                self.options_content(ui, t);
+                let w = ui.min_rect().right() - start;
+                if (w - self.ed.options_w).abs() > 0.5 {
+                    self.ed.options_w = w;
+                    ui.ctx().request_discard("centre the options bar");
+                }
+            });
         });
     }
 
@@ -1517,7 +1611,11 @@ impl App {
         }
         sep(ui, &mut x);
         // Contrast of the selection box: text colour against background colour.
-        if let (Some(br), Some(d)) = (self.ed.selection.or(self.ed.crop_draft), &self.doc) {
+        // The contrast cell and the picture size give way when the window is narrow: the three
+        // main cells always fit.
+        let zoom_w = 64.0;
+        let room_for_contrast = x + 136.0 + 6.0 + zoom_w <= rect.right() - 8.0;
+        if let (Some(br), Some(d), true) = (self.ed.selection.or(self.ed.crop_draft), &self.doc, room_for_contrast) {
             let key = (d.version, [br.x0.to_bits(), br.y0.to_bits(), br.x1.to_bits(), br.y1.to_bits()]);
             let cache_id = ui.id().with("st-contrast-cache");
             let cached = ui.data(|dd| dd.get_temp::<((u64, [u32; 4]), Option<(Rgba, Rgba)>)>(cache_id));
@@ -1556,7 +1654,7 @@ impl App {
             }
         }
         let ppp = ui.ctx().pixels_per_point();
-        let (r, resp) = cell(ui, &mut x, 64.0, "st-zoom");
+        let (r, resp) = cell(ui, &mut x, zoom_w, "st-zoom");
         let zt = if self.doc.is_some() { format!("{}%", (self.ed.zoom * ppp * 100.0).round()) } else { "—".into() };
         ui.painter().text(pos2(r.left() + 8.0, r.top() + 4.0), Align2::LEFT_TOP, zt, value, t.text);
         ui.painter().text(pos2(r.left() + 8.0, r.bottom() - 4.0), Align2::LEFT_BOTTOM, "Zoom", small.clone(), t.dim);
@@ -1566,7 +1664,10 @@ impl App {
         if let Some(d) = &self.doc {
             let v = self.ed.view_area(d);
             let info = format!("{} × {} px", v.w().round(), v.h().round());
-            ui.painter().text(pos2(rect.right() - 12.0, rect.center().y), Align2::RIGHT_CENTER, info, small, t.dim);
+            let info_w = ui.painter().layout_no_wrap(info.clone(), small.clone(), t.dim).size().x;
+            if x + 16.0 + info_w <= rect.right() - 12.0 {
+                ui.painter().text(pos2(rect.right() - 12.0, rect.center().y), Align2::RIGHT_CENTER, info, small, t.dim);
+            }
         }
     }
 
@@ -2543,7 +2644,7 @@ impl App {
         }
         if self.about_open {
             let mut open = true;
-            egui::Window::new("About ShotCraft").open(&mut open).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
+            egui::Window::new("About ShotCraft").open(&mut open).frame(panel_frame(ctx, t)).fade_in(false).fade_out(false).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
                 ui.heading("ShotCraft");
                 ui.label("Version 0.1");
                 ui.label(egui::RichText::new("A screenshot tool with an annotation editor. Everything stays on this computer.").color(t.dim));
@@ -2554,7 +2655,7 @@ impl App {
         }
         if self.shortcuts_open {
             let mut open = true;
-            egui::Window::new("Keyboard Shortcuts").open(&mut open).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
+            egui::Window::new("Keyboard Shortcuts").open(&mut open).frame(panel_frame(ctx, t)).fade_in(false).fade_out(false).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
                 // The list is long: a small window scrolls it instead of cutting it off.
                 let room = (ctx.viewport_rect().height() - 90.0).max(120.0);
                 egui::ScrollArea::vertical().max_height(room).show(ui, |ui| egui::Grid::new("keys").num_columns(2).spacing([24.0, 4.0]).show(ui, |ui| {
@@ -3346,5 +3447,79 @@ mod shortcuts_window_tests {
             crate::headless::save_png(&img, &std::path::Path::new(&dir).join("shortcuts-window.png"));
         }
         assert_eq!((img.w, img.h), (2200, 960));
+    }
+}
+
+/// The toolbar, options bar and status bar at several window widths, in both appearances. With
+/// SHOTCRAFT_SHOTS set, the pictures are written there (prefix: SHOTCRAFT_SHOT_PREFIX) to look at.
+#[cfg(test)]
+mod toolbar_look_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn picture() -> Image {
+        let (w, h) = (640u32, 400u32);
+        let mut px = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let c = if y < 28 { [60, 63, 70] } else if (x / 40 + y / 40) % 2 == 0 { [248, 248, 250] } else { [226, 232, 242] };
+                px.extend_from_slice(&[c[0], c[1], c[2], 255]);
+            }
+        }
+        Image { w, h, px: Arc::new(px) }
+    }
+
+    fn shot(size: (f32, f32), dark: bool, tool: Tool) -> Image {
+        crate::headless::with_rig(|rig| {
+            let mut app = rig.app();
+            app.doc = Some(Doc::new(picture(), 2.0));
+            if tool == Tool::Backdrop {
+                app.doc.as_mut().unwrap().backdrop = Some(Backdrop::default());
+            }
+            app.ed.tool = tool;
+            rig.render_editor(&mut app, size, 2.0, dark)
+        })
+    }
+
+    /// Clicks the "More" button of a narrow toolbar and returns what is on screen.
+    fn overflow_menu_shot(size: (f32, f32), at: egui::Pos2) -> Image {
+        use egui::{Event, Modifiers, PointerButton};
+        crate::headless::with_rig(|rig| {
+            let mut app = rig.app();
+            app.doc = Some(Doc::new(picture(), 2.0));
+            let events = vec![
+                Event::PointerMoved(at),
+                Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE },
+                Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE },
+            ];
+            rig.render_window(size, 2.0, events, |ui| app.editor_ui(ui));
+            // The menu fades in: let it finish.
+            rig.render_window(size, 2.0, vec![], |ui| app.editor_ui(ui))
+        })
+    }
+
+    #[test]
+    fn overflow_menu_picture_for_the_eyes() {
+        let Ok(dir) = std::env::var("SHOTCRAFT_SHOTS") else { return };
+        let size = (480.0, 270.0);
+        // The More button is the last segment before Preferences.
+        let at = egui::pos2(size.0 - TOOLBAR_EDGE - seg_group_w(1) - GROUP_GAP - seg_group_w(1) / 2.0, 19.0);
+        let img = overflow_menu_shot(size, at);
+        crate::headless::save_png(&img, &std::path::Path::new(&dir).join("after-480-more-menu.png"));
+    }
+
+    #[test]
+    fn toolbar_pictures_for_the_eyes() {
+        let Ok(dir) = std::env::var("SHOTCRAFT_SHOTS") else { return };
+        let prefix = std::env::var("SHOTCRAFT_SHOT_PREFIX").unwrap_or_else(|_| "after".into());
+        for (w, h) in [(1180.0, 640.0), (760.0, 420.0), (480.0, 270.0)] {
+            for dark in [false, true] {
+                for tool in [Tool::Select, Tool::Arrow, Tool::Text, Tool::Backdrop, Tool::Rectangle] {
+                    let img = shot((w, h), dark, tool);
+                    let name = format!("{prefix}-{}-{}-{}.png", w as u32, if dark { "dark" } else { "light" }, tool.name().to_lowercase());
+                    crate::headless::save_png(&img, &std::path::Path::new(&dir).join(name));
+                }
+            }
+        }
     }
 }

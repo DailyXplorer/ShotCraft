@@ -178,6 +178,7 @@ Set the version in `Cargo.toml`, then push a tag such as `v0.1.0`. The Release w
 ## Credits
 
 * [DM Sans](https://github.com/googlefonts/dm-fonts), SIL Open Font License: `assets/fonts/OFL.txt`
+* [Noto Sans Symbols, Symbols 2 and Math](https://github.com/notofonts/symbols) (a few key glyphs only), SIL Open Font License: `assets/fonts/OFL-Noto.txt`
 * [Sparkle](https://sparkle-project.org), MIT License, included in releases
 * [Hugeicons](https://hugeicons.com) free icons, MIT License: `assets/icons/LICENSE-hugeicons.md`
 
