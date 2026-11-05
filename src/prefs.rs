@@ -4,8 +4,11 @@ use crate::{Action, App, Queue};
 use eframe::egui::{self, vec2, Align2, Color32, FontFamily, Key, Ui, ViewportBuilder, ViewportId};
 use std::sync::{Arc, Mutex};
 
-const LABEL_W: f32 = 200.0;
-pub const WINDOW: [f32; 2] = [560.0, 720.0];
+const LABEL_W: f32 = 224.0;
+/// The info icon sits at the right end of the label column, so every icon lines up.
+const TIP_ICON: f32 = 14.0;
+const TIP_MAX_W: f32 = 300.0;
+pub const WINDOW: [f32; 2] = [600.0, 604.0];
 /// The date the file name example is shown with.
 const SAMPLE: Stamp = Stamp { year: 2026, month: 11, day: 5, hour: 9, minute: 7, second: 3 };
 /// How small the scrolling speed slider's steps are: one per level.
@@ -121,13 +124,44 @@ fn key_code(k: Key) -> Option<String> {
 }
 
 fn row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
+    tip_row(ui, label, "", add);
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Where the info icons were drawn in the last frame, by row label (for the render tests).
+    static TIP_ICONS: std::cell::RefCell<Vec<(String, egui::Rect)>> = Default::default();
+    /// The lowest point any row reached in the last frame.
+    static ROWS_BOTTOM: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) };
+}
+
+/// A row whose label carries an info icon (ⓘ) when `tip` is not empty. The explanation shows as a
+/// tooltip over the icon or the label: no helper text is drawn under the row.
+fn tip_row(ui: &mut Ui, label: &str, tip: &str, add: impl FnOnce(&mut Ui)) {
     ui.horizontal(|ui| {
         let (r, _) = ui.allocate_exact_size(vec2(LABEL_W, 22.0), egui::Sense::hover());
-        ui.painter().text(r.right_center(), Align2::RIGHT_CENTER, label, egui::FontId::proportional(13.0), ui.visuals().text_color());
+        let dark = ui.visuals().dark_mode;
+        let text_right = if tip.is_empty() { r.right() } else { r.right() - TIP_ICON - 4.0 };
+        let text = ui.painter().text(egui::pos2(text_right, r.center().y), Align2::RIGHT_CENTER, label, egui::FontId::proportional(13.0), ui.visuals().text_color());
+        if !tip.is_empty() {
+            let icon = egui::Rect::from_center_size(egui::pos2(r.right() - TIP_ICON / 2.0, r.center().y), vec2(TIP_ICON, TIP_ICON));
+            let resp = ui.interact(text.union(icon).expand2(vec2(2.0, 3.0)), ui.id().with(("tip", label)), egui::Sense::hover());
+            let t = th(dark);
+            let c = if resp.hovered() { t.text } else { t.dim.gamma_multiply(0.8) };
+            crate::icons::draw(ui.painter(), icon, crate::icons::Icon::Info, c);
+            #[cfg(test)]
+            TIP_ICONS.with(|v| v.borrow_mut().push((label.to_string(), icon)));
+            resp.on_hover_ui(|ui| {
+                ui.set_max_width(TIP_MAX_W);
+                ui.label(tip);
+            });
+        }
         ui.add_space(6.0);
         ui.vertical(add);
     });
     ui.add_space(6.0);
+    #[cfg(test)]
+    ROWS_BOTTOM.with(|b| b.set(b.get().max(ui.cursor().top())));
 }
 
 impl App {
@@ -228,9 +262,9 @@ impl PrefsState {
         egui::CentralPanel::default().frame(egui::Frame::new().fill(t.bar2).inner_margin(20)).show(ui, |ui| {
             let before = self.settings.clone();
             match self.tab {
-                0 => self.prefs_general(ui, t.dim),
+                0 => self.prefs_general(ui),
                 1 => self.prefs_hotkeys(ui, t.dim),
-                _ => self.prefs_advanced(ui, t.dim),
+                _ => self.prefs_advanced(ui),
             }
             if self.settings != before {
                 self.edited = true;
@@ -239,9 +273,12 @@ impl PrefsState {
         });
     }
 
-    fn prefs_general(&mut self, ui: &mut Ui, dim: Color32) {
+    fn prefs_general(&mut self, ui: &mut Ui) {
         let queue = self.queue.clone();
         let PrefsState { settings: s, height_text, .. } = self;
+        let name_tip = format!("Like {}\n\n%Y year  %m month  %d day\n%H hour  %M minute  %S second\n%t time", crate::settings::file_stem(&s.file_name_template, &SAMPLE));
+        let (lo, hi) = crate::settings::SCROLL_MAX_HEIGHT_RANGE;
+        let height_tip = format!("From {} to {} px. The picture stops there.", thousands(lo), thousands(hi));
         row(ui, "After screenshot", |ui| {
             ui.horizontal(|ui| {
                 ui.radio_value(&mut s.after_show, AfterShow::Editor, "Editor");
@@ -273,10 +310,8 @@ impl PrefsState {
                 }
             });
         });
-        row(ui, "File name", |ui| {
+        tip_row(ui, "File name", &name_tip, |ui| {
             ui.add(egui::TextEdit::singleline(&mut s.file_name_template).desired_width(200.0).hint_text(crate::settings::FILE_NAME_TEMPLATE));
-            ui.label(egui::RichText::new(format!("Like {}", crate::settings::file_stem(&s.file_name_template, &SAMPLE))).color(dim).size(11.0));
-            ui.label(egui::RichText::new("%Y year  %m month  %d day  %H hour  %M minute  %S second  %t time").color(dim).size(11.0));
         });
         row(ui, "Save format", |ui| {
             ui.horizontal(|ui| {
@@ -287,7 +322,7 @@ impl PrefsState {
         row(ui, "Resize retina screenshots", |ui| {
             ui.checkbox(&mut s.downscale_retina, "Downscale to 1× when saving");
         });
-        row(ui, "Window Screenshot Background", |ui| {
+        tip_row(ui, "Window Screenshot Background", "Applies to Active Window and Any Window screenshots, not to Area or Fullscreen.", |ui| {
             ui.horizontal(|ui| {
                 ui.radio_value(&mut s.window_bg, WindowBg::Wallpaper, "Wallpaper").on_hover_text("The window and its shadow on your desktop picture");
                 ui.radio_value(&mut s.window_bg, WindowBg::Transparent, "Transparent").on_hover_text("The window and its shadow on a see-through background");
@@ -301,7 +336,6 @@ impl PrefsState {
                 }
             });
             ui.radio_value(&mut s.window_bg, WindowBg::Trimmed, "Trim shadow").on_hover_text("The window cut out without its shadow");
-            ui.label(egui::RichText::new("Applies to Active Window and Any Window screenshots, not to Area or Fullscreen.").color(dim).size(11.0));
         });
         row(ui, "Delayed screenshot", |ui| {
             ui.horizontal(|ui| {
@@ -310,17 +344,14 @@ impl PrefsState {
                 }
             });
         });
-        row(ui, "Area capture", |ui| {
+        tip_row(ui, "Area capture", "Draws the selection on a still picture of the screen, with guide lines. Space does not switch to a window.", |ui| {
             ui.checkbox(&mut s.frozen_area, "Freeze the screen while selecting");
-            ui.label(egui::RichText::new("Draws the selection on a still picture of the screen, with guide lines. Space does not switch to a window.").color(dim).size(11.0));
         });
-        row(ui, "Mouse pointer", |ui| {
+        tip_row(ui, "Mouse pointer", "Fullscreen, Active Window, Delayed, Repeat Area and frozen Area. Not with the system selector.", |ui| {
             ui.checkbox(&mut s.capture_cursor, "Include it in screenshots");
-            ui.label(egui::RichText::new("Fullscreen, Active Window, Delayed, Repeat Area and frozen Area. Not with the system selector.").color(dim).size(11.0));
         });
-        row(ui, "Scrolling screenshot max height", |ui| {
+        tip_row(ui, "Scrolling screenshot max height", &height_tip, |ui| {
             ui.horizontal(|ui| {
-                let (lo, hi) = crate::settings::SCROLL_MAX_HEIGHT_RANGE;
                 let mut text = height_text.clone().unwrap_or_else(|| s.scroll_max_height().to_string());
                 let field = ui.add(egui::TextEdit::singleline(&mut text).desired_width(70.0));
                 if field.changed() {
@@ -336,17 +367,14 @@ impl PrefsState {
                 }
                 ui.label("px");
             });
-            let (lo, hi) = crate::settings::SCROLL_MAX_HEIGHT_RANGE;
-            ui.label(egui::RichText::new(format!("From {} to {}. The picture stops there.", thousands(lo), thousands(hi))).color(dim).size(11.0));
         });
-        row(ui, "Scrolling screenshot speed", |ui| {
+        tip_row(ui, "Scrolling screenshot speed", "Slower: use it when the capture loses track.", |ui| {
             let mut level = s.scroll_speed_level() as i32;
             ui.horizontal(|ui| {
                 ui.add(egui::Slider::new(&mut level, SPEED_LEVELS).show_value(false));
                 ui.label(crate::settings::SCROLL_SPEED_LABELS[level as usize]);
             });
             s.scroll_speed = level as u8;
-            ui.label(egui::RichText::new("Slower: use it when the capture loses track.").color(dim).size(11.0));
         });
     }
 
@@ -366,16 +394,13 @@ impl PrefsState {
                 None => {}
             }
         }
-        ui.label(egui::RichText::new("Reassign default shortcuts").strong().size(12.0));
-        ui.add_space(2.0);
-        for step in ["macOS keeps Cmd+Shift+3 and Cmd+Shift+4 for its own screenshots until you free them.", "1. In System Settings > Keyboard > Keyboard Shortcuts, pick Screenshots.", "2. Untick the system screenshot shortcuts.", "3. Put Cmd+Shift+3 into Fullscreen and Cmd+Shift+4 into Area below."] {
-            ui.label(egui::RichText::new(step).color(dim).size(11.0));
-        }
-        ui.add_space(4.0);
-        if ui.button("Open System Settings").clicked() {
-            crate::system::open_keyboard_settings();
-        }
-        ui.add_space(12.0);
+        let steps = "macOS keeps Cmd+Shift+3 and Cmd+Shift+4 for its own screenshots until you free them.\n\n1. In System Settings > Keyboard > Keyboard Shortcuts, pick Screenshots.\n2. Untick the system screenshot shortcuts.\n3. Put Cmd+Shift+3 into Fullscreen and Cmd+Shift+4 into Area below.";
+        tip_row(ui, "Reassign default shortcuts", steps, |ui| {
+            if ui.button("Open System Settings").clicked() {
+                crate::system::open_keyboard_settings();
+            }
+        });
+        ui.add_space(8.0);
         for a in crate::settings::HotkeyAction::ALL {
             let current = self.settings.hotkey(a).map(pretty_hotkey);
             row(ui, a.label(), |ui| {
@@ -403,7 +428,7 @@ impl PrefsState {
         }
     }
 
-    fn prefs_advanced(&mut self, ui: &mut Ui, dim: Color32) {
+    fn prefs_advanced(&mut self, ui: &mut Ui) {
         let PrefsState { settings: s, confirm_reset, .. } = self;
         row(ui, "Primary OCR language", |ui| {
             let languages = crate::system::ocr_languages();
@@ -419,9 +444,8 @@ impl PrefsState {
         row(ui, "OCR line breaks", |ui| {
             ui.checkbox(&mut s.ocr_remove_breaks, "Remove line breaks");
         });
-        row(ui, "Menubar icon", |ui| {
+        tip_row(ui, "Menubar icon", "Needs a working Show ShotCraft hotkey", |ui| {
             ui.checkbox(&mut s.hide_menubar_icon, "Hide menubar icon");
-            ui.label(egui::RichText::new("Needs a working Show ShotCraft hotkey").color(dim).size(11.0));
         });
         row(ui, "Main window", |ui| {
             ui.checkbox(&mut s.always_on_top, "Always on top");
@@ -433,10 +457,8 @@ impl PrefsState {
             ui.checkbox(&mut s.scroll_reverse, "Reverse scroll direction").on_hover_text("For apps that reverse the mouse wheel. The macOS natural scrolling setting does not need this.");
             ui.checkbox(&mut s.scroll_manual, "Scroll by hand").on_hover_text("ShotCraft grabs the area while you scroll it, instead of scrolling for you");
         });
-        row(ui, "Default zoom level", |ui| {
+        tip_row(ui, "Default zoom level", "When selected, Area Capture will open the editor at 100% zoom when possible, and Fullscreen Capture will open the editor at 80% zoom.", |ui| {
             ui.checkbox(&mut s.prefer_100, "Prefer 100%");
-            ui.set_max_width(236.0);
-            ui.label(egui::RichText::new("When selected, Area Capture will open the editor at 100% zoom when possible, and Fullscreen Capture will open the editor at 80% zoom.").color(dim).size(11.0));
         });
         row(ui, "Default tool", |ui| {
             let label = if s.default_tool.is_empty() { "Keep the current tool" } else { s.default_tool.as_str() };
@@ -465,9 +487,8 @@ impl PrefsState {
                 ui.selectable_value(&mut s.confirmation, Confirm::None, "None");
             });
         });
-        row(ui, "Automation", |ui| {
+        tip_row(ui, "Automation", "Shortcuts, Raycast, Alfred or a script can start a capture: open shotcraft://grab/area", |ui| {
             ui.checkbox(&mut s.allow_links, "Allow shotcraft:// links from other apps");
-            ui.label(egui::RichText::new("Shortcuts, Raycast, Alfred or a script can start a capture: open shotcraft://grab/area").color(dim).size(11.0));
         });
         row(ui, "Reset", |ui| {
             if *confirm_reset {
@@ -507,7 +528,7 @@ mod tests {
     use crate::headless::{save_png, with_rig};
 
     fn state() -> PrefsState {
-        PrefsState { open: true, focus: false, tab: 0, settings: Settings::default(), edited: false, queue: Arc::new(Mutex::new(vec![])), recording: None, refused: vec![], height_text: None, confirm_reset: false }
+        tests_state()
     }
 
     /// Renders each tab to `$SHOTCRAFT_SHOTS/<name>-<tab>.png` when that variable is set, and returns the
@@ -586,4 +607,87 @@ mod capture_rows_tests {
         assert_eq!((img.w, img.h), ((WINDOW[0] * ppp) as u32, (WINDOW[1] * ppp) as u32));
         let _ = &mut state;
     }
+}
+
+#[cfg(test)]
+mod tooltip_tests {
+    use super::*;
+    use crate::headless::{save_png, with_rig};
+
+    const TABS: [&str; 3] = ["general", "hotkeys", "advanced"];
+
+    /// With SHOTCRAFT_SHOTS=<dir> and SHOTCRAFT_SHOTS_TAG=<tag>, writes `<tag>-<tab>-<light|dark>.png`
+    /// for every tab, and `<tag>-tooltip-<light|dark>.png` with the tooltip of the file name row open.
+    #[test]
+    fn every_tab_renders_light_and_dark_with_tooltips() {
+        let dir = std::env::var("SHOTCRAFT_SHOTS").ok().map(std::path::PathBuf::from);
+        let tag = std::env::var("SHOTCRAFT_SHOTS_TAG").unwrap_or_else(|_| "after".into());
+        let size = (WINDOW[0], WINDOW[1]);
+        for dark in [false, true] {
+            let mode = if dark { "dark" } else { "light" };
+            for (tab, name) in TABS.iter().enumerate() {
+                let mut st = super::tests_state();
+                st.tab = tab;
+                let img = with_rig(|rig| rig.render_window_themed(size, 2.0, dark, None, |ui| st.body(ui)));
+                if let Some(d) = &dir {
+                    save_png(&img, &d.join(format!("{tag}-{name}-{mode}.png")));
+                }
+            }
+            // Tooltip open: hover the info icon of a General row, and of a Hotkeys row.
+            for (tab, label, file) in [(0, "File name", "tooltip"), (1, "Reassign default shortcuts", "tooltip-hotkeys")] {
+                let mut st = super::tests_state();
+                st.tab = tab;
+                TIP_ICONS.with(|v| v.borrow_mut().clear());
+                with_rig(|rig| rig.render_window_themed(size, 2.0, dark, None, |ui| st.body(ui)));
+                let icon = TIP_ICONS.with(|v| v.borrow().iter().find(|(l, _)| l == label).map(|(_, r)| *r));
+                let icon = icon.unwrap_or_else(|| panic!("no info icon on the {label} row"));
+                let img = with_rig(|rig| rig.render_window_themed(size, 2.0, dark, Some(icon.center()), |ui| st.body(ui)));
+                if let Some(d) = &dir {
+                    save_png(&img, &d.join(format!("{tag}-{file}-{mode}.png")));
+                }
+            }
+        }
+    }
+
+    /// The helper lines are gone from the page: every explanation sits in a tooltip on a row with an icon.
+    #[test]
+    fn rows_with_help_carry_an_info_icon() {
+        for tab in 0..3 {
+            let mut st = super::tests_state();
+            st.tab = tab;
+            TIP_ICONS.with(|v| v.borrow_mut().clear());
+            with_rig(|rig| rig.render_window_themed((WINDOW[0], WINDOW[1]), 2.0, false, None, |ui| st.body(ui)));
+            let labels: Vec<String> = TIP_ICONS.with(|v| v.borrow().iter().map(|(l, _)| l.clone()).collect());
+            let want: &[&str] = match tab {
+                0 => &["File name", "Window Screenshot Background", "Area capture", "Mouse pointer", "Scrolling screenshot max height", "Scrolling screenshot speed"],
+                1 => &["Reassign default shortcuts"],
+                _ => &["Menubar icon", "Default zoom level", "Automation"],
+            };
+            for w in want {
+                assert!(labels.iter().any(|l| l == w), "tab {tab}: no info icon on {w}, got {labels:?}");
+            }
+        }
+    }
+
+    /// The window is as tall as the tallest tab needs (its 20 point margin below the last row included).
+    #[test]
+    fn the_window_fits_the_tallest_tab() {
+        let mut tallest = 0.0f32;
+        for tab in 0..3 {
+            let mut st = super::tests_state();
+            st.tab = tab;
+            ROWS_BOTTOM.with(|b| b.set(0.0));
+            with_rig(|rig| rig.render_window_themed((WINDOW[0], WINDOW[1]), 2.0, false, None, |ui| st.body(ui)));
+            let bottom = ROWS_BOTTOM.with(|b| b.get());
+            eprintln!("tab {tab}: rows end at {bottom}");
+            tallest = tallest.max(bottom);
+        }
+        assert!(tallest + 20.0 <= WINDOW[1], "rows end at {tallest}, window is {}", WINDOW[1]);
+        assert!(tallest + 20.0 >= WINDOW[1] - 24.0, "rows end at {tallest}: the window has a dead band, shrink it");
+    }
+}
+
+#[cfg(test)]
+fn tests_state() -> PrefsState {
+    PrefsState { open: true, focus: false, tab: 0, settings: Settings::default(), edited: false, queue: Arc::new(Mutex::new(vec![])), recording: None, refused: vec![], height_text: None, confirm_reset: false }
 }
