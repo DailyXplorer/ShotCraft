@@ -166,6 +166,10 @@ pub struct Settings {
     pub tool_styles: std::collections::BTreeMap<String, ToolStyle>,
     pub hotkeys: Vec<(HotkeyAction, String)>,
     pub last_area: Option<[f32; 4]>,
+    /// Draw menu: Snap to Objects (edges and centres line up with other annotations).
+    pub snap_objects: bool,
+    /// Draw menu: Snap to Similar Objects (same sizes and equal spacing among annotations of one kind).
+    pub snap_similar: bool,
     /// The backdrop configuration used last; new backdrops start from it.
     pub backdrop: Option<crate::model::Backdrop>,
 }
@@ -212,6 +216,8 @@ impl Default for Settings {
                 (HotkeyAction::Ocr, "control+alt+super+KeyO".into()),
             ],
             last_area: None,
+            snap_objects: true,
+            snap_similar: false,
             backdrop: None,
         }
     }
@@ -394,6 +400,17 @@ mod window_bg_tests {
         let s = Settings::default();
         assert_eq!(s.window_bg, WindowBg::Transparent);
         assert_eq!(s.window_solid, "#C4C6C8");
+    }
+
+    #[test]
+    fn snapping_defaults_to_objects_only_and_survives_a_save() {
+        let s = load("{}");
+        assert!(s.snap_objects && !s.snap_similar);
+        let mut s = Settings::default();
+        s.snap_objects = false;
+        s.snap_similar = true;
+        let back = load(&serde_json::to_string(&s).unwrap());
+        assert!(!back.snap_objects && back.snap_similar);
     }
 
     #[test]
