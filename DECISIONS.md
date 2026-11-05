@@ -17,3 +17,15 @@ Why: a capture tool runs all day and must not take over the screen at login.
 * The main menu is still installed, because its key equivalents (Cmd+, Cmd+P, Cmd+W, Cmd+Q) keep working while a ShotCraft window has focus even though the menu is not drawn. The other editor shortcuts (Cmd+C, Cmd+S, Cmd+Z, ...) are handled by the editor itself. Check a new shortcut with the Dock icon off.
 * The app has no Cmd+Tab entry. This is accepted.
 * The menu bar icon can be hidden only while the Show ShotCraft hotkey is set and registered, so the app always stays reachable.
+
+## URL scheme shotcraft:// added (owner approved)
+
+ShotCraft answers `shotcraft://` links (captures, `ocr`, `load/clipboard`, `load/file`, `show`, `settings`), documented in the README under Automation. The owner approved it after an earlier version left it out.
+
+* Only the routes in `src/url_scheme.rs` exist; anything else is ignored. No link runs a command, and the only file a link can make the app read is an image named by `load/file` (absolute path, no `..`, image extension, regular file once symlinks are resolved).
+* Links are off until the user allows them (Preferences, Advanced; the first link asks). Allowing is the user's act, never a link's.
+* Not offered: a `then=` parameter and `settings/...` toggles. A link starts an action; what happens after a capture, and every preference, stays in Preferences.
+
+## No screenshot library (owner decision)
+
+ShotCraft keeps no history or library of past screenshots. A capture is copied, saved to the screenshots folder, pinned or edited, and then it is the user's file. This is on purpose, so no link or preference for a library exists.

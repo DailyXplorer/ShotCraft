@@ -465,6 +465,10 @@ impl PrefsState {
                 ui.selectable_value(&mut s.confirmation, Confirm::None, "None");
             });
         });
+        row(ui, "Automation", |ui| {
+            ui.checkbox(&mut s.allow_links, "Allow shotcraft:// links from other apps");
+            ui.label(egui::RichText::new("Shortcuts, Raycast, Alfred or a script can start a capture: open shotcraft://grab/area").color(dim).size(11.0));
+        });
         row(ui, "Reset", |ui| {
             if *confirm_reset {
                 ui.label(egui::RichText::new("Put every preference back to its default?").size(12.0));
