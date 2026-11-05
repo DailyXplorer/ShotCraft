@@ -18,7 +18,6 @@ mod autoscroll;
 mod scroll;
 mod selection;
 mod snap;
-mod scroll_control;
 mod settings;
 mod sizing;
 mod tray_flash;
@@ -92,8 +91,8 @@ pub enum Action {
     ScrollingCapture,
     /// Scrolling capture that starts at the bottom of the page and goes up.
     ScrollingCaptureUp,
-    ScrollingCancel,
-    /// Return during a scrolling capture: ends it. Unlike `ScrollingCapture` it never starts one.
+    /// Esc during a scrolling capture: ends it and keeps the result. Unlike `ScrollingCapture` it
+    /// never starts one.
     ScrollingFinish,
     ScrollingArea(Result<Option<model::R>, String>),
     ScrollingFinished(Result<Option<scroll::Outcome>, String>),
@@ -221,6 +220,8 @@ pub struct App {
     front_title: &'static str,
     front_focus: bool,
     scroll: Option<scroll::Session>,
+    /// Esc is registered as a global hotkey: true only for the length of a scrolling capture.
+    escape_grabbed: bool,
     frozen: Option<Frozen>,
     /// Which way the scrolling capture being set up goes.
     scroll_dir: scroll::Direction,
@@ -300,6 +301,7 @@ impl App {
             front_title: "",
             front_focus: true,
             scroll: None,
+            escape_grabbed: false,
             frozen: None,
             scroll_dir: scroll::Direction::Down,
             ocr_running: false,
@@ -345,6 +347,7 @@ impl App {
             front_title: "",
             front_focus: true,
             scroll: None,
+            escape_grabbed: false,
             frozen: None,
             scroll_dir: scroll::Direction::Down,
             ocr_running: false,
@@ -412,15 +415,6 @@ impl App {
         self.front_until = Some(Instant::now() + std::time::Duration::from_secs(3));
         self.front_title = title;
         self.front_focus = true;
-        self.ctx.request_repaint();
-    }
-
-    /// Like `bring_to_front`, but the app is not activated and no window takes the keyboard: for a HUD
-    /// that floats over another app the user keeps working in.
-    fn show_without_focus(&mut self, title: &'static str) {
-        self.front_until = Some(Instant::now() + std::time::Duration::from_secs(3));
-        self.front_title = title;
-        self.front_focus = false;
         self.ctx.request_repaint();
     }
 
@@ -581,7 +575,7 @@ impl App {
         self.push(if st.for_ocr { Action::OcrCaptured(res) } else { Action::Captured(res) });
     }
 
-    /// Starts a scrolling capture, or ends the running one (the hotkey and the menu item act as Done).
+    /// Starts a scrolling capture, or ends the running one (the hotkey and the menu item act like Esc).
     fn start_scrolling(&mut self, dir: scroll::Direction) {
         if let Some(s) = &self.scroll {
             s.finish();
@@ -625,43 +619,27 @@ impl App {
             self.error("That area is too small. Select a larger area to scroll through.");
             return;
         };
-        let Some(pos) = scroll::control_position(&rect.as_r(), scroll::CONTROL_SIZE, &scroll::screens()) else {
-            self.busy = false;
-            self.error("No room for the controls next to that area. Select a smaller area.");
-            return;
-        };
         // Scrolling for the user needs the Accessibility permission; ask for it the first time. Without it
         // the capture still works, the user scrolls.
         let limits = scroll::Limits::from_settings(&self.settings);
         let auto = !limits.manual && autoscroll::trusted(true);
-        self.scroll = Some(scroll::Session::start(rect, pos, auto, self.scroll_dir, limits, self.queue.clone(), self.ctx.clone()));
+        // No window of ours is up during the capture: Esc, taken from every app until it ends,
+        // is the only control.
+        self.scroll = Some(scroll::Session::start(rect, auto, self.scroll_dir, limits, self.queue.clone(), self.ctx.clone()));
         self.grab_escape(true);
-        // The control is a new window and the app has no Dock icon: wake the UI pass that creates it
-        // while the editor is hidden, and show it without taking the keyboard from the page.
-        self.wake_ui();
-        self.show_without_focus(scroll::CONTROL_TITLE);
-        self.ctx.request_repaint();
     }
 
-    /// Return: ends the running scrolling capture and gives Return back at once. With no capture
-    /// running (a press that was already queued when the capture ended, or a double press) nothing
-    /// happens: it must never open the area picker of a new capture.
+    /// Esc: ends the running scrolling capture and keeps it. With no capture running (a press that
+    /// was already queued when the capture ended, or a double press) nothing happens: it must never
+    /// open the area picker of a new capture.
     fn finish_scrolling(&mut self) {
         if let Some(s) = &self.scroll {
             s.finish();
         }
-        self.release_enter();
-    }
-
-    fn release_enter(&mut self) {
-        #[cfg(target_os = "macos")]
-        if let Some(s) = &mut self.shell {
-            s.release_enter();
-        }
     }
 
     fn scrolling_finished(&mut self, res: Result<Option<scroll::Outcome>, String>) {
-        self.scroll = None;
+        let told = self.scroll.take().is_some_and(|s| s.notified());
         let up = self.scroll_dir == scroll::Direction::Up;
         self.grab_escape(false);
         match res {
@@ -670,7 +648,9 @@ impl App {
                 let size = (o.img.w, o.img.h);
                 let (img, scale) = (o.img, o.scale);
                 self.handle(Action::Captured(Ok(Some(Captured { img, scale, area: None, mode: CaptureMode::Area }))));
-                if capped {
+                if told {
+                    // A notification already explained what happened: no second one.
+                } else if capped {
                     self.say(format!("Stopped at the height limit of {max_height} px. Change it in Preferences"));
                 } else if frames <= 1 && lost > 0 {
                     self.say("Lost track while scrolling, so this is only the first view. Scroll slower and try again");
@@ -687,22 +667,8 @@ impl App {
         }
     }
 
-    fn scroll_ui(&mut self, ctx: &egui::Context) {
-        let Some(s) = &self.scroll else { return };
-        let builder = ViewportBuilder::default()
-            .with_title(scroll::CONTROL_TITLE)
-            .with_inner_size(scroll::CONTROL_SIZE)
-            .with_position(s.control_pos)
-            .with_decorations(false)
-            .with_resizable(false)
-            .with_transparent(true)
-            .with_has_shadow(false)
-            .with_active(false)
-            .with_always_on_top();
-        show_window(ctx, scroll::control_id(), builder, s.control_body());
-    }
-
     pub fn grab_escape(&mut self, on: bool) {
+        self.escape_grabbed = on;
         #[cfg(target_os = "macos")]
         if let Some(s) = &mut self.shell {
             s.grab_escape(on);
@@ -997,11 +963,6 @@ impl App {
             Action::FrozenShots(start) => self.frozen_start(*start),
             Action::ScrollingCapture => self.start_scrolling(scroll::Direction::Down),
             Action::ScrollingCaptureUp => self.start_scrolling(scroll::Direction::Up),
-            Action::ScrollingCancel => {
-                if let Some(s) = &self.scroll {
-                    s.press_escape();
-                }
-            }
             Action::ScrollingFinish => self.finish_scrolling(),
             Action::ScrollingArea(res) => self.scrolling_area(res),
             Action::ScrollingFinished(res) => self.scrolling_finished(res),
@@ -1596,7 +1557,6 @@ impl eframe::App for App {
         self.sync_menu_state();
         self.pins_ui(&ctx);
         self.thumb_ui(&ctx);
-        self.scroll_ui(&ctx);
         self.frozen_ui(&ctx);
         self.prefs_ui(&ctx);
         self.settle_windows();
@@ -1649,19 +1609,69 @@ fn main() -> eframe::Result {
 }
 
 #[cfg(test)]
-mod return_key_tests {
+mod scroll_keys_tests {
     use super::*;
 
-    /// Return is a global hotkey for the length of a scrolling capture. A press that is processed
-    /// after the capture ended (it was queued before, or Return was pressed twice) must not open
+    fn outcome(frames: u32) -> scroll::Outcome {
+        let (w, h) = (4, 6);
+        scroll::Outcome { img: model::Image { w, h, px: Arc::new(vec![255; (w * h * 4) as usize]) }, scale: 1.0, frames, lost: 0, capped: false, max_height: 20_000 }
+    }
+
+    /// Esc is a global hotkey for the length of a scrolling capture. A press that is processed
+    /// after the capture ended (it was queued before, or Esc was pressed twice) must not open
     /// the area picker of a new capture.
     #[test]
-    fn return_without_a_running_capture_starts_nothing() {
+    fn esc_without_a_running_capture_starts_nothing() {
         let mut app = App::headless(egui::Context::default());
         assert!(app.scroll.is_none());
         app.handle(Action::ScrollingFinish);
         assert!(!app.busy, "a new scrolling capture was started");
         assert!(app.scroll.is_none());
+    }
+
+    #[test]
+    fn esc_finishes_the_running_capture_instead_of_cancelling_it() {
+        let mut app = App::headless(egui::Context::default());
+        app.scroll = Some(scroll::Session::idle());
+        app.handle(Action::ScrollingFinish);
+        assert!(app.scroll.as_ref().unwrap().is_done());
+    }
+
+    #[test]
+    fn a_finished_capture_with_frames_opens_the_result_and_gives_esc_back() {
+        let mut app = App::headless(egui::Context::default());
+        app.busy = true;
+        app.scroll = Some(scroll::Session::idle());
+        app.grab_escape(true);
+        assert!(app.escape_grabbed);
+        app.handle(Action::ScrollingFinished(Ok(Some(outcome(5)))));
+        assert!(app.scroll.is_none());
+        assert!(!app.escape_grabbed, "Esc is given back");
+        assert!(!app.busy);
+        assert!(app.doc.is_some(), "the result is opened the normal way");
+    }
+
+    #[test]
+    fn esc_with_nothing_captured_ends_silently_and_gives_esc_back() {
+        let mut app = App::headless(egui::Context::default());
+        app.busy = true;
+        app.scroll = Some(scroll::Session::idle());
+        app.grab_escape(true);
+        app.handle(Action::ScrollingFinished(Ok(None)));
+        assert!(app.scroll.is_none() && !app.escape_grabbed && !app.busy);
+        assert!(app.doc.is_none(), "no result");
+        assert!(app.toast.is_none(), "no message");
+    }
+
+    #[test]
+    fn an_error_gives_esc_back_too() {
+        let mut app = App::headless(egui::Context::default());
+        app.busy = true;
+        app.scroll = Some(scroll::Session::idle());
+        app.grab_escape(true);
+        app.handle(Action::ScrollingFinished(Err("boom".into())));
+        assert!(app.scroll.is_none() && !app.escape_grabbed && !app.busy);
+        assert!(app.doc.is_none());
     }
 }
 
