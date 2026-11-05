@@ -297,7 +297,7 @@ pub fn snap_point(q: P, anchor: Option<P>, others: &[Other], o: Opts, tol: f32) 
 pub fn object_rect(obj: &Obj, fonts: &render::Fonts) -> R {
     match &obj.kind {
         Kind::Arrow { a, b, .. } | Kind::Line { a, b } | Kind::Highlighter { a, b } | Kind::Ruler { a, b } => R::from_points(*a, *b),
-        Kind::Rect { r, .. } | Kind::Oval { r, .. } | Kind::Blur { r, .. } | Kind::Spotlight { r } | Kind::Magnifier { r, .. } => *r,
+        Kind::Rect { r, .. } | Kind::Oval { r, .. } | Kind::Blur { r, .. } | Kind::Spotlight { r } | Kind::Magnifier { r, .. } | Kind::Image { r, .. } => *r,
         Kind::Freehand { pts } => pts.iter().fold(R { x0: f32::MAX, y0: f32::MAX, x1: f32::MIN, y1: f32::MIN }, |r, q| R {
             x0: r.x0.min(q.x),
             y0: r.y0.min(q.y),
