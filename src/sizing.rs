@@ -277,7 +277,8 @@ impl ToolbarFit {
         self.visible.saturating_sub(TOOLBAR_TOOL_ITEMS)
     }
 
-    /// Width taken by the segments laid out, with the overflow button when needed.
+    /// Width taken by the segments laid out, with the overflow button when needed, and the
+    /// Preferences button at the right.
     pub fn width(self) -> f32 {
         let mut w = seg_group_w(TOOLBAR_COPY_ITEMS) + seg_group_w(1) + TOOLBAR_GROUP_GAP;
         for n in [self.tools(), self.actions()] {
@@ -292,20 +293,37 @@ impl ToolbarFit {
     }
 }
 
+impl ToolbarFit {
+    /// Width of the groups that sit together in the middle of the toolbar: everything but the
+    /// Preferences button, which is pinned to the right edge.
+    pub fn cluster_width(self) -> f32 {
+        self.width() - seg_group_w(1) - TOOLBAR_GROUP_GAP
+    }
+}
+
 /// Most segments that fit in a toolbar of `window_width`: Copy/Save/Pin and Preferences stay, the
-/// selection actions then the last tools move into the overflow menu as the window narrows.
+/// selection actions then the last tools move into the overflow menu as the window narrows. The
+/// middle groups are centred in the window, so they must fit between two margins as wide as the
+/// traffic lights' (the Preferences button sits in the right one).
 pub fn toolbar_fit(window_width: f32) -> ToolbarFit {
-    let room = window_width - TRAFFIC_LIGHTS_W - TOOLBAR_EDGE;
+    let room = window_width - 2.0 * TRAFFIC_LIGHTS_W;
     (0..=ToolbarFit::ALL)
         .rev()
         .map(|visible| ToolbarFit { visible })
-        .find(|f| f.width() <= room)
+        .find(|f| f.cluster_width() <= room)
         .unwrap_or(ToolbarFit { visible: 0 })
+}
+
+/// Where the middle groups start, from the left edge of the toolbar: centred in the window, never
+/// under the traffic lights nor into the Preferences button.
+pub fn toolbar_cluster_left(window_width: f32, fit: ToolbarFit) -> f32 {
+    let last_left = window_width - TOOLBAR_EDGE - seg_group_w(1) - TOOLBAR_GROUP_GAP - fit.cluster_width();
+    ((window_width - fit.cluster_width()) / 2.0).min(last_left).max(TRAFFIC_LIGHTS_W)
 }
 
 /// Narrowest window that shows every tool (and the selection actions) in the toolbar.
 pub fn full_toolbar_width() -> f32 {
-    ToolbarFit { visible: ToolbarFit::ALL }.width() + TRAFFIC_LIGHTS_W + TOOLBAR_EDGE
+    ToolbarFit { visible: ToolbarFit::ALL }.cluster_width() + 2.0 * TRAFFIC_LIGHTS_W
 }
 
 #[cfg(test)]
@@ -622,5 +640,20 @@ mod tests {
             w -= 7.0;
         }
         assert_eq!(toolbar_fit(0.0).visible, 0);
+    }
+
+    #[test]
+    fn toolbar_groups_are_centred_in_the_window_at_every_width() {
+        let mut w = 2000.0;
+        while w >= EDITOR_MIN_SIZE.0 {
+            let fit = toolbar_fit(w);
+            let left = toolbar_cluster_left(w, fit);
+            let right_gap = w - left - fit.cluster_width();
+            assert!(left >= TRAFFIC_LIGHTS_W, "clear of the traffic lights at {w}");
+            // The Preferences button (and its edge margin) fits in the space at the right.
+            assert!(right_gap >= TOOLBAR_GROUP_GAP + seg_group_w(1) + TOOLBAR_EDGE - 0.01, "room for Preferences at {w}");
+            assert!((left - right_gap).abs() < 0.01, "centred at {w}: {left} left, {right_gap} right");
+            w -= 5.0;
+        }
     }
 }
