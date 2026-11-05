@@ -1,5 +1,6 @@
 mod app_mode;
 mod color;
+mod dragout;
 mod editor;
 #[cfg(test)]
 mod headless;
@@ -174,6 +175,9 @@ pub struct App {
     thumb: Option<Arc<Mutex<Thumb>>>,
     pub prefs: Arc<Mutex<prefs::PrefsState>>,
     pub toast: Option<(String, f64)>,
+    /// Where the pointer was when a native drag took over: egui is told the button went up there,
+    /// because the drag loop swallows the real release.
+    pub drag_release: Option<egui::Pos2>,
     screenshot: Option<(PathBuf, u32)>,
     open_at_start: Option<PathBuf>,
     started: bool,
@@ -258,6 +262,7 @@ impl App {
             next_pin: 1,
             thumb: None,
             toast: None,
+            drag_release: None,
             screenshot: None,
             open_at_start: None,
             started: true,
@@ -299,6 +304,7 @@ impl App {
             next_pin: 1,
             thumb: None,
             toast: None,
+            drag_release: None,
             screenshot: screenshot.map(|p| (p, 0)),
             open_at_start,
             started: false,
@@ -707,6 +713,29 @@ impl App {
                 self.say(format!("Saved to {}", path.display()))
             }
             Err(e) => self.error(format!("Can't save: {e}")),
+        }
+    }
+
+    /// Starts a native drag of the picture, as a PNG file named by the file name template.
+    /// The drag handle's press is still the current mouse event; nothing is left behind if the
+    /// drag can't start.
+    pub fn drag_out(&mut self, pointer: egui::Pos2) {
+        let Some(img) = self.prepared_for_save() else { return };
+        let stem = settings::file_stem(&self.settings.file_name_template, &system::now_stamp());
+        let path = match dragout::export(&img, &stem) {
+            Ok(p) => p,
+            Err(e) => return self.error(e),
+        };
+        let preview = dragout::preview_size(img.w, img.h);
+        let started = match dragout::preview_png(&img) {
+            Some(png) => dragout::begin(&path, &png, preview),
+            None => Err("Can't prepare the drag preview".to_string()),
+        };
+        if let Err(e) = started {
+            dragout::finish(&path, false);
+            self.error(format!("Can't drag the image: {e}"));
+        } else {
+            self.drag_release = Some(pointer);
         }
     }
 
@@ -1341,6 +1370,14 @@ fn thumb_window(ui: &mut egui::Ui, th: &mut Thumb, queue: &Queue) {
 }
 
 impl eframe::App for App {
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if raw_input.viewport_id == ViewportId::ROOT {
+            if let Some(pos) = self.drag_release.take() {
+                raw_input.events.extend(dragout::release_events(pos, egui::Modifiers::NONE));
+            }
+        }
+    }
+
     fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain();
         #[cfg(target_os = "macos")]
@@ -1414,6 +1451,8 @@ impl eframe::App for App {
 }
 
 fn main() -> eframe::Result {
+    // Files left in the temporary folder by earlier drags.
+    std::thread::spawn(dragout::sweep_stale);
     let args: Vec<String> = std::env::args().collect();
     #[cfg(target_os = "macos")]
     if args.iter().any(|a| a == "--check-updater") {
