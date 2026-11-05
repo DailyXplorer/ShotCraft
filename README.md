@@ -70,7 +70,7 @@ A pinned image is a borderless window that stays above other windows. Drag it an
 * General: what happens after a screenshot (editor, thumbnail or nothing; copy; save), thumbnail auto-close (click outside, or the close button), launch at startup, screenshots folder, file name, save format, Retina downscale, window screenshot background (Wallpaper, Transparent, Solid Color or Trim shadow), scrolling screenshot max height (1,000 to 400,000 px, default 20,000) and scrolling screenshot speed (five levels: the slower, the shorter the steps and the longer the wait for the page to settle).
 * File name: a template with `%Y` year, `%y` two-digit year, `%m` month, `%d` day, `%H` hour, `%M` minute, `%S` second, `%t` time (`%H%M%S`) and `%%`. The default is `ShotCraft-%Y%m%d-%t`. `/`, `\` and `:` become `-`. A name that exists gets `-2`, `-3`... so a save never replaces a file. The example under the field shows the result.
 * Hotkeys: record or clear a shortcut for each of the nine actions listed under Keyboard shortcuts, in this order: Fullscreen, All displays, Area, Active window, Scrolling, Text/QR recognition, Repeat area, Any window, Show ShotCraft. ShotCraft flags a shortcut that macOS refuses because another app uses it. A short help explains how to free the system's own ⌘⇧3 and ⌘⇧4, with an Open System Settings button.
-* Advanced: primary OCR language (Automatic, or any language Vision reads), OCR line breaks, hide the menu bar icon (only while a Show ShotCraft hotkey is set and registered, since the icon is the way back into the app), keep the main window on top, zoom direction, scrolling capture (reverse the scroll direction for apps that turn the wheel around; scroll by hand), default zoom level, default tool, what Esc does when hiding the editor (copy and/or save), confirmation style (custom notification, system notification or none), and Reset All Settings (asks first).
+* Advanced: primary OCR language (Automatic, or any language Vision reads), OCR line breaks, hide the menu bar icon (only while a Show ShotCraft hotkey is set and registered, since the icon is the way back into the app), keep the main window on top, zoom direction, scrolling capture (reverse the scroll direction for apps that turn the wheel around; scroll by hand), default zoom level, default tool, what Esc does when hiding the editor (copy and/or save), confirmation style (custom notification, system notification or none), Allow `shotcraft://` links from other apps (see Automation), and Reset All Settings (asks first).
 * Each annotation tool keeps its last colour, size and options between launches, and the default tool is the one a new screenshot opens with.
 
 Settings are stored in `~/Library/Application Support/ShotCraft/settings.json`.
@@ -125,6 +125,40 @@ In the editor:
 | `1` to `9` | Spotlight tool: how dark the surroundings are (10 to 90 percent) |
 
 Keyboard Shortcuts in the menu bar icon menu lists them in the app. The menu's shortcuts only act on the editor while the editor is the window in front: with Preferences or a pin in front, `Cmd+W` closes that window and `Cmd+Z`, `Cmd+C` and the others go to its own fields. While a hotkey is being recorded in Preferences, every other shortcut (the menu's, and ShotCraft's own global hotkeys) is off, so any combination can be recorded; `Esc` cancels and `Del` clears.
+
+## Automation (URL scheme)
+
+Other apps can drive ShotCraft with `shotcraft://` links: a Shortcuts "Open URLs" action, a Raycast or Alfred workflow, or a script.
+
+```sh
+open shotcraft://grab/area
+open "shotcraft://load/file?path=/path/to/shot.png"
+```
+
+Links are off until you allow them. The first link asks once; the choice is Preferences, Advanced, "Allow shotcraft:// links from other apps". Until then nothing runs. Links never run commands and never read anything but the image file named in `load/file`.
+
+| Link | Does |
+|---|---|
+| `shotcraft://grab/area` | Area Capture |
+| `shotcraft://grab/fullscreen` | Fullscreen Screenshot |
+| `shotcraft://grab/window` | Any Window Screenshot |
+| `shotcraft://grab/window/active` | Active Window Screenshot |
+| `shotcraft://grab/repeat` | Repeat Area Capture |
+| `shotcraft://grab/scrolling` | Scrolling Capture |
+| `shotcraft://grab/scrolling/reverse` | Scrolling Capture (Up) |
+| `shotcraft://grab/delayed` | Delayed Screenshot (the wait set in Preferences) |
+| `shotcraft://grab/delayed=5` | Delayed Screenshot after 5 seconds (1 to 60) |
+| `shotcraft://grab/alldisplays` | All Displays Screenshot |
+| `shotcraft://grab/append` | Add Capture to the open picture |
+| `shotcraft://ocr` | Text recognition of an area |
+| `shotcraft://load/clipboard` | Open the picture on the clipboard |
+| `shotcraft://load/file?path=/path/to/image.png` | Open an image file. The path is absolute, percent-encoded (`%20` for a space), and ends in `png`, `jpg`, `jpeg`, `gif`, `bmp`, `tif`, `tiff` or `webp`. |
+| `shotcraft://show` | Show the editor window |
+| `shotcraft://settings` | Open Preferences |
+
+Anything else is ignored. After a capture, ShotCraft does what Preferences says (editor, thumbnail, copy, save); a link can't choose that.
+
+*Shortcuts*: add "Open URLs" with the link. *Raycast*: a Script Command or Quicklink with the link as its URL. *Alfred*: a workflow with an "Open URL" action.
 
 ## Privacy
 

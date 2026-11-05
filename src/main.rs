@@ -29,6 +29,7 @@ mod tiled;
 mod shell;
 #[cfg(target_os = "macos")]
 mod updater;
+mod url_scheme;
 mod system;
 mod targets;
 mod windowbg;
@@ -315,6 +316,8 @@ impl App {
 
     fn new(cc: &eframe::CreationContext<'_>, screenshot: Option<PathBuf>, show_at_start: bool, open_at_start: Option<PathBuf>) -> App {
         setup_fonts(&cc.egui_ctx);
+        url_scheme::attach(&cc.egui_ctx);
+        url_scheme::install();
         let settings = Settings::load();
         system::refresh_autostart(settings.autostart);
         let queue = Queue::default();
@@ -460,6 +463,12 @@ impl App {
     }
 
     fn start_capture(&mut self, mode: CaptureMode, for_ocr: bool) {
+        self.start_capture_after(mode, for_ocr, None)
+    }
+
+    /// `delay`: seconds Delayed Screenshot waits, when the caller (a link) chose them; the
+    /// preference otherwise.
+    fn start_capture_after(&mut self, mode: CaptureMode, for_ocr: bool, delay: Option<u32>) {
         if self.busy {
             return;
         }
@@ -476,7 +485,7 @@ impl App {
             solid_color: [solid[0], solid[1], solid[2]],
             scale: self.pixels_per_point(),
             cursor: self.settings.capture_cursor,
-            delay_secs: self.settings.delay(),
+            delay_secs: delay.map_or(self.settings.delay(), |d| d.clamp(1, 60)),
             snapshot,
         };
         let q = self.queue.clone();
@@ -1045,6 +1054,43 @@ impl App {
         }
     }
 
+    /// A `shotcraft://` link asked for something. Links are off until the user allows them: the
+    /// first one asks, and the answer is the "URL scheme" preference.
+    fn handle_url(&mut self, route: url_scheme::Route) -> bool {
+        if !self.settings.allow_links && !self.ask_allow_links() {
+            return false;
+        }
+        use url_scheme::Route;
+        match route {
+            Route::Delayed(Some(secs)) => self.start_capture_after(CaptureMode::Delayed, false, Some(secs)),
+            Route::LoadFile(path) => match url_scheme::check_file(&path).and_then(|real| system::load_image_file(&real)) {
+                Ok(img) => self.open_image(img, 1.0, false),
+                Err(e) => self.error(e),
+            },
+            other => {
+                if let Some(action) = other.simple_action() {
+                    self.handle(action);
+                }
+            }
+        }
+        true
+    }
+
+    fn ask_allow_links(&mut self) -> bool {
+        app_mode::activate();
+        let answer = rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Warning)
+            .set_title("Allow shotcraft:// links?")
+            .set_description("Another app asked ShotCraft to do something with a shotcraft:// link (take a screenshot, open a picture). Allow links from other apps? You can change this in Preferences, Advanced.")
+            .set_buttons(rfd::MessageButtons::YesNo)
+            .show();
+        if answer == rfd::MessageDialogResult::Yes {
+            self.settings.allow_links = true;
+            self.settings.save();
+        }
+        self.settings.allow_links
+    }
+
     pub fn open_prefs(&mut self) {
         let mut p = self.prefs.lock().unwrap();
         p.focus = p.open;
@@ -1443,6 +1489,15 @@ impl eframe::App for App {
 
     fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain();
+        // Links wait until the menu bar item exists: the first one may ask a question.
+        if self.started {
+            for route in url_scheme::take() {
+                // A No drops the links that came with it, so a loop elsewhere can't keep asking.
+                if !self.handle_url(route) {
+                    break;
+                }
+            }
+        }
         #[cfg(target_os = "macos")]
         if let Some(s) = &mut self.shell {
             s.refresh_updates();
@@ -1529,6 +1584,8 @@ fn main() -> eframe::Result {
     }
     // No launch shows a window unless it is asked to render or open something; the login item's
     // `--background` flag is accepted and changes nothing.
+    // The link that launches the app arrives as an event once the loop runs: be listening by then.
+    url_scheme::install();
     let launch = app_mode::Launch::parse(&args);
     let show_at_start = launch.shows_window();
     let app_mode::Launch { screenshot, open } = launch;

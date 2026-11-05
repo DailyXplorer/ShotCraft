@@ -136,6 +136,9 @@ pub struct Settings {
     /// Area Capture freezes the screen and draws its own selection on the frozen picture, instead
     /// of the system selector. Off by default, as in the original (where it is experimental).
     pub frozen_area: bool,
+    /// Other apps may drive ShotCraft with `shotcraft://` links (see `url_scheme.rs`). Off until
+    /// the user allows it, in Preferences or when the first link asks.
+    pub allow_links: bool,
     /// Settings files written before `WindowBg::Trimmed` kept "Trim shadow" as its own checkbox.
     /// Only read, to carry an old choice over; never written.
     #[serde(skip_serializing)]
@@ -193,6 +196,7 @@ impl Default for Settings {
             capture_cursor: false,
             delay_secs: DEFAULT_DELAY,
             frozen_area: false,
+            allow_links: false,
             trim_shadow: false,
             always_on_top: false,
             reverse_zoom: false,
@@ -560,6 +564,15 @@ mod capture_option_tests {
         assert!(!old.frozen_area);
         let on: Settings = serde_json::from_str(r#"{"frozen_area":true}"#).unwrap();
         assert!(on.frozen_area);
+    }
+
+    #[test]
+    fn links_from_other_apps_are_off_until_allowed_and_old_files_keep_them_off() {
+        assert!(!Settings::default().allow_links);
+        let old: Settings = serde_json::from_str("{}").unwrap();
+        assert!(!old.allow_links);
+        let on: Settings = serde_json::from_str(r#"{"allow_links":true}"#).unwrap();
+        assert!(on.allow_links);
     }
 
     #[test]
