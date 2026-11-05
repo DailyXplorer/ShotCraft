@@ -35,3 +35,12 @@ ShotCraft keeps no history or library of past screenshots. A capture is copied, 
 While a scrolling capture runs (down or up, automatic or by hand) no ShotCraft window is on screen: there is no HUD, no Done or Cancel button, and Return is not a hotkey. `Esc`, registered as a global hotkey only for the length of the capture and always given back when it ends, finishes the capture and keeps it: the result opens the normal way (after-capture action, editor). Esc with nothing captured yet ends silently. The capture also ends by itself at the end of the content, at the height limit, and in manual mode 3 seconds after the page stops moving. What a window used to say (Accessibility permission missing, scroll slower, the page did not move) is at most one macOS notification per capture, and only when the user has to act.
 
 Why: the owner wants it to work like the best-known tools of its kind: select, let it scroll, press Esc, get the picture, with nothing drawn over the page that is being captured.
+
+## Preferences: no helper text under rows; explanations live in tooltips (info icon) (owner decision)
+
+No Preferences tab (General, Hotkeys, Advanced) draws grey explanatory lines under a row. A row that needs an explanation carries a small dim info icon (ⓘ) right after its label, and the text shows as a tooltip on hovering the icon or the label. The file name example and its `%` tokens, the hotkey reassignment steps, and the notes on capture, pointer, scrolling and automation rows all follow this rule.
+
+* A message the user must act on (a refused hotkey, a missing permission, the reset confirmation) stays visible: only static help moves into tooltips.
+* A new preference gets its explanation as a tooltip (`tip_row` in `src/prefs.rs`), never as a line under the row.
+
+Why: the lines crowded the window; the owner wants a plain page with help one hover away.

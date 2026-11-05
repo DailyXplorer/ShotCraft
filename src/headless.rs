@@ -355,6 +355,47 @@ impl Rig {
     }
 }
 
+impl Rig {
+    /// Like `render_window`, light or dark. With `hover`, the pointer moves there and stays while a
+    /// second passes, so the tooltip of what is under it is open in the picture.
+    pub fn render_window_themed(&mut self, size: (f32, f32), ppp: f32, dark: bool, hover: Option<egui::Pos2>, mut body: impl FnMut(&mut egui::Ui)) -> Image {
+        self.ctx.set_visuals(if dark { egui::Visuals::dark() } else { egui::Visuals::light() });
+        self.ctx.set_pixels_per_point(ppp);
+        let mut last = None;
+        let mut time = self.frame as f64 * 0.05;
+        for n in 0..8 {
+            let mut input = RawInput::default();
+            input.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(size.0, size.1)));
+            time += 0.2;
+            input.time = Some(time);
+            input.viewport_id = ViewportId::ROOT;
+            if n == 2 {
+                if let Some(p) = hover {
+                    input.events = vec![egui::Event::PointerMoved(p)];
+                }
+            }
+            let mut out = self.ctx.run_ui(input, |ui| body(ui));
+            self.soft.apply(&out.textures_delta);
+            out.textures_delta.clear();
+            last = Some((out.shapes, out.pixels_per_point));
+        }
+        self.frame += 40;
+        let (shapes, ppp) = last.unwrap();
+        let prims = self.ctx.tessellate(shapes, ppp);
+        let (w, h) = ((size.0 * ppp) as usize, (size.1 * ppp) as usize);
+        let mut fb = vec![0.0f32; w * h * 4];
+        for px in fb.chunks_exact_mut(4) {
+            px.copy_from_slice(&[0.85, 0.85, 0.87, 1.0]);
+        }
+        self.soft.paint(&mut fb, w, h, ppp, &prims);
+        for id in std::mem::take(&mut self.soft.freed) {
+            self.soft.textures.remove(&id);
+        }
+        let bytes = fb.iter().map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8).collect();
+        Image { w: w as u32, h: h as u32, px: Arc::new(bytes) }
+    }
+}
+
 pub fn save_png(img: &Image, path: &std::path::Path) {
     let rgba = image::RgbaImage::from_raw(img.w, img.h, img.px.to_vec()).unwrap();
     if let Some(dir) = path.parent() {
