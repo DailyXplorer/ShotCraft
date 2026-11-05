@@ -18,6 +18,7 @@ mod snap;
 mod scroll_control;
 mod settings;
 mod sizing;
+mod tray_flash;
 #[cfg(test)]
 mod pin_shots;
 mod stitch;
@@ -209,10 +210,19 @@ fn setup_fonts(ctx: &egui::Context) {
     fonts.font_data.insert("dm-sans".into(), Arc::new(egui::FontData::from_static(include_bytes!("../assets/fonts/DMSans-Regular.ttf"))));
     fonts.font_data.insert("dm-sans-medium".into(), Arc::new(egui::FontData::from_static(include_bytes!("../assets/fonts/DMSans-Medium.ttf"))));
     fonts.families.entry(egui::FontFamily::Proportional).or_default().insert(0, "dm-sans".into());
-    // DM Sans has no ⌘ ⇧ ⌥ glyphs; borrow them from the system symbol font.
-    if let Ok(bytes) = std::fs::read("/System/Library/Fonts/SFNS.ttf") {
-        fonts.font_data.insert("symbols".into(), Arc::new(egui::FontData::from_owned(bytes)));
-        fonts.families.entry(egui::FontFamily::Proportional).or_default().insert(1, "symbols".into());
+    // DM Sans has no ⌘ ⇧ ⌥ ⌃ ⎋ ⏎ or arrow glyphs. Three tiny subsets of Noto Symbols, Symbols 2 and Math
+    // (SIL OFL, `assets/fonts/OFL-Noto.txt`) cover them on every machine, so they never show as boxes.
+    for (at, (name, bytes)) in [
+        ("symbols-2", &include_bytes!("../assets/fonts/NotoSymbols2-Subset.ttf")[..]),
+        ("symbols-1", &include_bytes!("../assets/fonts/NotoSymbols-Subset.ttf")[..]),
+        ("symbols-math", &include_bytes!("../assets/fonts/NotoMath-Subset.ttf")[..]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        fonts.font_data.insert(name.into(), Arc::new(egui::FontData::from_static(bytes)));
+        // Right after DM Sans, ahead of egui's built-in fallbacks, so the glyphs look the same everywhere.
+        fonts.families.entry(egui::FontFamily::Proportional).or_default().insert(1 + at, name.into());
     }
     fonts.families.entry(egui::FontFamily::Monospace).or_default().insert(0, "dm-sans".into());
     let mut medium = vec!["dm-sans-medium".to_string()];
@@ -596,7 +606,7 @@ impl App {
         };
         let chrome = editor::TOOLBAR_H + editor::OPTIONS_H + editor::STATUS_H;
         system::center_main_window(&self.ctx, |screen_w, screen_h| {
-            sizing::editor_window((w, h), chrome, WINDOW_MARGIN, editor::MIN_W, WINDOW_MIN_HEIGHT_RATIO, (screen_w, screen_h))
+            sizing::editor_window((w, h), chrome, WINDOW_MARGIN, sizing::full_toolbar_width(), WINDOW_MIN_HEIGHT_RATIO, (screen_w, screen_h))
         });
     }
 
@@ -662,7 +672,10 @@ impl App {
     pub fn copy(&mut self) {
         let Some(img) = self.export() else { return };
         match system::copy_image(&img) {
-            Ok(()) => self.say("Copied to the clipboard"),
+            Ok(()) => {
+                self.flash_tray();
+                self.say("Copied to the clipboard")
+            }
             Err(e) => self.error(format!("Can't copy the image: {e}")),
         }
     }
@@ -687,7 +700,10 @@ impl App {
         }
         let path = self.save_target(&img);
         match system::save_image(&img, &path) {
-            Ok(()) => self.say(format!("Saved to {}", path.display())),
+            Ok(()) => {
+                self.flash_tray();
+                self.say(format!("Saved to {}", path.display()))
+            }
             Err(e) => self.error(format!("Can't save: {e}")),
         }
     }
@@ -704,7 +720,10 @@ impl App {
             .save_file();
         if let Some(path) = picked {
             match system::save_image(&img, &path) {
-                Ok(()) => self.say(format!("Saved to {}", path.display())),
+                Ok(()) => {
+                    self.flash_tray();
+                    self.say(format!("Saved to {}", path.display()))
+                }
                 Err(e) => self.error(format!("Can't save: {e}")),
             }
         }
@@ -952,6 +971,15 @@ impl App {
             if let Some(s) = &mut self.shell {
                 s.set_state(st);
             }
+        }
+    }
+
+    /// The menu bar icon confirms a copy or a save with a check mark for a moment.
+    fn flash_tray(&mut self) {
+        #[cfg(target_os = "macos")]
+        if let Some(s) = &mut self.shell {
+            s.flash_done();
+            self.ctx.request_repaint_after(std::time::Duration::from_millis(650));
         }
     }
 
@@ -1314,8 +1342,11 @@ impl eframe::App for App {
     fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain();
         #[cfg(target_os = "macos")]
-        if let Some(s) = &self.shell {
+        if let Some(s) = &mut self.shell {
             s.refresh_updates();
+            if let Some(again) = s.tick_flash() {
+                self.ctx.request_repaint_after(again);
+            }
         }
     }
 
@@ -1395,7 +1426,7 @@ fn main() -> eframe::Result {
     let show_at_start = launch.shows_window();
     let app_mode::Launch { screenshot, open } = launch;
     // Test hook: size the main window like Preferences so --screenshot shows its real layout.
-    let (size, min) = if std::env::var_os("SHOTCRAFT_PREFS_TAB").is_some() { (prefs::WINDOW, prefs::WINDOW) } else { ([1180.0, 760.0], [editor::MIN_W, 420.0]) };
+    let (size, min) = if std::env::var_os("SHOTCRAFT_PREFS_TAB").is_some() { (prefs::WINDOW, prefs::WINDOW) } else { ([1180.0, 760.0], [editor::MIN_W, editor::MIN_H]) };
     let options = eframe::NativeOptions {
         viewport: ViewportBuilder::default()
             .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../assets/window-icon.png")).expect("window icon"))
@@ -1427,5 +1458,45 @@ mod return_key_tests {
         app.handle(Action::ScrollingFinish);
         assert!(!app.busy, "a new scrolling capture was started");
         assert!(app.scroll.is_none());
+    }
+}
+
+#[cfg(test)]
+mod glyph_tests {
+    use eframe::egui::{self, FontFamily, FontId};
+
+    /// Every symbol the UI prints that DM Sans lacks: modifier keys, arrows, Esc, Return, Delete, Tab.
+    const SYMBOLS: &str = "⌘⇧⌥⌃←↑→↓⎋⏎⌫⌦⇥";
+    /// The other special characters of the UI text.
+    const PUNCTUATION: &str = "…×—•−·°";
+
+    #[test]
+    fn the_ui_fonts_cover_the_key_symbols_so_they_never_render_as_boxes() {
+        let ctx = egui::Context::default();
+        super::setup_fonts(&ctx);
+        let mut out = ctx.run_ui(Default::default(), |_| {});
+        out.textures_delta.clear();
+        for family in [FontFamily::Proportional, FontFamily::Name("medium".into())] {
+            for c in SYMBOLS.chars().chain(PUNCTUATION.chars()) {
+                let ok = ctx.fonts_mut(|f| f.has_glyph(&FontId::new(13.0, family.clone()), c));
+                assert!(ok, "{c} (U+{:04X}) is missing from {family:?}", c as u32);
+            }
+        }
+    }
+
+    /// The symbols must come from the bundled subsets, not from a system font that may be absent.
+    #[test]
+    fn the_symbol_subsets_are_bundled_and_cover_the_key_symbols_alone() {
+        use ab_glyph::{Font, FontRef};
+        let subsets: [&[u8]; 3] = [
+            include_bytes!("../assets/fonts/NotoSymbols2-Subset.ttf"),
+            include_bytes!("../assets/fonts/NotoSymbols-Subset.ttf"),
+            include_bytes!("../assets/fonts/NotoMath-Subset.ttf"),
+        ];
+        let fonts: Vec<FontRef> = subsets.iter().map(|b| FontRef::try_from_slice(b).expect("a valid font")).collect();
+        for c in SYMBOLS.chars() {
+            assert!(fonts.iter().any(|f| f.glyph_id(c).0 != 0), "{c} is in no bundled subset");
+        }
+        assert!(subsets.iter().map(|b| b.len()).sum::<usize>() < 20_000, "the subsets stay tiny");
     }
 }

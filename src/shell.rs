@@ -8,6 +8,7 @@ use crate::model::Tool;
 use crate::settings::{HotkeyAction, Settings};
 use crate::{Action, Queue};
 use crate::system::CaptureMode;
+use crate::tray_flash::{TrayFlash, TrayImage};
 use crate::updater::Updater;
 use global_hotkey::{hotkey::HotKey, GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use std::collections::HashMap;
@@ -19,6 +20,9 @@ use tray_icon::{TrayIcon, TrayIconBuilder};
 
 pub struct Shell {
     tray: Option<TrayIcon>,
+    /// The check mark that follows a copy or a save.
+    flash: TrayFlash,
+    clock: std::time::Instant,
     menubar: Menu,
     autostart_item: CheckMenuItem,
     /// "Delayed Screenshot (Ns)": the wait is a setting.
@@ -264,7 +268,15 @@ fn add_menu_symbols(menu: &dyn ContextMenu) {
 /// The menu bar glyph: black on transparent, 36 px for an 18 pt status item. It is marked as a
 /// template image where the tray icon is built, so macOS tints it for light and dark menu bars.
 fn tray_icon_image() -> tray_icon::Icon {
-    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/menubar.png")).expect("menu bar icon");
+    tray_image(TrayImage::Normal)
+}
+
+fn tray_image(which: TrayImage) -> tray_icon::Icon {
+    let png: &[u8] = match which {
+        TrayImage::Normal => include_bytes!("../assets/menubar.png"),
+        TrayImage::Done => include_bytes!("../assets/menubar-done.png"),
+    };
+    let icon = eframe::icon_data::from_png_bytes(png).expect("menu bar icon");
     tray_icon::Icon::from_rgba(icon.rgba, icon.width, icon.height).expect("menu bar icon")
 }
 
@@ -347,7 +359,7 @@ impl Shell {
             ctx.request_repaint();
         }));
 
-        let mut shell = Shell { tray, menubar, autostart_item, auto_updates_item, snap_items, delayed_item, stateful, tray_stateful, hotkey_items, state: None, updater, hotkeys: GlobalHotKeyManager::new().ok(), registered: vec![], show_hotkey_works: false, hotkey_map, escape: None, escape_id, enter: None, enter_id, keys_suspended: false };
+        let mut shell = Shell { tray, flash: TrayFlash::default(), clock: std::time::Instant::now(), menubar, autostart_item, auto_updates_item, snap_items, delayed_item, stateful, tray_stateful, hotkey_items, state: None, updater, hotkeys: GlobalHotKeyManager::new().ok(), registered: vec![], show_hotkey_works: false, hotkey_map, escape: None, escape_id, enter: None, enter_id, keys_suspended: false };
         shell.apply_hotkeys(settings);
         shell
     }
@@ -446,6 +458,24 @@ impl Shell {
             updater.set_checks_automatically(!updater.checks_automatically());
         }
         self.refresh_updates();
+    }
+
+    /// A copy or a save succeeded: the menu bar icon shows a check mark for a moment.
+    pub fn flash_done(&mut self) {
+        self.flash.start(self.clock.elapsed().as_secs_f64());
+        self.tick_flash();
+    }
+
+    /// Swaps the menu bar icon when the confirmation starts or ends. Returns how long until it has to
+    /// be called again, while a confirmation is on.
+    pub fn tick_flash(&mut self) -> Option<std::time::Duration> {
+        let now = self.clock.elapsed().as_secs_f64();
+        if let Some(image) = self.flash.tick(now) {
+            if let Some(t) = &self.tray {
+                let _ = t.set_icon_with_as_template(Some(tray_image(image)), true);
+            }
+        }
+        self.flash.next_check(now).map(|s| std::time::Duration::from_secs_f64(s + 0.02))
     }
 
     /// Shows what Sparkle holds, so the check mark follows changes made outside this menu.
