@@ -92,12 +92,6 @@ impl Ax {
             Ax::Y => p(across, along),
         }
     }
-    fn shift(self, r: &R, d: f32) -> R {
-        match self {
-            Ax::X => R { x0: r.x0 + d, x1: r.x1 + d, ..*r },
-            Ax::Y => R { y0: r.y0 + d, y1: r.y1 + d, ..*r },
-        }
-    }
 }
 
 /// What a candidate lines up with; turned into guides once the final position is known.
