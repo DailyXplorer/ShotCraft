@@ -1556,11 +1556,8 @@ pub fn gif_frames(doc: &Doc, fonts: &Fonts) -> Result<(Image, Image), String> {
     if r.x1.min(v.x1) - r.x0.max(v.x0) < 1.0 || r.y1.min(v.y1) - r.y0.max(v.y0) < 1.0 {
         return Err("The pasted picture must overlap the screenshot. Move it over the screenshot first.".into());
     }
-    let (before, after) = (export_without(doc, fonts, Some(i), false), export(doc, fonts));
-    if (before.w, before.h) == (after.w, after.h) {
-        return Ok((before, after));
-    }
-    // The backdrop's automatic crop trimmed the two differently: leave it off so the frames match.
+    // The backdrop's automatic crop would trim the two frames to different boxes: it stays off here
+    // so they line up exactly.
     Ok((export_without(doc, fonts, Some(i), true), export_without(doc, fonts, None, true)))
 }
 
