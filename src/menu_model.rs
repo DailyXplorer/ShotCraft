@@ -127,10 +127,11 @@ fn edit_menu() -> Entry {
             // AppKit's predefined ones. Those send `copy:`, `paste:`... down the responder chain, the
             // window's view answers none of them, and their ⌘C / ⌘X / ⌘V / ⌘A would be eaten by the menu
             // before egui ever sees the key. Copy copies the image; the others have nothing to act on
-            // in the editor, so they stay off and leave their keys to the text fields.
+            // in the editor, so they stay off and leave their keys to the text fields. Paste puts the
+            // clipboard picture over the screenshot; it steps aside while a text is typed.
             item("cut", "Cut", None),
             item("editcopy", "Copy", key(CMD, "KeyC")),
-            item("paste", "Paste", None),
+            item("paste", "Paste", key(CMD, "KeyV")),
             item("pastestyle", "Paste and Match Style", None),
             item("editdelete", "Delete", None),
             item("selectall", "Select All", None),
@@ -140,8 +141,7 @@ fn edit_menu() -> Entry {
 
 fn draw_menu() -> Entry {
     let mut items: Vec<Entry> = DRAW.iter().map(|(title, tool, code)| item(&format!("{TOOL_PREFIX}{}", tool.name()), title, key(0, code))).collect();
-    // Add Capture is listed as in the original; it stays off until the feature behind it exists.
-    items.push(Entry::Item { id: "addcapture".into(), title: "Add Capture", key: None, enabled: false });
+    items.push(item("addcapture", "Add Capture", None));
     items.push(Entry::Sep);
     items.push(Entry::Check { id: "snap".into(), title: "Snap to Objects", enabled: true });
     items.push(Entry::Check { id: "snapsimilar".into(), title: "Snap to Similar Objects", enabled: true });
@@ -250,7 +250,7 @@ pub fn hotkey_of_item(id: &str) -> Option<HotkeyAction> {
 
 /// Whether the state of the editor decides if an item is enabled (see `item_enabled`).
 pub fn is_stateful(id: &str) -> bool {
-    is_plain_letter_item(id) || matches!(id, "zoomsel" | "copy" | "editcopy" | "cut" | "paste" | "pastestyle" | "editdelete" | "selectall" | "save" | "saveas" | "pin" | "print" | "undo" | "redo" | "resetcrop" | "rasterize" | "zoomin" | "zoomout" | "zoomfit" | "zoom100" | "close")
+    is_plain_letter_item(id) || matches!(id, "zoomsel" | "copy" | "editcopy" | "addcapture" | "cut" | "paste" | "pastestyle" | "editdelete" | "selectall" | "save" | "saveas" | "pin" | "print" | "undo" | "redo" | "resetcrop" | "rasterize" | "zoomin" | "zoomout" | "zoomfit" | "zoom100" | "close")
 }
 
 /// What decides which menu items can act.
@@ -283,9 +283,11 @@ pub fn item_enabled(id: &str, st: &MenuState) -> bool {
     let editor_key = st.has_image && st.editor_visible && st.editor_focused;
     match id {
         "copy" | "save" | "saveas" | "pin" | "print" | "undo" | "redo" | "resetcrop" | "rasterize" | "zoomin" | "zoomout" | "zoomfit" | "zoom100" | "zoomsel" | "close" => editor_key,
-        "editcopy" => editor_key && !st.typing,
-        // Nothing in the editor to cut, paste or select: the keys belong to the text fields.
-        "cut" | "paste" | "pastestyle" | "editdelete" | "selectall" => false,
+        "editcopy" | "paste" => editor_key && !st.typing,
+        // Nothing in the editor to cut or select: the keys belong to the text fields.
+        "cut" | "pastestyle" | "editdelete" | "selectall" => false,
+        // The Draw menu entry has no key: it only needs a picture to add to.
+        "addcapture" => st.has_image && st.editor_visible,
         _ if is_plain_letter_item(id) => {
             let tool = |t: Tool| id == format!("{TOOL_PREFIX}{}", t.name());
             let taken = (st.c_copies_colour && tool(Tool::Counter)) || (st.area_keys && (tool(Tool::Arrow) || tool(Tool::Blur))) || (!st.has_area && matches!(id, "seltl" | "selbr"));
@@ -448,7 +450,7 @@ mod tests {
             }
         }
         walk(&bar, &mut disabled);
-        assert_eq!(disabled, ["Add Capture"]);
+        assert!(disabled.is_empty(), "{disabled:?}");
     }
 
     #[test]
@@ -530,7 +532,7 @@ mod tests {
         let editor = MenuState { has_image: true, editor_visible: true, editor_focused: true, ..Default::default() };
         assert!(item_enabled("editcopy", &editor));
         assert!(!item_enabled("editcopy", &MenuState { typing: true, ..editor }));
-        for id in ["cut", "paste", "pastestyle", "editdelete", "selectall"] {
+        for id in ["cut", "pastestyle", "editdelete", "selectall"] {
             assert!(!item_enabled(id, &editor), "{id}: its key must reach the text fields");
             assert!(is_stateful(id));
         }
@@ -549,7 +551,13 @@ mod tests {
             v
         };
         assert!(keys.contains(&"editcopy".to_string()));
-        assert!(!keys.iter().any(|k| ["cut", "paste", "pastestyle", "editdelete", "selectall"].contains(&k.as_str())));
+        assert!(!keys.iter().any(|k| ["cut", "pastestyle", "editdelete", "selectall"].contains(&k.as_str())));
+        // Paste puts the clipboard picture over the screenshot, but not while a text is typed.
+        assert!(keys.contains(&"paste".to_string()));
+        assert!(item_enabled("paste", &editor));
+        assert!(!item_enabled("paste", &MenuState { typing: true, ..editor }));
+        assert!(!item_enabled("paste", &MenuState { editor_focused: false, ..editor }));
+        assert!(!item_enabled("paste", &MenuState { has_image: false, ..editor }));
     }
 
     #[test]

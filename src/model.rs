@@ -535,6 +535,33 @@ pub enum Kind {
     /// `lens`: centre of the magnified view from the centre of `r`, in widths and heights of `r`.
     Magnifier { r: R, lens: P },
     Ruler { a: P, b: P },
+    /// A picture laid over the screenshot (pasted from the clipboard), drawn into `r` at `opacity` (0…1).
+    Image { pic: Pic, r: R, opacity: f32 },
+}
+
+/// A picture held by an image object. Cheap to clone; compared by identity.
+#[derive(Clone)]
+pub struct Pic {
+    pub img: Image,
+    id: u64,
+}
+
+impl Pic {
+    pub fn new(img: Image) -> Self {
+        Pic { img, id: next_version() }
+    }
+}
+
+impl PartialEq for Pic {
+    fn eq(&self, o: &Self) -> bool {
+        self.id == o.id
+    }
+}
+
+impl std::fmt::Debug for Pic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Pic({}x{})", self.img.w, self.img.h)
+    }
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -558,6 +585,7 @@ impl Obj {
             Kind::Counter { .. } => Tool::Counter,
             Kind::Magnifier { .. } => Tool::Magnifier,
             Kind::Ruler { .. } => Tool::Ruler,
+            Kind::Image { .. } => Tool::Select,
         }
     }
 
@@ -567,7 +595,7 @@ impl Obj {
                 *a = a.add(dx, dy);
                 *b = b.add(dx, dy);
             }
-            Kind::Rect { r, .. } | Kind::Oval { r, .. } | Kind::Blur { r, .. } | Kind::Spotlight { r } | Kind::Magnifier { r, .. } => {
+            Kind::Rect { r, .. } | Kind::Oval { r, .. } | Kind::Blur { r, .. } | Kind::Spotlight { r } | Kind::Magnifier { r, .. } | Kind::Image { r, .. } => {
                 *r = r.translate(dx, dy)
             }
             Kind::Text { at, .. } | Kind::Counter { at, .. } => *at = at.add(dx, dy),
@@ -578,7 +606,7 @@ impl Obj {
     pub fn is_empty(&self) -> bool {
         match &self.kind {
             Kind::Arrow { a, b, .. } | Kind::Line { a, b } | Kind::Highlighter { a, b } | Kind::Ruler { a, b } => a.dist(*b) < 3.0,
-            Kind::Rect { r, .. } | Kind::Oval { r, .. } | Kind::Blur { r, .. } | Kind::Spotlight { r } | Kind::Magnifier { r, .. } => r.w() < 3.0 || r.h() < 3.0,
+            Kind::Rect { r, .. } | Kind::Oval { r, .. } | Kind::Blur { r, .. } | Kind::Spotlight { r } | Kind::Magnifier { r, .. } | Kind::Image { r, .. } => r.w() < 3.0 || r.h() < 3.0,
             Kind::Text { text, .. } => text.trim().is_empty(),
             Kind::Freehand { pts } => pts.len() < 2,
             Kind::Counter { .. } => false,
@@ -903,6 +931,41 @@ impl Image {
     }
 }
 
+/// Where a picture of `w` × `h` goes when pasted over `view`: centred, at 100 % or fitted inside
+/// `view` (keeping its proportions) when larger.
+pub fn overlay_rect(w: u32, h: u32, view: &R) -> R {
+    let (w, h) = (w.max(1) as f32, h.max(1) as f32);
+    let k = (view.w() / w).min(view.h() / h).min(1.0);
+    let (w, h) = (w * k, h * k);
+    let c = view.center();
+    R { x0: c.x - w / 2.0, y0: c.y - h / 2.0, x1: c.x + w / 2.0, y1: c.y + h / 2.0 }
+}
+
+/// The corner opposite `anchor` for a drag that ends at `q`, moved so the box keeps `ratio` (width over
+/// height): it follows whichever axis the pointer went furthest on.
+pub fn keep_ratio(anchor: P, q: P, ratio: f32) -> P {
+    let ratio = ratio.max(1e-3);
+    let (dx, dy) = (q.x - anchor.x, q.y - anchor.y);
+    let w = dx.abs().max(dy.abs() * ratio);
+    let h = w / ratio;
+    p(anchor.x + w * if dx < 0.0 { -1.0 } else { 1.0 }, anchor.y + h * if dy < 0.0 { -1.0 } else { 1.0 })
+}
+
+/// `left` with `right` beside it, top aligned, on a canvas as tall as the taller of the two.
+/// Pixels that belong to neither are fully transparent.
+pub fn place_right(left: &Image, right: &Image) -> Image {
+    let (w, h) = (left.w + right.w, left.h.max(right.h));
+    let mut px = vec![0u8; w as usize * h as usize * 4];
+    for (src, x0) in [(left, 0u32), (right, left.w)] {
+        for y in 0..src.h as usize {
+            let d = (y * w as usize + x0 as usize) * 4;
+            let s = y * src.w as usize * 4;
+            px[d..d + src.w as usize * 4].copy_from_slice(&src.px[s..s + src.w as usize * 4]);
+        }
+    }
+    Image { w, h, px: Arc::new(px) }
+}
+
 #[derive(Clone)]
 pub struct Snapshot {
     pub base: Image,
@@ -992,6 +1055,25 @@ impl Doc {
 
     pub fn view_rect(&self) -> R {
         self.crop.unwrap_or(R { x0: 0.0, y0: 0.0, x1: self.base.w as f32, y1: self.base.h as f32 })
+    }
+
+    /// Lays a picture from the clipboard over the screenshot: centred on what is shown, at 100 %
+    /// (one picture pixel per image pixel), scaled down to fit when it is larger than that.
+    /// One undo step; returns the index of the new object, which is the topmost.
+    pub fn paste_image(&mut self, img: Image) -> usize {
+        let r = overlay_rect(img.w, img.h, &self.view_rect());
+        self.checkpoint();
+        self.objs.push(Obj { kind: Kind::Image { pic: Pic::new(img), r, opacity: 1.0 }, style: Style::default() });
+        self.objs.len() - 1
+    }
+
+    /// Adds a new capture to the right of the picture, side by side and top aligned; the rest of the
+    /// enlarged canvas is see-through. Annotations stay where they were. Any crop is dropped so the
+    /// whole result shows. One undo step.
+    pub fn append_capture(&mut self, img: &Image) {
+        self.checkpoint();
+        self.base = place_right(&self.base, img);
+        self.crop = None;
     }
 
     pub fn next_counter(&self) -> u32 {
@@ -1171,5 +1253,70 @@ mod tests {
         assert_eq!(d.undo.len(), 1);
         d.undo();
         assert_eq!(d.objs[0].style.dim, SPOTLIGHT_DIM);
+    }
+
+    fn flat_img(w: u32, h: u32, c: [u8; 4]) -> Image {
+        Image { w, h, px: std::sync::Arc::new((0..w * h).flat_map(|_| c).collect()) }
+    }
+
+    #[test]
+    fn a_pasted_picture_is_centred_at_100_percent_or_fitted_inside_the_view() {
+        let view = R { x0: 0.0, y0: 0.0, x1: 400.0, y1: 200.0 };
+        assert_eq!(overlay_rect(100, 50, &view), R { x0: 150.0, y0: 75.0, x1: 250.0, y1: 125.0 });
+        // Larger than the view: scaled down to fit, proportions kept, still centred.
+        let r = overlay_rect(800, 200, &view);
+        assert_eq!((r.w(), r.h()), (400.0, 100.0));
+        assert_eq!((r.center().x, r.center().y), (200.0, 100.0));
+        let r = overlay_rect(200, 800, &view);
+        assert_eq!((r.w(), r.h()), (50.0, 200.0));
+    }
+
+    #[test]
+    fn pasting_a_picture_adds_the_topmost_object_in_one_undo_step() {
+        let mut d = Doc::new(flat_img(40, 20, [255, 255, 255, 255]), 1.0);
+        d.objs.push(Obj { kind: Kind::Line { a: p(0.0, 0.0), b: p(5.0, 5.0) }, style: Style::default() });
+        let i = d.paste_image(flat_img(10, 10, [255, 0, 0, 255]));
+        assert_eq!(i, 1);
+        let Kind::Image { r, opacity, .. } = &d.objs[i].kind else { panic!("not an image") };
+        assert_eq!((*r, *opacity), (R { x0: 15.0, y0: 5.0, x1: 25.0, y1: 15.0 }, 1.0));
+        assert_eq!(d.undo.len(), 1);
+        assert!(d.undo());
+        assert_eq!(d.objs.len(), 1);
+        assert!(d.redo());
+        assert_eq!(d.objs.len(), 2);
+    }
+
+    #[test]
+    fn a_pasted_picture_moves_with_the_move_command() {
+        let mut d = Doc::new(flat_img(40, 20, [0, 0, 0, 255]), 1.0);
+        let i = d.paste_image(flat_img(10, 10, [255, 0, 0, 255]));
+        d.objs[i].translate(3.0, -2.0);
+        let Kind::Image { r, .. } = &d.objs[i].kind else { panic!() };
+        assert_eq!((r.x0, r.y0), (18.0, 3.0));
+    }
+
+    #[test]
+    fn keeping_the_ratio_follows_the_longer_drag() {
+        let a = p(0.0, 0.0);
+        assert_eq!(keep_ratio(a, p(100.0, 10.0), 2.0), p(100.0, 50.0));
+        assert_eq!(keep_ratio(a, p(10.0, 100.0), 2.0), p(200.0, 100.0));
+        assert_eq!(keep_ratio(a, p(-30.0, -10.0), 1.0), p(-30.0, -30.0));
+    }
+
+    #[test]
+    fn adding_a_capture_puts_it_to_the_right_on_a_taller_transparent_canvas_and_undoes() {
+        let mut d = Doc::new(flat_img(4, 2, [10, 20, 30, 255]), 1.0);
+        d.crop = Some(R { x0: 0.0, y0: 0.0, x1: 2.0, y1: 2.0 });
+        d.append_capture(&flat_img(3, 5, [200, 100, 50, 255]));
+        assert_eq!((d.base.w, d.base.h), (7, 5));
+        assert_eq!(d.crop, None);
+        assert_eq!(d.base.get(0, 0), [10, 20, 30, 255]);
+        assert_eq!(d.base.get(3, 1), [10, 20, 30, 255]);
+        assert_eq!(d.base.get(4, 0), [200, 100, 50, 255]);
+        assert_eq!(d.base.get(6, 4), [200, 100, 50, 255]);
+        assert_eq!(d.base.get(0, 4)[3], 0, "below the shorter picture the canvas is see-through");
+        assert!(d.undo());
+        assert_eq!((d.base.w, d.base.h), (4, 2));
+        assert_eq!(d.crop, Some(R { x0: 0.0, y0: 0.0, x1: 2.0, y1: 2.0 }));
     }
 }

@@ -85,6 +85,8 @@ fn action_for(id: &str) -> Option<Action> {
         "redo" => Action::Redo,
         "resetcrop" => Action::ResetCrop,
         "rasterize" => Action::Rasterize,
+        "paste" => Action::Paste,
+        "addcapture" => Action::AddCapture,
         "zoomin" => Action::ZoomIn,
         "zoomout" => Action::ZoomOut,
         "zoomfit" => Action::ZoomFit,

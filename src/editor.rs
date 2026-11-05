@@ -428,7 +428,7 @@ fn hit(obj: &Obj, q: P, tol: f32, fonts: &render::Fonts) -> bool {
 fn handles(obj: &Obj) -> Vec<(Handle, P)> {
     match &obj.kind {
         Kind::Arrow { a, b, .. } | Kind::Line { a, b } | Kind::Ruler { a, b } | Kind::Highlighter { a, b } => vec![(Handle::A, *a), (Handle::B, *b)],
-        Kind::Rect { r, .. } | Kind::Oval { r, .. } | Kind::Blur { r, .. } | Kind::Spotlight { r } | Kind::Magnifier { r, .. } => vec![
+        Kind::Rect { r, .. } | Kind::Oval { r, .. } | Kind::Blur { r, .. } | Kind::Spotlight { r } | Kind::Magnifier { r, .. } | Kind::Image { r, .. } => vec![
             (Handle::Corner(0), p(r.x0, r.y0)),
             (Handle::Corner(1), p(r.x1, r.y0)),
             (Handle::Corner(2), p(r.x1, r.y1)),
@@ -442,7 +442,7 @@ fn set_end(kind: &mut Kind, start: P, q: P, shift: bool) {
     match kind {
         Kind::Arrow { b, .. } | Kind::Line { b, .. } | Kind::Ruler { b, .. } => *b = if shift { snap45(start, q) } else { q },
         Kind::Highlighter { b, .. } => *b = if shift { q } else { p(q.x, start.y) },
-        Kind::Rect { r, .. } | Kind::Oval { r, .. } | Kind::Blur { r, .. } | Kind::Spotlight { r } | Kind::Magnifier { r, .. } => {
+        Kind::Rect { r, .. } | Kind::Oval { r, .. } | Kind::Blur { r, .. } | Kind::Spotlight { r } | Kind::Magnifier { r, .. } | Kind::Image { r, .. } => {
             *r = R::from_points(start, if shift { square(start, q) } else { q })
         }
         Kind::Freehand { pts } => {
@@ -742,6 +742,12 @@ impl App {
                 self.push(Action::Copy);
                 continue;
             }
+            // Cmd+V reaches egui as `Event::Paste` when the clipboard holds text, as nothing when it
+            // holds a picture (the Edit ▸ Paste menu item takes that one); the picture is wanted here.
+            if matches!(e, egui::Event::Paste(_)) {
+                self.push(Action::Paste);
+                continue;
+            }
             let egui::Event::Key { key, pressed: true, modifiers, repeat, .. } = e else { continue };
             let (cmd, shift, alt) = (modifiers.command, modifiers.shift, modifiers.alt);
             let plain = !cmd && !modifiers.ctrl && !alt;
@@ -752,6 +758,7 @@ impl App {
                 Key::Z if cmd => self.push(Action::Undo),
                 Key::S if cmd && shift => self.push(Action::SaveAs),
                 Key::S if cmd => self.push(Action::Save),
+                Key::V if cmd && !shift && !alt => self.push(Action::Paste),
                 Key::P if cmd && !shift && !alt => self.push(Action::Pin),
                 Key::O if cmd && !shift => self.set_tool(Tool::Ocr),
                 Key::Equals | Key::Plus if cmd => self.push(Action::ZoomIn),
@@ -913,7 +920,7 @@ impl App {
             .exact_size(TOOLBAR_H)
             .frame(egui::Frame::new().fill(t.bar))
             .show(ui, |ui| self.toolbar(ui, &t));
-        if self.doc.is_some() && !matches!(self.context_tool(), Tool::Select | Tool::Cut | Tool::Ocr) {
+        if self.doc.is_some() && (self.selected_image().is_some() || !matches!(self.context_tool(), Tool::Select | Tool::Cut | Tool::Ocr)) {
             egui::Panel::top("options")
                 .exact_size(OPTIONS_H)
                 .frame(egui::Frame::new().fill(t.bar2).inner_margin(egui::Margin::symmetric(10, 0)))
@@ -1137,7 +1144,66 @@ impl App {
         });
     }
 
+    /// Selects object `i` with the Select tool (a freshly pasted picture).
+    pub fn select_object(&mut self, i: usize) {
+        self.ed.selected = Some(i);
+        self.ed.tool = Tool::Select;
+        self.ed.editing_text = false;
+    }
+
+    /// The canvas got another size (Add Capture): drop what pointed into the old one and fit the view.
+    pub fn canvas_changed(&mut self) {
+        self.ed.selected = None;
+        self.ed.selection = None;
+        self.ed.crop_draft = None;
+        self.ed.fit = true;
+    }
+
+    /// The selected object, when it is a pasted picture.
+    fn selected_image(&self) -> Option<usize> {
+        let (d, i) = (self.doc.as_ref()?, self.ed.selected?);
+        matches!(d.objs.get(i)?.kind, Kind::Image { .. }).then_some(i)
+    }
+
+    /// Options of a pasted picture: how see-through it is, and the before/after GIF.
+    fn image_options(&mut self, ui: &mut Ui, i: usize, t: &Th) {
+        if icon_btn(ui, Icon::Back, false, "Back", t, 26.0).clicked() {
+            self.ed.selected = None;
+            self.ed.tool = Tool::Select;
+            return;
+        }
+        let Some(Kind::Image { opacity, .. }) = self.doc.as_ref().and_then(|d| d.objs.get(i)).map(|o| o.kind.clone()) else { return };
+        ui.label("Opacity");
+        let mut pct = (opacity * 100.0).round();
+        let r = ui.add_sized([120.0, 24.0], egui::Slider::new(&mut pct, 0.0..=100.0).show_value(false)).on_hover_text("Opacity");
+        ui.label(format!("{pct:.0}%"));
+        // One undo step per drag of the slider, one per click.
+        let id = ui.id().with("opacity-undo");
+        let saved = ui.data(|m| m.get_temp::<bool>(id)).unwrap_or(false);
+        ui.data_mut(|m| m.insert_temp(id, r.dragged() && (saved || r.changed())));
+        if r.changed() {
+            if let Some(d) = &mut self.doc {
+                if !r.dragged() || !saved {
+                    d.checkpoint();
+                }
+                if let Kind::Image { opacity, .. } = &mut d.objs[i].kind {
+                    *opacity = pct / 100.0;
+                }
+                d.touch();
+            }
+        }
+        if ui.button("Save GIF").on_hover_text("Save a two-frame GIF: the screenshot, then with this picture on top").clicked() {
+            self.push(Action::SaveGif);
+        }
+        if ui.button("Delete").clicked() {
+            self.delete_selected();
+        }
+    }
+
     fn options_content(&mut self, ui: &mut Ui, t: &Th) {
+        if let Some(i) = self.selected_image() {
+            return self.image_options(ui, i, t);
+        }
         let tool = self.context_tool();
         match tool {
             Tool::Crop => {
@@ -1878,6 +1944,10 @@ impl App {
                                 (Kind::Rect { r, .. } | Kind::Oval { r, .. } | Kind::Blur { r, .. } | Kind::Spotlight { r } | Kind::Magnifier { r, .. }, Handle::Corner(_)) => {
                                     *r = R::from_points(anchor, if shift { square(anchor, q) } else { q })
                                 }
+                                // A picture keeps its proportions; ⇧ stretches it freely.
+                                (Kind::Image { pic, r, .. }, Handle::Corner(_)) => {
+                                    *r = R::from_points(anchor, if shift { q } else { keep_ratio(anchor, q, pic.img.w as f32 / pic.img.h.max(1) as f32) })
+                                }
                                 _ => {}
                             }
                             d.touch();
@@ -2155,7 +2225,7 @@ impl App {
     fn start_handle(&mut self, i: usize, h: Handle) {
         let d = self.doc.as_mut().unwrap();
         let anchor = match (&d.objs[i].kind, h) {
-            (Kind::Rect { r, .. } | Kind::Oval { r, .. } | Kind::Blur { r, .. } | Kind::Spotlight { r } | Kind::Magnifier { r, .. }, Handle::Corner(c)) => match c {
+            (Kind::Rect { r, .. } | Kind::Oval { r, .. } | Kind::Blur { r, .. } | Kind::Spotlight { r } | Kind::Magnifier { r, .. } | Kind::Image { r, .. }, Handle::Corner(c)) => match c {
                 0 => p(r.x1, r.y1),
                 1 => p(r.x0, r.y1),
                 2 => p(r.x0, r.y0),
