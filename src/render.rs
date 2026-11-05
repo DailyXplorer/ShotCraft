@@ -478,7 +478,25 @@ pub fn draw_obj(pm: &mut Pixmap, obj: &Obj, fonts: &Fonts, scale_factor: f32) {
         Kind::Magnifier { r, lens } => draw_magnifier(pm, r, *lens, st),
         Kind::Ruler { a, b } => draw_ruler(pm, *a, *b, st, fonts, scale_factor),
         Kind::Text { at, text } => draw_text(pm, *at, text, st, fonts),
+        Kind::Image { pic, r, opacity } => draw_image(pm, &pic.img, r, *opacity),
     }
+}
+
+/// Draws a picture into `r` (stretched to it) at `opacity`. Whole-number enlargements and 1:1 stay
+/// sharp; anything else is smoothed.
+fn draw_image(pm: &mut Pixmap, img: &Image, r: &R, opacity: f32) {
+    if img.w == 0 || img.h == 0 || r.w() < 0.5 || r.h() < 0.5 {
+        return;
+    }
+    let (sx, sy) = (r.w() / img.w as f32, r.h() / img.h as f32);
+    let sharp = (sx - sx.round()).abs() < 1e-3 && (sy - sy.round()).abs() < 1e-3 && sx >= 1.0;
+    let src = to_pixmap(img);
+    let paint = PixmapPaint {
+        opacity: opacity.clamp(0.0, 1.0),
+        quality: if sharp { tiny_skia::FilterQuality::Nearest } else { tiny_skia::FilterQuality::Bicubic },
+        ..Default::default()
+    };
+    pm.draw_pixmap(0, 0, src.as_ref(), &paint, Transform::from_row(sx, 0.0, 0.0, sy, r.x0, r.y0), None);
 }
 
 /// Line of the thin arrows: capped to a tenth of the length, then growing with it.
@@ -729,7 +747,7 @@ pub fn bounds(obj: &Obj, fonts: &Fonts) -> R {
         },
         Kind::Line { a, b } | Kind::Ruler { a, b } => R::from_points(*a, *b).expand(w * 2.0 + 24.0),
         Kind::Rect { r, .. } | Kind::Oval { r, .. } => r.expand(w * 2.0 + 4.0),
-        Kind::Blur { r, .. } | Kind::Spotlight { r } => *r,
+        Kind::Blur { r, .. } | Kind::Spotlight { r } | Kind::Image { r, .. } => *r,
         Kind::Magnifier { r, lens } => r.union(&magnifier_lens(r, *lens)).expand(w + 4.0),
         Kind::Highlighter { a, b } => R::from_points(*a, *b).expand(st.highlight_size() / 2.0 + 2.0),
         Kind::Freehand { pts } => {
@@ -1507,7 +1525,12 @@ pub fn apply_backdrop(content: &Pixmap, bd: &Backdrop) -> Pixmap {
 
 /// Final picture: objects, crop, then backdrop.
 pub fn export(doc: &Doc, fonts: &Fonts) -> Image {
-    let pm = compose(doc, fonts, None);
+    export_without(doc, fonts, None)
+}
+
+/// `export` with one object left out.
+pub fn export_without(doc: &Doc, fonts: &Fonts, skip: Option<usize>) -> Image {
+    let pm = compose(doc, fonts, skip);
     let pm = match doc.crop {
         Some(r) => crop_pixmap(&pm, &r),
         None => pm,
@@ -1517,6 +1540,43 @@ pub fn export(doc: &Doc, fonts: &Fonts) -> Image {
         None => pm,
     };
     from_pixmap(&pm)
+}
+
+/// Why no before/after GIF can be made.
+pub const GIF_NEEDS_OVERLAY: &str = "A before/after GIF needs a pasted picture placed over the screenshot. Paste one with ⌘V and position it first.";
+
+/// The two frames of a before/after GIF: the screenshot as it is without the topmost pasted picture,
+/// then with it. The picture has to overlap what the document shows.
+pub fn gif_frames(doc: &Doc, fonts: &Fonts) -> Result<(Image, Image), String> {
+    let Some((i, r)) = doc.objs.iter().enumerate().rev().find_map(|(i, o)| if let Kind::Image { r, .. } = &o.kind { Some((i, *r)) } else { None }) else {
+        return Err(GIF_NEEDS_OVERLAY.into());
+    };
+    let v = doc.view_rect();
+    if r.x1.min(v.x1) - r.x0.max(v.x0) < 1.0 || r.y1.min(v.y1) - r.y0.max(v.y0) < 1.0 {
+        return Err("The pasted picture must overlap the screenshot. Move it over the screenshot first.".into());
+    }
+    Ok((export_without(doc, fonts, Some(i)), export(doc, fonts)))
+}
+
+/// Delay between the two frames of the before/after GIF.
+pub const GIF_DELAY_MS: u32 = 1000;
+
+/// Encodes frames (all the same size) as a looping GIF, `GIF_DELAY_MS` apart. GIF has no partial
+/// transparency, so frames are laid on white first.
+pub fn encode_gif(frames: &[Image]) -> Result<Vec<u8>, String> {
+    use image::codecs::gif::{GifEncoder, Repeat};
+    let mut out = Vec::new();
+    {
+        let mut enc = GifEncoder::new_with_speed(&mut out, 10);
+        enc.set_repeat(Repeat::Infinite).map_err(|e| e.to_string())?;
+        for f in frames {
+            let flat = crate::windowbg::flatten(f, [255, 255, 255]);
+            let rgba = image::RgbaImage::from_raw(flat.w, flat.h, flat.px.to_vec()).ok_or("bad image")?;
+            let delay = image::Delay::from_numer_denom_ms(GIF_DELAY_MS, 1);
+            enc.encode_frame(image::Frame::from_parts(rgba, 0, 0, delay)).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(out)
 }
 
 /// Flatten every object into the base picture (used by Rasterize, Resize and Cut Out).
@@ -2262,5 +2322,109 @@ mod tests {
         for (name, img) in [("render-tools.png", &flat), ("render-backdrop.png", &framed)] {
             image::RgbaImage::from_raw(img.w, img.h, img.px.to_vec()).unwrap().save(out.join(name)).unwrap();
         }
+    }
+
+    fn doc_of(w: u32, h: u32, c: [u8; 4]) -> Doc {
+        Doc::new(flat(w, h, c), 1.0)
+    }
+
+    #[test]
+    fn an_image_object_is_drawn_into_its_rectangle_and_exported() {
+        let fonts = Fonts::load();
+        let mut doc = doc_of(40, 20, [255, 255, 255, 255]);
+        let i = doc.paste_image(flat(10, 10, [255, 0, 0, 255]));
+        let out = export(&doc, &fonts);
+        assert_eq!((out.w, out.h), (40, 20));
+        assert_eq!(out.get(20, 10), [255, 0, 0, 255]);
+        assert_eq!(out.get(14, 10), [255, 255, 255, 255]);
+        assert_eq!(out.get(25, 10), [255, 255, 255, 255]);
+        // Resized to twice as big: still centred where its rectangle says.
+        if let Kind::Image { r, .. } = &mut doc.objs[i].kind {
+            *r = R { x0: 0.0, y0: 0.0, x1: 20.0, y1: 20.0 };
+        }
+        let out = export(&doc, &fonts);
+        assert_eq!(out.get(19, 19), [255, 0, 0, 255]);
+        assert_eq!(out.get(20, 10), [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn opacity_blends_the_picture_with_what_is_below() {
+        let fonts = Fonts::load();
+        let mut doc = doc_of(20, 20, [0, 0, 0, 255]);
+        let i = doc.paste_image(flat(20, 20, [255, 255, 255, 255]));
+        if let Kind::Image { opacity, .. } = &mut doc.objs[i].kind {
+            *opacity = 0.5;
+        }
+        let px = export(&doc, &fonts).get(10, 10);
+        assert!((px[0] as i32 - 128).abs() <= 2 && px[3] == 255, "{px:?}");
+    }
+
+    #[test]
+    fn objects_stack_in_order_so_a_later_picture_covers_an_earlier_one_and_a_shape_covers_a_picture() {
+        let fonts = Fonts::load();
+        let mut doc = doc_of(40, 40, [255, 255, 255, 255]);
+        doc.paste_image(flat(30, 30, [255, 0, 0, 255]));
+        doc.paste_image(flat(20, 20, [0, 0, 255, 255]));
+        assert_eq!(export(&doc, &fonts).get(20, 20), [0, 0, 255, 255], "newest picture on top");
+        assert_eq!(export(&doc, &fonts).get(7, 20), [255, 0, 0, 255], "older one visible around it");
+        let mut st = Style::default();
+        st.fill = Fill::Opaque;
+        st.color = [0, 255, 0, 255];
+        doc.objs.push(Obj { kind: Kind::Rect { r: R { x0: 15.0, y0: 15.0, x1: 25.0, y1: 25.0 }, seed: 1 }, style: st });
+        let out = export(&doc, &fonts);
+        assert_ne!(out.get(20, 20), [0, 0, 255, 255], "a rectangle drawn after the picture covers it");
+    }
+
+    #[test]
+    fn a_picture_hanging_over_the_edge_is_cut_at_the_edge() {
+        let fonts = Fonts::load();
+        let mut doc = doc_of(20, 20, [255, 255, 255, 255]);
+        let i = doc.paste_image(flat(10, 10, [255, 0, 0, 255]));
+        if let Kind::Image { r, .. } = &mut doc.objs[i].kind {
+            *r = R { x0: 15.0, y0: 15.0, x1: 25.0, y1: 25.0 };
+        }
+        let out = export(&doc, &fonts);
+        assert_eq!((out.w, out.h), (20, 20));
+        assert_eq!(out.get(19, 19), [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn the_bounds_of_a_picture_are_its_rectangle() {
+        let fonts = Fonts::load();
+        let mut doc = doc_of(40, 20, [255, 255, 255, 255]);
+        let i = doc.paste_image(flat(10, 10, [1, 2, 3, 255]));
+        assert_eq!(bounds(&doc.objs[i], &fonts), R { x0: 15.0, y0: 5.0, x1: 25.0, y1: 15.0 });
+    }
+
+    #[test]
+    fn the_gif_has_two_frames_the_screenshot_then_with_the_picture_a_second_apart() {
+        use image::AnimationDecoder;
+        let fonts = Fonts::load();
+        let mut doc = doc_of(40, 20, [255, 255, 255, 255]);
+        doc.paste_image(flat(10, 10, [255, 0, 0, 255]));
+        let (before, after) = gif_frames(&doc, &fonts).unwrap();
+        assert_eq!(before.get(20, 10), [255, 255, 255, 255]);
+        assert_eq!(after.get(20, 10), [255, 0, 0, 255]);
+        let bytes = encode_gif(&[before, after]).unwrap();
+        let dec = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes)).unwrap();
+        let frames = dec.into_frames().collect_frames().unwrap();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].delay().numer_denom_ms(), (GIF_DELAY_MS, 1));
+        assert_eq!((frames[0].buffer().width(), frames[0].buffer().height()), (40, 20));
+        let (a, b) = (frames[0].buffer().get_pixel(20, 10).0, frames[1].buffer().get_pixel(20, 10).0);
+        assert!(a[0] > 200 && a[1] > 200, "first frame is white there: {a:?}");
+        assert!(b[0] > 200 && b[1] < 80, "second frame is red there: {b:?}");
+    }
+
+    #[test]
+    fn no_gif_without_a_picture_or_when_it_misses_the_screenshot() {
+        let fonts = Fonts::load();
+        let mut doc = doc_of(40, 20, [255, 255, 255, 255]);
+        assert_eq!(gif_frames(&doc, &fonts).err().unwrap(), GIF_NEEDS_OVERLAY);
+        let i = doc.paste_image(flat(10, 10, [255, 0, 0, 255]));
+        if let Kind::Image { r, .. } = &mut doc.objs[i].kind {
+            *r = R { x0: 100.0, y0: 100.0, x1: 110.0, y1: 110.0 };
+        }
+        assert!(gif_frames(&doc, &fonts).err().unwrap().contains("overlap"));
     }
 }

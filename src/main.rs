@@ -3,6 +3,8 @@ mod color;
 mod editor;
 #[cfg(test)]
 mod headless;
+#[cfg(test)]
+mod addcap_shots;
 mod icons;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod menu_model;
@@ -68,6 +70,12 @@ pub enum Action {
     About,
     Shortcuts,
     Tool(Tool),
+    /// Edit ▸ Paste: the clipboard picture goes over the screenshot as a movable object.
+    Paste,
+    /// Draw ▸ Add Capture: grab another area and put it beside the current picture.
+    AddCapture,
+    /// Saves the before/after GIF of the pasted picture to the screenshots folder.
+    SaveGif,
     PickFolder,
     PinEdit(Image, f32),
     PinCopy(Image),
@@ -186,6 +194,8 @@ pub struct App {
     scroll_dir: scroll::Direction,
     ocr_running: bool,
     busy: bool,
+    /// The capture under way adds to the current picture (Add Capture) instead of replacing it.
+    appending: bool,
     pub about_open: bool,
     pub shortcuts_open: bool,
     ctx: egui::Context,
@@ -251,6 +261,7 @@ impl App {
             scroll_dir: scroll::Direction::Down,
             ocr_running: false,
             busy: false,
+            appending: false,
             about_open: false,
             shortcuts_open: false,
             ctx,
@@ -291,6 +302,7 @@ impl App {
             scroll_dir: scroll::Direction::Down,
             ocr_running: false,
             busy: false,
+            appending: false,
             about_open: false,
             shortcuts_open: false,
             ctx: cc.egui_ctx.clone(),
@@ -585,6 +597,61 @@ impl App {
         });
     }
 
+    /// The result of an Add Capture: the new picture joins the current one on a wider canvas.
+    fn capture_added(&mut self, res: Result<Option<Captured>, String>) {
+        let Some(d) = &mut self.doc else { return };
+        match res {
+            Ok(Some(c)) => {
+                // Same screen, same scale in practice; if not, bring the new picture to the document's.
+                let k = d.scale_factor / c.scale.max(0.01);
+                let img = if (k - 1.0).abs() > 0.01 { render::resize(&c.img, k) } else { c.img };
+                d.append_capture(&img);
+                let (w, h) = (d.base.w, d.base.h);
+                self.canvas_changed();
+                self.show_window();
+                self.say(format!("Canvas is now {w} × {h} px"));
+            }
+            // Cancelled: the editor was hidden for the grab, bring it back as it was.
+            Ok(None) => self.show_window(),
+            Err(e) => {
+                self.show_window();
+                self.error(e);
+            }
+        }
+    }
+
+    fn paste_image(&mut self) {
+        if self.doc.is_none() {
+            return;
+        }
+        match system::clipboard_image() {
+            Ok(img) => {
+                let d = self.doc.as_mut().unwrap();
+                let i = d.paste_image(img);
+                self.select_object(i);
+            }
+            Err(_) => self.error("Image overlay takes the image from the clipboard. Your clipboard doesn't seem to contain an image at this moment."),
+        }
+    }
+
+    fn save_gif(&mut self) {
+        let Some(d) = &self.doc else { return };
+        let frames = render::gif_frames(d, &self.fonts).and_then(|(a, b)| render::encode_gif(&[a, b]));
+        let bytes = match frames {
+            Ok(b) => b,
+            Err(e) => return self.error(e),
+        };
+        if !std::path::Path::new(&self.settings.folder).is_dir() {
+            return self.error("Folder doesn't exist. Choose a screenshots folder in Preferences.");
+        }
+        let stem = settings::file_stem(&self.settings.file_name_template, &system::now_stamp());
+        let path = system::unique_path(&PathBuf::from(&self.settings.folder), &stem, "gif");
+        match std::fs::write(&path, bytes) {
+            Ok(()) => self.say(format!("Saved to {}", path.display())),
+            Err(e) => self.error(format!("Can't save: {e}")),
+        }
+    }
+
     pub fn export(&self) -> Option<Image> {
         self.doc.as_ref().map(|d| render::export(d, &self.fonts))
     }
@@ -724,6 +791,9 @@ impl App {
             Action::InstantOcr => self.start_capture(CaptureMode::Area, true),
             Action::Captured(res) => {
                 self.busy = false;
+                if std::mem::take(&mut self.appending) {
+                    return self.capture_added(res);
+                }
                 match res {
                     Ok(Some(c)) => {
                         if let Some(r) = c.area {
@@ -771,6 +841,14 @@ impl App {
             Action::ScrollingFinish => self.finish_scrolling(),
             Action::ScrollingArea(res) => self.scrolling_area(res),
             Action::ScrollingFinished(res) => self.scrolling_finished(res),
+            Action::AddCapture => {
+                if self.doc.is_some() && !self.busy {
+                    self.appending = true;
+                    self.start_capture(CaptureMode::Area, false);
+                }
+            }
+            Action::Paste => self.paste_image(),
+            Action::SaveGif => self.save_gif(),
             Action::OpenClipboard => match system::clipboard_image() {
                 Ok(img) => {
                     let s = self.pixels_per_point();
