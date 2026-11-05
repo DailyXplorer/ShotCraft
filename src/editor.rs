@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use tiny_skia::Pixmap;
 
 pub use crate::sizing::{OPTIONS_H, STATUS_H, TOOLBAR_H};
-use crate::sizing::{seg_group_w, toolbar_cluster_left, toolbar_fit, TOOLBAR_EDGE, TOOLBAR_GROUP_GAP as GROUP_GAP, TOOLBAR_SEG_W as SEG_W};
+use crate::sizing::{seg_group_w, toolbar_cluster_left, toolbar_fit, TOOLBAR_DRAG_W, TOOLBAR_EDGE, TOOLBAR_GROUP_GAP as GROUP_GAP, TOOLBAR_SEG_W as SEG_W};
 /// Narrowest width the editor window can have.
 pub const MIN_W: f32 = crate::sizing::EDITOR_MIN_SIZE.0;
 pub const MIN_H: f32 = crate::sizing::EDITOR_MIN_SIZE.1;
@@ -348,6 +348,23 @@ fn icon_btn(ui: &mut Ui, icon: Icon, selected: bool, tip: &str, t: &Th, w: f32) 
     } else {
         resp.on_hover_text(tip)
     }
+}
+
+/// The drag-out handle: pressing it and moving starts a native drag of the edited picture as a
+/// file. True on the frame the drag begins.
+fn drag_handle(ui: &mut Ui, t: &Th, enabled: bool) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(vec2(TOOLBAR_DRAG_W, 28.0), if enabled { Sense::click_and_drag() } else { Sense::hover() });
+    ui.painter().rect_filled(rect, 7.0, t.seg);
+    ui.painter().rect_stroke(rect, 7.0, Stroke::new(0.5, t.line), StrokeKind::Inside);
+    if enabled && resp.hovered() {
+        ui.painter().rect_filled(rect.shrink(2.0), 5.0, t.hover);
+    }
+    let ink = if enabled { t.text } else { t.dim };
+    icons::draw(ui.painter(), Rect::from_center_size(rect.center(), vec2(18.0, 18.0)), Icon::DragFile, ink);
+    let tip = if enabled { "Drag the picture into another app or a folder" } else { "Nothing to drag yet" };
+    let resp = resp.on_hover_text(tip);
+    let resp = if enabled { resp.on_hover_cursor(egui::CursorIcon::Grab) } else { resp };
+    enabled && resp.drag_started()
 }
 
 /// A row of icon segments framed like a macOS segmented control; returns the clicked index.
@@ -1095,6 +1112,10 @@ impl App {
                     SEG_W,
                 ) {
                     self.push([Action::Copy, Action::Save, Action::Pin].into_iter().nth(i).unwrap());
+                }
+                if drag_handle(ui, t, has_doc) {
+                    let at = ui.input(|i| i.pointer.interact_pos()).unwrap_or_default();
+                    self.drag_out(at);
                 }
                 let current = self.ed.tool;
                 let tools: Vec<(Icon, &str, bool)> = Tool::TOOLBAR.iter().map(|x| (Icon::for_tool(*x), x.tooltip(), current == *x)).collect();
@@ -3663,6 +3684,76 @@ mod toolbar_look_tests {
         let at = egui::pos2(toolbar_cluster_left(size.0, fit) + fit.cluster_width() - seg_group_w(1) / 2.0, 19.0);
         let img = overflow_menu_shot(size, at);
         crate::headless::save_png(&img, &std::path::Path::new(&dir).join("after-480-more-menu.png"));
+    }
+
+    /// Where the drag handle sits in a toolbar of this width.
+    fn drag_handle_center(width: f32) -> egui::Pos2 {
+        let left = toolbar_cluster_left(width, toolbar_fit(width)) + seg_group_w(crate::sizing::TOOLBAR_COPY_ITEMS) + GROUP_GAP;
+        egui::pos2(left + TOOLBAR_DRAG_W / 2.0, 19.0)
+    }
+
+    fn pull(app: &mut App, rig: &mut crate::headless::Rig, size: (f32, f32), from: egui::Pos2) {
+        use egui::{Event, Modifiers, PointerButton};
+        let events = vec![Event::PointerMoved(from), Event::PointerButton { pos: from, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE }];
+        rig.render_window(size, 2.0, events, |ui| app.editor_ui(ui));
+        let to = from + egui::vec2(30.0, 25.0);
+        rig.render_window(size, 2.0, vec![Event::PointerMoved(to)], |ui| app.editor_ui(ui));
+        // The rig's context is shared by every test: leave no button held.
+        let up = vec![Event::PointerButton { pos: to, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE }, Event::PointerGone];
+        rig.render_window(size, 2.0, up, |ui| app.editor_ui(ui));
+    }
+
+    #[test]
+    fn pulling_the_drag_handle_starts_a_drag_and_clicking_it_does_not() {
+        use egui::{Event, Modifiers, PointerButton};
+        let size = (760.0, 420.0);
+        let at = drag_handle_center(size.0);
+        crate::headless::with_rig(|rig| {
+            // Pulled: the drag is attempted. There is no native drag session off macOS, so it
+            // reports that, which proves the toolbar reached the drag code.
+            let mut app = rig.app();
+            app.doc = Some(Doc::new(picture(), 2.0));
+            pull(&mut app, rig, size, at);
+            let msg = app.toast.as_ref().map(|t| t.0.clone()).unwrap_or_default();
+            assert!(cfg!(target_os = "macos") || msg.contains("Can't drag the image"), "toast: {msg:?}");
+            // A plain click does nothing.
+            let mut app = rig.app();
+            app.doc = Some(Doc::new(picture(), 2.0));
+            let down = vec![Event::PointerMoved(at), Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE }];
+            rig.render_window(size, 2.0, down, |ui| app.editor_ui(ui));
+            let up = vec![Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE }];
+            rig.render_window(size, 2.0, up, |ui| app.editor_ui(ui));
+            assert!(app.toast.is_none());
+            rig.render_window(size, 2.0, vec![Event::PointerGone], |ui| app.editor_ui(ui));
+            // Without a picture there is nothing to drag.
+            let mut app = rig.app();
+            pull(&mut app, rig, size, at);
+            assert!(app.toast.is_none());
+        });
+    }
+
+    #[test]
+    fn drag_handle_picture_for_the_eyes() {
+        let Ok(dir) = std::env::var("SHOTCRAFT_SHOTS") else { return };
+        for (w, h) in [(1180.0, 640.0), (760.0, 420.0), (480.0, 270.0)] {
+            for dark in [false, true] {
+                let img = shot((w, h), dark, Tool::Select);
+                let name = format!("after-handle-{}-{}.png", w as u32, if dark { "dark" } else { "light" });
+                crate::headless::save_png(&img, &std::path::Path::new(&dir).join(name));
+            }
+        }
+        // Hovered: tooltip and highlight.
+        let size = (1180.0, 640.0);
+        let at = drag_handle_center(size.0);
+        let img = crate::headless::with_rig(|rig| {
+            let mut app = rig.app();
+            app.doc = Some(Doc::new(picture(), 2.0));
+            rig.render_window(size, 2.0, vec![egui::Event::PointerMoved(at)], |ui| app.editor_ui(ui));
+            let img = rig.render_window(size, 2.0, vec![], |ui| app.editor_ui(ui));
+            rig.render_window(size, 2.0, vec![egui::Event::PointerGone], |ui| app.editor_ui(ui));
+            img
+        });
+        crate::headless::save_png(&img, &std::path::Path::new(&dir).join("after-handle-hover.png"));
     }
 
     #[test]

@@ -246,6 +246,8 @@ pub const TOOLBAR_GROUP_GAP: f32 = 10.0;
 pub const TOOLBAR_EDGE: f32 = 12.0;
 /// Segments in the toolbar groups: Copy/Save/Pin, the drawing tools, the selection actions, Preferences.
 pub const TOOLBAR_COPY_ITEMS: usize = 3;
+/// The drag-out handle beside Copy/Save/Pin: a little wider than a segment, narrow enough that the smallest window still shows 4 tools.
+pub const TOOLBAR_DRAG_W: f32 = 40.0;
 pub const TOOLBAR_TOOL_ITEMS: usize = crate::model::Tool::TOOLBAR.len();
 pub const TOOLBAR_ACTION_ITEMS: usize = 7;
 
@@ -280,7 +282,7 @@ impl ToolbarFit {
     /// Width taken by the segments laid out, with the overflow button when needed, and the
     /// Preferences button at the right.
     pub fn width(self) -> f32 {
-        let mut w = seg_group_w(TOOLBAR_COPY_ITEMS) + seg_group_w(1) + TOOLBAR_GROUP_GAP;
+        let mut w = seg_group_w(TOOLBAR_COPY_ITEMS) + TOOLBAR_DRAG_W + TOOLBAR_GROUP_GAP + seg_group_w(1) + TOOLBAR_GROUP_GAP;
         for n in [self.tools(), self.actions()] {
             if n > 0 {
                 w += seg_group_w(n) + TOOLBAR_GROUP_GAP;
@@ -655,5 +657,17 @@ mod tests {
             assert!((left - right_gap).abs() < 0.01, "centred at {w}: {left} left, {right_gap} right");
             w -= 5.0;
         }
+    }
+
+    #[test]
+    fn drag_handle_takes_room_next_to_copy_save_pin_and_still_fits() {
+        let before = seg_group_w(TOOLBAR_COPY_ITEMS) + seg_group_w(1) + TOOLBAR_GROUP_GAP;
+        let all = ToolbarFit { visible: ToolbarFit::ALL };
+        assert!(all.width() >= before + TOOLBAR_DRAG_W + TOOLBAR_GROUP_GAP, "the handle and its gap are counted");
+        // The handle is never the thing that moves into the overflow menu: even the narrowest
+        // window lays Copy/Save/Pin, the handle and Preferences out.
+        let narrow = toolbar_fit(EDITOR_MIN_SIZE.0);
+        assert!(narrow.width() + TRAFFIC_LIGHTS_W + TOOLBAR_EDGE <= EDITOR_MIN_SIZE.0);
+        assert!(narrow.tools() >= 4, "four tools still show at the minimum size");
     }
 }

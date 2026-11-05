@@ -45,6 +45,7 @@ pub enum Icon {
     Trash,
     Keyboard,
     Sliders,
+    DragFile,
 }
 
 impl Icon {
@@ -118,6 +119,7 @@ fn svg(icon: Icon) -> Option<&'static str> {
         Icon::Trash => Some(include_str!("../assets/icons/trash.svg")),
         Icon::Keyboard => Some(include_str!("../assets/icons/keyboard.svg")),
         Icon::Sliders => Some(include_str!("../assets/icons/sliders.svg")),
+        Icon::DragFile => Some(include_str!("../assets/icons/drag_file.svg")),
         _ => None,
     }
 }
