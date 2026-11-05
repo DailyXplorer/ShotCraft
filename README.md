@@ -11,7 +11,7 @@ ShotCraft is written in Rust. It is an early version (0.1.2).
 * Area, any window, repeat the last area, and full-screen captures. Fullscreen captures the display the mouse pointer is on, and All Displays puts every display in one picture laid out like your desk.
 * Active Window captures the frontmost window of the app you are using, without clicking. Use it from a hotkey, or from the menu bar icon menu, which targets the app that was in front before you opened it. When that app has no capturable window, you pick a window instead.
 * A delayed capture (3 seconds by default, 5 or 10 in Preferences) of the display the mouse was on when you started it. The menu entry tells the wait. Preferences also has an option to put the mouse pointer in Fullscreen, Active Window, Delayed and Repeat Area screenshots; screenshots where you select an area or a window by hand never include it.
-* Scrolling capture: pick an area and ShotCraft scrolls it for you, grabs it again and again and stitches what the area showed into one tall image that opens in the editor. A small dark control below the area (above or beside it when there is no room; it never covers the area and never takes the keyboard from the page) shows the live height and frame count, with Done (`Return`) and Cancel (`Esc`). Scrolling for you needs the Accessibility permission, which macOS asks for the first time; without it you scroll by hand and the capture ends by itself 3 seconds after the page stops moving. Fixed headers, footers and side panels are kept once, scrolling back up adds nothing, and the image stops at 20,000 px. Start it from the menu bar icon or with its hotkey (not set by default); pressing the hotkey again acts as Done. Scrolling Capture (Up) is for pages that grow upwards, like a chat: scroll to the bottom of the page first, select the area, and ShotCraft scrolls up and stitches upwards.
+* Scrolling capture: pick an area and ShotCraft scrolls it for you, grabs it again and again and stitches what the area showed into one tall image that opens in the editor. A small dark control below the area (above or beside it when there is no room; it never covers the area and never takes the keyboard from the page) shows the live height and frame count, with Done (`Return`) and Cancel (`Esc`). Scrolling for you needs the Accessibility permission, which macOS asks for the first time; without it you scroll by hand and the capture ends by itself 3 seconds after the page stops moving. Fixed headers, footers and side panels are kept once, scrolling back up adds nothing, and the image stops at 20,000 px (Preferences changes this, and the speed). Start it from the menu bar icon or with its hotkey (not set by default); pressing the hotkey again acts as Done. Scrolling Capture (Up) is for pages that grow upwards, like a chat: scroll to the bottom of the page first, select the area, and ShotCraft scrolls up and stitches upwards.
 * Active Window and Any Window captures have four looks (Preferences → General → Window Screenshot Background): **Transparent** (the default: the window with its shadow, rounded corners and see-through background), **Trim shadow** (cut tight without the shadow, corners stay rounded), **Solid Color** and **Wallpaper** (the window and its shadow laid on a color, or on your desktop picture, as an opaque rectangle; the padding is the shadow's own margin, so the window sits in the middle). If the wallpaper can't be read, Wallpaper falls back to the solid color. Area, Fullscreen and All Displays captures are never changed.
 * Instant text and QR recognition: select an area and the recognized text goes straight to the clipboard, with no editor.
 * Open an existing image from a file or from the clipboard. The file picker and the command line open PNG, JPEG, GIF, BMP, TIFF and WebP files; saving writes PNG or JPEG. Animated GIFs open as their first frame.
@@ -19,10 +19,10 @@ ShotCraft is written in Rust. It is an early version (0.1.2).
 
 Scrolling capture limits:
 
-* Automatic scrolling moves the mouse pointer into the area and sends wheel events, so do not touch the mouse or keyboard until it stops. It stops at the end of the page, at the height limit, on Done, or on `Esc`. Some apps ignore synthetic wheel events (terminals, some sandboxed windows); then the control says the page did not move and you scroll by hand. The permission has to be granted again after an update if macOS forgets the app's signature.
+* Automatic scrolling moves the mouse pointer into the area and sends wheel events, so do not touch the mouse or keyboard until it stops. It stops at the end of the page, at the height limit, on Done or `Return` (keep the result), or on `Esc` (discard it; in manual mode with something captured, press it twice). Some apps ignore synthetic wheel events (terminals, some sandboxed windows); then the control says the page did not move and you scroll by hand. The permission has to be granted again after an update if macOS forgets the app's signature.
 * By hand, scroll steadily: if the page jumps further than about 90% of the area between two grabs, or the content is blank or strongly repetitive, that step is dropped and the control says "Scroll a bit slower".
 * Content that animates inside the area (video, ads, a blinking cursor beside the text) can confuse the match; small changes are tolerated.
-* The image only grows in the direction of the capture (down, or up for Scrolling Capture (Up)): content on the other side of the point where you started is not added (the control says so), and scrolling back over what is already captured changes nothing. A blank band at the very top of the page is treated like a fixed header, which is harmless. The control window needs room next to the area on the same display. Esc is taken from other apps while a capture runs; if another ShotCraft hotkey already uses Esc, use the Cancel button.
+* The image only grows in the direction of the capture (down, or up for Scrolling Capture (Up)): content on the other side of the point where you started is not added (the control says so), and scrolling back over what is already captured changes nothing. A blank band at the very top of the page is treated like a fixed header, which is harmless. The control window needs room next to the area on the same display. Esc and Return are taken from other apps while a capture runs (Return only ends the capture, it never starts one), and given back when it ends; if another ShotCraft hotkey already uses Esc, use the Cancel button.
 * If the screen can't be captured for a moment (screen locked, permission prompt), the capture ends with what was stitched so far.
 * Very tall images are shown in the editor as several textures, so they open at the width of the window; export and copy use the full-resolution image.
 
@@ -44,8 +44,8 @@ The preview thumbnail sits in the bottom-right corner of the screen. Hover it fo
   * Spotlight (dims everything outside the selected areas)
   * Backdrop (gradient background with padding, shadow, inset, corner radii and aspect ratios)
 * Blur tool with four modes: Blur, Blur Text, Erase and Erase Text. The text modes detect text with the macOS Vision framework and cover only those areas.
-* Ruler: measure sizes in pixels or points (toggle with `P`). Hold `2` (or left/right arrows) for the horizontal span of similar pixels under the cursor, `1` (or up/down arrows) for the vertical span. You can also add rulers around a selected area.
-* Color helper: press `Tab` over a pixel to copy its color, `Shift+Tab` to copy the darkest color within 20 px, or `C` with a selection to copy its average color. Eight formats are available: HEX with or without `#`, RGB (0-255 or 0-1), UIColor (Swift), CSS `rgba()`, C# Color and Android.
+* Ruler: measure sizes in pixels or points (toggle with `P`). Hold `2` (or left/right arrows) for the horizontal span of similar pixels under the cursor, `1` (or up/down arrows) for the vertical span. The arrows measure only when nothing is selected (with a selection they move it) and the digits are ruler keys except with the Spotlight tool, where they set the darkness. You can also add rulers around a selected area.
+* Color helper: press `Tab` over a pixel to copy its color, `Shift+Tab` to copy the darkest color within 20 px, or `C` with a selection to copy its average color. Nine formats are available: HEX with or without `#`, RGB (0-255 or 0-1), UIColor (Swift), CSS `rgba()`, C# Color, Android and OKLCH.
 * Crop, Cut Out (removes a horizontal or vertical band and joins the rest), and Resize (25%, 33%, 50%, 1x, 2x, 4x, or an exact width and height). Resize cannot be undone.
 * Text recognition (OCR) on a selected area, using the macOS Vision framework. It also reads QR codes and other barcodes. The result is copied to the clipboard, optionally without line breaks.
 * Eight preset colors per tool plus a custom color picker, ten sizes, solid or dashed strokes.
@@ -55,7 +55,7 @@ The preview thumbnail sits in the bottom-right corner of the screen. Hover it fo
 ### Export
 
 * Copy the result to the clipboard as an image.
-* Save to the screenshots folder (default: Desktop) as `ShotCraft-<date>-<time>.png`, or use Save Image As to pick a name and place. The format is PNG or JPEG. In Preferences, "Auto (PNG/JPEG)" saves photo-like images as JPEG (quality 90) and flat screenshots as PNG.
+* Save to the screenshots folder (default: Desktop) as `ShotCraft-<date>-<time>.png` (the name is a template in Preferences), or use Save Image As to pick a name and place. The format is PNG or JPEG. In Preferences, "Auto (PNG/JPEG)" saves photo-like images as JPEG (quality 90) and flat screenshots as PNG.
 * Optionally downscale Retina screenshots to 1x when saving.
 * Pin the result to the screen.
 
@@ -65,9 +65,11 @@ A pinned image is a borderless window that stays above other windows. Drag it an
 
 ### Preferences
 
-* General: what happens after a screenshot (editor, thumbnail or nothing; copy; save), thumbnail auto-close, launch at startup, screenshots folder, save format, Retina downscale, window screenshot background (Wallpaper, Transparent, Solid Color or Trim shadow).
-* Hotkeys: record or clear a shortcut for each of the nine actions listed under Keyboard shortcuts. ShotCraft flags a shortcut that macOS refuses because another app uses it.
-* Advanced: OCR line breaks, hide the menu bar icon (only while a Show ShotCraft hotkey is set and registered, since the icon is the way back into the app), keep the main window on top, zoom direction, default zoom level, what Esc does when hiding the editor (copy and/or save), and confirmation style (custom notification, system notification or none).
+* General: what happens after a screenshot (editor, thumbnail or nothing; copy; save), thumbnail auto-close (click outside, or the close button), launch at startup, screenshots folder, file name, save format, Retina downscale, window screenshot background (Wallpaper, Transparent, Solid Color or Trim shadow), scrolling screenshot max height (1,000 to 400,000 px, default 20,000) and scrolling screenshot speed (five levels: the slower, the shorter the steps and the longer the wait for the page to settle).
+* File name: a template with `%Y` year, `%y` two-digit year, `%m` month, `%d` day, `%H` hour, `%M` minute, `%S` second, `%t` time (`%H%M%S`) and `%%`. The default is `ShotCraft-%Y%m%d-%t`. `/`, `\` and `:` become `-`. A name that exists gets `-2`, `-3`... so a save never replaces a file. The example under the field shows the result.
+* Hotkeys: record or clear a shortcut for each of the nine actions listed under Keyboard shortcuts, in this order: Fullscreen, All displays, Area, Active window, Scrolling, Text/QR recognition, Repeat area, Any window, Show ShotCraft. ShotCraft flags a shortcut that macOS refuses because another app uses it. A short help explains how to free the system's own ⌘⇧3 and ⌘⇧4, with an Open System Settings button.
+* Advanced: primary OCR language (Automatic, or any language Vision reads), OCR line breaks, hide the menu bar icon (only while a Show ShotCraft hotkey is set and registered, since the icon is the way back into the app), keep the main window on top, zoom direction, scrolling capture (reverse the scroll direction for apps that turn the wheel around; scroll by hand), default zoom level, default tool, what Esc does when hiding the editor (copy and/or save), confirmation style (custom notification, system notification or none), and Reset All Settings (asks first).
+* Each annotation tool keeps its last colour, size and options between launches, and the default tool is the one a new screenshot opens with.
 
 Settings are stored in `~/Library/Application Support/ShotCraft/settings.json`.
 
@@ -94,10 +96,13 @@ In the editor:
 | `A` `T` `R` `O` `L` | Arrow, Text, Rectangle, Oval, Line |
 | `D` `H` `B` `S` `C` `M` `K` | Freehand, Highlighter, Blur, Spotlight, Counter, Magnifier, Backdrop |
 | `Cmd+O` | Recognize text or QR in a selected area |
-| `Cmd+C`, `Cmd+S`, `Cmd+Shift+S`, `Cmd+P` | Copy, Save, Save As, Pin to Screen |
+| `Cmd+C` or `Cmd+Shift+C`, `Cmd+S`, `Cmd+Shift+S`, `Cmd+P` | Copy the image, Save, Save As, Pin to Screen |
+| `Cmd+Shift+P` | Print |
 | `Cmd+Z`, `Cmd+Shift+Z` | Undo, Redo |
 | `Cmd++`, `Cmd+-`, `Cmd+0`, `Cmd+1` | Zoom in, zoom out, 100%, fit |
-| `Cmd+W` | Hide the editor |
+| `Cmd+W`, `Cmd+Opt+W` | Hide the editor, Close All (the editor and every pin) |
+| `Cmd+Shift+O`, `Cmd+Shift+V` | Open a file, open the image on the clipboard |
+| `Cmd+,`, `Cmd+Q` | Preferences, Quit |
 | `Del` | Delete the selected object, or erase the selected area |
 | `Esc` | Deselect, then copy and hide (copy on Esc is on by default) |
 | `Space` + drag | Move around the picture |
@@ -116,7 +121,7 @@ In the editor:
 | `Opt+Up`, `Opt+Down` | Freehand: smoother, rougher strokes |
 | `1` to `9` | Spotlight tool: how dark the surroundings are (10 to 90 percent) |
 
-Keyboard Shortcuts in the menu bar icon menu lists them in the app. `Cmd+,` opens Preferences from the editor.
+Keyboard Shortcuts in the menu bar icon menu lists them in the app. The menu's shortcuts only act on the editor while the editor is the window in front: with Preferences or a pin in front, `Cmd+W` closes that window and `Cmd+Z`, `Cmd+C` and the others go to its own fields. While a hotkey is being recorded in Preferences, every other shortcut (the menu's, and ShotCraft's own global hotkeys) is off, so any combination can be recorded; `Esc` cancels and `Del` clears.
 
 ## Privacy
 

@@ -114,6 +114,8 @@ struct Overlay {
 
 pub struct Editor {
     pub tool: Tool,
+    /// Tool a new screenshot opens with; none keeps the one in use.
+    pub default_tool: Option<Tool>,
     styles: HashMap<Tool, Style>,
     zoom: f32,
     pan: Vec2,
@@ -158,6 +160,7 @@ impl Default for Editor {
         styles.insert(Tool::Oval, Style { shape: Shape::Oval, ..shape });
         Editor {
             tool: Tool::Select,
+            default_tool: None,
             styles,
             zoom: 1.0,
             pan: Vec2::ZERO,
@@ -190,6 +193,56 @@ impl Default for Editor {
     }
 }
 
+/// The style a tool had when the settings were saved. Anything out of range (a hand-edited file,
+/// a newer version's value) falls back to `base`'s.
+fn style_from_stored(st: &crate::settings::ToolStyle, base: &Style) -> Style {
+    fn pick<T: Copy>(all: &[T], i: u8, fallback: T) -> T {
+        all.get(i as usize).copied().unwrap_or(fallback)
+    }
+    let color = if st.color.len() == 7 && st.color.starts_with('#') && st.color[1..].chars().all(|c| c.is_ascii_hexdigit()) { hex(&st.color) } else { base.color };
+    Style {
+        color,
+        size: if (st.size as usize) < LINE_WIDTHS.len() { st.size } else { base.size },
+        dashed: st.dashed,
+        arrow: pick(&ARROW_STYLES, st.arrow, base.arrow),
+        fill: pick(&FILLS, st.fill, base.fill),
+        shape: pick(&SHAPES, st.shape, base.shape),
+        font: pick(&FONTS, st.font, base.font),
+        blur: pick(&BlurMode::ALL, st.blur, base.blur),
+        smooth: st.smooth.min(FREEHAND_SMOOTH_MAX),
+        vary: st.vary.min(FREEHAND_VARY.len() as u8 - 1),
+        round_cap: st.round_cap,
+        dim: if st.dim.is_finite() { st.dim.clamp(0.0, 1.0) } else { base.dim },
+        scale: base.scale,
+    }
+}
+
+fn style_to_stored(s: &Style) -> crate::settings::ToolStyle {
+    fn index<T: PartialEq>(all: &[T], v: &T) -> u8 {
+        all.iter().position(|x| x == v).unwrap_or(0) as u8
+    }
+    crate::settings::ToolStyle {
+        color: format!("#{:02X}{:02X}{:02X}", s.color[0], s.color[1], s.color[2]),
+        size: s.size,
+        dashed: s.dashed,
+        arrow: index(&ARROW_STYLES, &s.arrow),
+        fill: index(&FILLS, &s.fill),
+        shape: index(&SHAPES, &s.shape),
+        font: index(&FONTS, &s.font),
+        blur: index(&BlurMode::ALL, &s.blur),
+        smooth: s.smooth,
+        vary: s.vary,
+        round_cap: s.round_cap,
+        dim: s.dim,
+    }
+}
+
+// The order the stored choices count in. Append only: stored files point into these.
+const ARROW_STYLES: [ArrowStyle; 4] = [ArrowStyle::Shape, ArrowStyle::HandDrawn, ArrowStyle::Line, ArrowStyle::Double];
+const FILLS: [Fill; 4] = [Fill::HandDrawn, Fill::Transparent, Fill::Translucent, Fill::Opaque];
+const SHAPES: [Shape; 2] = [Shape::Rect, Shape::Oval];
+const FONTS: [FontKind; 2] = [FontKind::Sans, FontKind::Goofy];
+
 impl Editor {
     pub fn reset_for_new_doc(&mut self, prefer_100: bool) {
         self.fit = true;
@@ -204,6 +257,33 @@ impl Editor {
         if matches!(self.tool, Tool::Crop | Tool::Cut | Tool::Ocr | Tool::Backdrop) {
             self.tool = Tool::Select;
         }
+        if let Some(t) = self.default_tool {
+            self.tool = t;
+        }
+    }
+
+    /// The editor as the settings left it: the last style of each tool.
+    pub fn from_settings(settings: &crate::settings::Settings) -> Editor {
+        let mut ed = Editor::default();
+        ed.load_styles(settings);
+        ed
+    }
+
+    /// Replaces the tools' styles by the factory ones with the stored ones on top.
+    pub fn load_styles(&mut self, settings: &crate::settings::Settings) {
+        self.styles = Editor::default().styles;
+        for tool in Tool::TOOLBAR {
+            if let Some(stored) = settings.tool_styles.get(tool.name()) {
+                let base = self.styles.get(&tool).copied().unwrap_or_default();
+                self.styles.insert(tool, style_from_stored(stored, &base));
+            }
+        }
+        self.default_tool = Tool::TOOLBAR.into_iter().filter(|t| *t != Tool::Backdrop).find(|t| t.name() == settings.default_tool);
+    }
+
+    /// What `load_styles` would read back: the toolbar tools' styles, as the settings keep them.
+    fn stored_styles(&self) -> std::collections::BTreeMap<String, crate::settings::ToolStyle> {
+        Tool::TOOLBAR.into_iter().filter_map(|t| self.styles.get(&t).map(|s| (t.name().to_string(), style_to_stored(s)))).collect()
     }
 
     fn style_for(&self, t: Tool) -> Style {
@@ -622,6 +702,8 @@ impl App {
                             text.push_str(s);
                             d.version = next_version();
                         }
+                        // Cmd+C: the whole text (there is no text selection to copy from).
+                        egui::Event::Copy => crate::system::copy_text(text),
                         _ => {}
                     }
                 }
@@ -632,6 +714,12 @@ impl App {
             return;
         }
         for e in &events {
+            // Cmd+C reaches egui as `Event::Copy` and never as a key (egui-winit swallows the key event),
+            // so this is the only place the shortcut is seen.
+            if matches!(e, egui::Event::Copy) {
+                self.push(Action::Copy);
+                continue;
+            }
             let egui::Event::Key { key, pressed: true, modifiers, repeat, .. } = e else { continue };
             let (cmd, shift, alt) = (modifiers.command, modifiers.shift, modifiers.alt);
             let plain = !cmd && !modifiers.ctrl && !alt;
@@ -640,21 +728,20 @@ impl App {
             match key {
                 Key::Z if cmd && shift => self.push(Action::Redo),
                 Key::Z if cmd => self.push(Action::Undo),
-                Key::C if cmd => self.push(Action::Copy),
                 Key::S if cmd && shift => self.push(Action::SaveAs),
                 Key::S if cmd => self.push(Action::Save),
-                Key::P if cmd => self.push(Action::Pin),
+                Key::P if cmd && !shift && !alt => self.push(Action::Pin),
                 Key::O if cmd && !shift => self.set_tool(Tool::Ocr),
                 Key::Equals | Key::Plus if cmd => self.push(Action::ZoomIn),
                 Key::Minus if cmd => self.push(Action::ZoomOut),
-                Key::Num0 if cmd => self.push(Action::Zoom100),
-                Key::Num1 if cmd => self.push(Action::ZoomFit),
-                Key::Num2 if cmd => self.push(Action::ZoomSelection),
+                Key::Num0 if cmd && !shift && !alt => self.push(Action::Zoom100),
+                Key::Num1 if cmd && !shift && !alt => self.push(Action::ZoomFit),
+                Key::Num2 if cmd && !shift && !alt => self.push(Action::ZoomSelection),
                 Key::Q if plain && self.ed.selection.is_some() => self.push(Action::SelectionTopLeft),
                 Key::W if plain && self.ed.selection.is_some() => self.push(Action::SelectionBottomRight),
                 Key::A if plain && sel_keys => self.smart_select(),
                 Key::B if plain && sel_keys => self.blur_selection(),
-                Key::W if cmd => self.push(Action::Close),
+                Key::W if cmd && !shift && !alt => self.push(Action::Close),
                 Key::Tab => {
                     if let (Some(q), Some(d)) = (self.ed.hover, &self.doc) {
                         let c = if shift { render::darkest_near(&d.base, q) } else { self.ed.hover_color };
@@ -817,6 +904,20 @@ impl App {
         egui::CentralPanel::default().frame(egui::Frame::new().fill(t.canvas)).show(ui, |ui| self.canvas_ui(ui, &t));
         self.popovers(ui.ctx(), &t);
         self.overlays(ui.ctx(), &t);
+        self.remember_styles();
+    }
+
+    /// Keeps the tools' latest styles in the settings, so the next launch starts from them.
+    fn remember_styles(&mut self) {
+        let now = self.ed.stored_styles();
+        if now == self.settings.tool_styles {
+            return;
+        }
+        self.settings.tool_styles = now;
+        // The tests draw the editor all the time: they must not write the user's settings.
+        if !cfg!(test) {
+            self.settings.save();
+        }
     }
 
     fn toolbar(&mut self, ui: &mut Ui, t: &Th) {
@@ -1784,16 +1885,22 @@ impl App {
     }
 
     /// Ruler keys: 2 and ←→ measure across, 1 and ↑↓ measure down.
-    /// `Some(true)` is horizontal. Arrows keep moving a selected object.
+    /// `Some(true)` is horizontal.
     fn ruler_axis(&self, ui: &Ui) -> Option<bool> {
         if self.ed.editing_text {
             return None;
         }
-        let arrows = self.ed.selected.is_none();
+        // Keys that already do something else are not ruler keys: the arrows move a selected object, a
+        // selected area or the crop frame; 1-9 set the Spotlight darkness; Cmd+1 and Cmd+2 are zoom.
+        let moves_something = self.ed.selected.is_some() || self.ed.selection.is_some() || (self.ed.tool == Tool::Crop && self.ed.crop_draft.is_some());
+        let digits = self.context_tool() != Tool::Spotlight;
         ui.input(|i| {
-            if i.key_down(Key::Num2) || (arrows && (i.key_down(Key::ArrowLeft) || i.key_down(Key::ArrowRight))) {
+            let m = i.modifiers;
+            let digits = digits && !m.command && !m.alt && !m.ctrl;
+            let arrows = !moves_something && !m.alt;
+            if (digits && i.key_down(Key::Num2)) || (arrows && (i.key_down(Key::ArrowLeft) || i.key_down(Key::ArrowRight))) {
                 Some(true)
-            } else if i.key_down(Key::Num1) || (arrows && (i.key_down(Key::ArrowUp) || i.key_down(Key::ArrowDown))) {
+            } else if (digits && i.key_down(Key::Num1)) || (arrows && (i.key_down(Key::ArrowUp) || i.key_down(Key::ArrowDown))) {
                 Some(false)
             } else {
                 None
@@ -2334,16 +2441,22 @@ impl App {
         if self.shortcuts_open {
             let mut open = true;
             egui::Window::new("Keyboard Shortcuts").open(&mut open).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
-                egui::Grid::new("keys").num_columns(2).spacing([24.0, 4.0]).show(ui, |ui| {
+                // The list is long: a small window scrolls it instead of cutting it off.
+                let room = (ctx.viewport_rect().height() - 90.0).max(120.0);
+                egui::ScrollArea::vertical().max_height(room).show(ui, |ui| egui::Grid::new("keys").num_columns(2).spacing([24.0, 4.0]).show(ui, |ui| {
                     for (k, v) in [
                         ("A T R O L", "Arrow, Text, Rectangle, Oval, Line"),
                         ("D H B S C M K", "Freehand, Highlighter, Blur, Spotlight, Counter, Magnifier, Backdrop"),
-                        ("Hold 2 or ←→ / 1 or ↑↓", "Ruler: horizontal / vertical span under the cursor"),
+                        ("Hold 2 or ←→ / 1 or ↑↓", "Ruler: horizontal / vertical span under the cursor (arrows: nothing selected)"),
                         ("Tab / ⇧Tab", "Copy pixel colour / darkest nearby colour"),
                         ("C (with a selection)", "Copy the average colour"),
                         ("Del", "Delete object or erase the selection"),
                         ("Esc", "Deselect, or copy and close"),
-                        ("⌘C  ⌘S  ⌘P", "Copy, Save, Pin to Screen"),
+                        ("⌘C  ⌘⇧C  ⌘S  ⌘⇧S  ⌘P", "Copy, Copy Image, Save, Save As, Pin to Screen"),
+                        ("⌘⇧P", "Print"),
+                        ("⌘W  ⌘⌥W", "Hide the editor, Close All"),
+                        ("⌘⇧O  ⌘⇧V", "Open a file, open the clipboard image"),
+                        ("⌘,  ⌘Q", "Preferences, Quit"),
                         ("⌘O", "Recognize Text or QR"),
                         ("⌘Z  ⌘⇧Z", "Undo, Redo"),
                         ("⌘+  ⌘-  ⌘0  ⌘1", "Zoom in, out, 100%, fit"),
@@ -2366,7 +2479,7 @@ impl App {
                         ui.label(v);
                         ui.end_row();
                     }
-                });
+                }));
             });
             self.shortcuts_open = open;
         }
@@ -2889,5 +3002,235 @@ mod key_tests {
         assert_eq!(pts.len(), 1);
         assert!((pts[0].x - 150.0).abs() < 0.6 && (pts[0].y - 100.0).abs() < 0.6);
         assert!(hit(&d.objs[0], pts[0], 1.0, &t.app.fonts), "the point can be picked");
+    }
+}
+
+#[cfg(test)]
+mod style_memory_tests {
+    use super::*;
+    use crate::settings::{Settings, ToolStyle};
+
+    fn all_tools() -> impl Iterator<Item = Tool> {
+        Tool::TOOLBAR.into_iter()
+    }
+
+    #[test]
+    fn a_fresh_install_keeps_the_factory_styles() {
+        let fresh = Editor::from_settings(&Settings::default());
+        let factory = Editor::default();
+        for t in all_tools() {
+            assert_eq!(fresh.style_for(t), factory.style_for(t), "{t:?}");
+        }
+        assert_eq!(fresh.default_tool, None);
+        assert_eq!(fresh.stored_styles().len(), Tool::TOOLBAR.len().min(fresh.styles.len()));
+    }
+
+    #[test]
+    fn every_tools_style_survives_a_save_and_load() {
+        let mut ed = Editor::default();
+        for (n, t) in all_tools().enumerate() {
+            let mut st = ed.style_for(t);
+            st.color = [(n * 17) as u8, 200, (255 - n * 9) as u8, 255];
+            st.size = (n % 4) as u8;
+            st.dashed = n % 2 == 0;
+            st.arrow = ARROW_STYLES[n % 4];
+            st.fill = FILLS[n % 4];
+            st.shape = SHAPES[n % 2];
+            st.font = FONTS[n % 2];
+            st.blur = BlurMode::ALL[n % BlurMode::ALL.len()];
+            st.smooth = (n as u8) % (FREEHAND_SMOOTH_MAX + 1);
+            st.vary = (n % FREEHAND_VARY.len()) as u8;
+            st.round_cap = n % 3 == 0;
+            st.dim = 0.1 * (n % 9) as f32;
+            ed.styles.insert(t, st);
+        }
+        let mut settings = Settings::default();
+        settings.tool_styles = ed.stored_styles();
+        // Through the file and back, as a restart does.
+        let settings: Settings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        let back = Editor::from_settings(&settings);
+        for t in all_tools() {
+            let (a, b) = (ed.style_for(t), back.style_for(t));
+            assert_eq!((a.color, a.size, a.dashed, a.arrow, a.fill, a.shape, a.font, a.blur), (b.color, b.size, b.dashed, b.arrow, b.fill, b.shape, b.font, b.blur), "{t:?}");
+            assert_eq!((a.smooth, a.vary, a.round_cap), (b.smooth, b.vary, b.round_cap), "{t:?}");
+            assert!((a.dim - b.dim).abs() < 1e-6, "{t:?}");
+        }
+    }
+
+    #[test]
+    fn a_hand_edited_style_cannot_break_the_editor() {
+        let base = Style::default();
+        let junk = ToolStyle { color: "red".into(), size: 250, arrow: 99, fill: 99, shape: 99, font: 99, blur: 99, smooth: 99, vary: 99, dim: f32::NAN, ..ToolStyle::default() };
+        let st = style_from_stored(&junk, &base);
+        assert_eq!(st.color, base.color);
+        assert_eq!((st.size, st.arrow, st.fill, st.shape, st.font, st.blur), (base.size, base.arrow, base.fill, base.shape, base.font, base.blur));
+        assert!(st.smooth <= FREEHAND_SMOOTH_MAX && (st.vary as usize) < FREEHAND_VARY.len());
+        assert_eq!(st.dim, base.dim);
+        let loud = style_from_stored(&ToolStyle { dim: 7.0, color: "#00ff7f".into(), ..ToolStyle::default() }, &base);
+        assert_eq!((loud.dim, loud.color), (1.0, [0, 255, 127, 255]));
+    }
+
+    #[test]
+    fn a_stored_style_for_one_tool_leaves_the_others_alone() {
+        let mut settings = Settings::default();
+        settings.tool_styles.insert("Oval".into(), ToolStyle { size: 3, color: "#123456".into(), ..ToolStyle::default() });
+        settings.tool_styles.insert("Gone Tool".into(), ToolStyle::default());
+        let ed = Editor::from_settings(&settings);
+        let factory = Editor::default();
+        assert_eq!(ed.style_for(Tool::Oval).size, 3);
+        assert_eq!(ed.style_for(Tool::Oval).color, [0x12, 0x34, 0x56, 255]);
+        assert_eq!(ed.style_for(Tool::Rectangle), factory.style_for(Tool::Rectangle));
+    }
+
+    #[test]
+    fn the_default_tool_is_picked_by_name() {
+        let mut settings = Settings::default();
+        settings.default_tool = "Arrow".into();
+        assert_eq!(Editor::from_settings(&settings).default_tool, Some(Tool::Arrow));
+        settings.default_tool = "Backdrop".into();
+        assert_eq!(Editor::from_settings(&settings).default_tool, None, "Backdrop is not a tool to start with");
+        settings.default_tool = "no such tool".into();
+        assert_eq!(Editor::from_settings(&settings).default_tool, None);
+    }
+
+    #[test]
+    fn tool_names_are_unique_keys() {
+        let mut names: Vec<&str> = all_tools().map(|t| t.name()).collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), Tool::TOOLBAR.len(), "{names:?}");
+    }
+
+    #[test]
+    fn a_style_the_user_changes_lands_in_the_settings() {
+        crate::headless::with_rig(|rig| {
+            let mut app = rig.app();
+            app.doc = Some(crate::model::Doc::new(Image { w: 40, h: 30, px: std::sync::Arc::new(vec![255; 40 * 30 * 4]) }, 1.0));
+            app.ed.tool = Tool::Rectangle;
+            app.update_style(|st| st.size = 3);
+            app.remember_styles();
+            assert_eq!(app.settings.tool_styles["Rectangle"].size, 3);
+            assert_eq!(app.settings.tool_styles["Oval"], Editor::default().stored_styles()["Oval"]);
+            // And a new launch reads it back.
+            assert_eq!(Editor::from_settings(&app.settings).style_for(Tool::Rectangle).size, 3);
+        });
+    }
+}
+
+#[cfg(test)]
+mod audit_integration {
+    use super::*;
+    use egui::{Event, Modifiers};
+    use std::sync::Arc;
+
+    fn rgba(w: u32, h: u32) -> Image {
+        Image { w, h, px: Arc::new(vec![255; (w * h * 4) as usize]) }
+    }
+
+    /// One frame; returns what the editor queued (not drained) and the ruler axis it sees.
+    fn frame(app: &mut App, ctx: &egui::Context, t: &mut f64, events: Vec<Event>, mods: Modifiers) -> (Vec<Action>, Option<bool>) {
+        *t += 0.05;
+        let mut input = egui::RawInput::default();
+        input.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, vec2(1100.0, 760.0)));
+        input.time = Some(*t);
+        input.events = vec![Event::ModifiersChanged(mods)];
+        input.events.extend(events);
+        let mut axis = None;
+        let mut out = ctx.run_ui(input, |ui| {
+            app.editor_ui(ui);
+            axis = app.ruler_axis(ui);
+        });
+        out.textures_delta.clear();
+        (std::mem::take(&mut *app.queue.lock().unwrap()), axis)
+    }
+
+    fn rig() -> (App, egui::Context, f64) {
+        let ctx = egui::Context::default();
+        crate::setup_fonts(&ctx);
+        ctx.set_pixels_per_point(2.0);
+        let mut app = App::headless(ctx.clone());
+        app.doc = Some(Doc::new(rgba(400, 300), 2.0));
+        let mut t = 0.0;
+        for _ in 0..3 {
+            frame(&mut app, &ctx, &mut t, vec![], Modifiers::NONE);
+        }
+        (app, ctx, t)
+    }
+
+    fn key(key: Key, pressed: bool, modifiers: Modifiers) -> Event {
+        Event::Key { key, physical_key: Some(key), pressed, repeat: false, modifiers }
+    }
+
+    /// AUDIT: egui-winit 0.36 turns Cmd+C into Event::Copy and drops the Key event, so `Key::C if cmd` is never reached on a Mac.
+    #[test]
+    fn audit_cmd_c_arrives_as_event_copy_and_copies_the_image() {
+        let (mut app, ctx, mut t) = rig();
+        let (queued, _) = frame(&mut app, &ctx, &mut t, vec![Event::Copy], Modifiers::COMMAND);
+        assert!(queued.iter().any(|a| matches!(a, Action::Copy)), "Event::Copy (what Cmd+C becomes under egui-winit) copies nothing");
+    }
+
+    /// AUDIT: the editor's own fallback maps Cmd+Shift+P to Pin although the menu says Print.
+    #[test]
+    fn audit_cmd_shift_p_is_print_not_pin() {
+        let (mut app, ctx, mut t) = rig();
+        let m = Modifiers { command: true, shift: true, mac_cmd: true, ..Modifiers::NONE };
+        let (queued, _) = frame(&mut app, &ctx, &mut t, vec![key(Key::P, true, m)], m);
+        assert!(!queued.iter().any(|a| matches!(a, Action::Pin)), "Cmd+Shift+P queued Pin");
+    }
+
+    /// AUDIT: Cmd+Opt+W (Close All) reaches the Close handler of the editor.
+    #[test]
+    fn audit_cmd_alt_w_is_not_plain_close() {
+        let (mut app, ctx, mut t) = rig();
+        let m = Modifiers { command: true, alt: true, mac_cmd: true, ..Modifiers::NONE };
+        let (queued, _) = frame(&mut app, &ctx, &mut t, vec![key(Key::W, true, m)], m);
+        assert!(!queued.iter().any(|a| matches!(a, Action::Close)), "Cmd+Opt+W queued Close");
+    }
+
+    /// AUDIT: arrows move the selection (#16) and also hold the ruler (#14-era code).
+    #[test]
+    fn audit_arrow_on_selection_does_not_also_measure() {
+        let (mut app, ctx, mut t) = rig();
+        app.ed.selection = Some(R { x0: 50.0, y0: 50.0, x1: 150.0, y1: 150.0 });
+        let (_, axis) = frame(&mut app, &ctx, &mut t, vec![key(Key::ArrowRight, true, Modifiers::NONE)], Modifiers::NONE);
+        assert_eq!(app.ed.selection.unwrap().x0, 51.0, "the arrow moved the selection");
+        assert_eq!(axis, None, "and the same key shows the horizontal ruler");
+    }
+
+    /// AUDIT: Cmd+1 (zoom to fit) / Cmd+2 (zoom to selection) also hold the ruler.
+    #[test]
+    fn audit_cmd_digits_do_not_hold_the_ruler() {
+        let (mut app, ctx, mut t) = rig();
+        let m = Modifiers { command: true, mac_cmd: true, ..Modifiers::NONE };
+        let (_, axis) = frame(&mut app, &ctx, &mut t, vec![key(Key::Num1, true, m)], m);
+        assert_eq!(axis, None, "Cmd+1 held shows the vertical ruler");
+    }
+
+    /// AUDIT: Spotlight's 1-9 keys (#16) are also the ruler keys.
+    #[test]
+    fn audit_spotlight_digits_do_not_hold_the_ruler() {
+        let (mut app, ctx, mut t) = rig();
+        app.set_tool(Tool::Spotlight);
+        let (_, axis) = frame(&mut app, &ctx, &mut t, vec![key(Key::Num2, true, Modifiers::NONE)], Modifiers::NONE);
+        assert_eq!(axis, None, "'2' sets the spotlight darkness and also shows the horizontal ruler");
+    }
+}
+
+#[cfg(test)]
+mod shortcuts_window_tests {
+    /// The Keyboard Shortcuts window (every menu shortcut is in it) is drawn; with SHOTCRAFT_SHOTS set
+    /// the picture is written there to look at.
+    #[test]
+    fn the_shortcuts_window_lists_the_menu_shortcuts_and_fits_a_small_editor() {
+        let size = (1100.0, 480.0);
+        let img = crate::headless::with_rig(|rig| {
+            let mut app = rig.app();
+            app.shortcuts_open = true;
+            rig.render_editor(&mut app, size, 2.0, true)
+        });
+        if let Ok(dir) = std::env::var("SHOTCRAFT_SHOTS") {
+            crate::headless::save_png(&img, &std::path::Path::new(&dir).join("shortcuts-window.png"));
+        }
+        assert_eq!((img.w, img.h), (2200, 960));
     }
 }

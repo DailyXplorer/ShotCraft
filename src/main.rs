@@ -80,6 +80,8 @@ pub enum Action {
     /// Scrolling capture that starts at the bottom of the page and goes up.
     ScrollingCaptureUp,
     ScrollingCancel,
+    /// Return during a scrolling capture: ends it. Unlike `ScrollingCapture` it never starts one.
+    ScrollingFinish,
     ScrollingArea(Result<Option<model::R>, String>),
     ScrollingFinished(Result<Option<scroll::Outcome>, String>),
     OcrCaptured(Result<Option<Captured>, String>),
@@ -167,6 +169,8 @@ pub struct App {
     open_at_start: Option<PathBuf>,
     started: bool,
     quitting: bool,
+    /// A hotkey is being recorded in Preferences: menu key equivalents and global hotkeys are off.
+    keys_suspended: bool,
     /// The editor window is not on screen. True from launch until the user asks for it.
     pub hidden: bool,
     /// The editor is on screen, transparent, and will be hidden again: eframe's first paint shows it.
@@ -238,6 +242,7 @@ impl App {
             open_at_start: None,
             started: true,
             quitting: false,
+            keys_suspended: false,
             hidden: false,
             startup_hide: false,
             waking: false,
@@ -268,7 +273,7 @@ impl App {
             #[cfg(target_os = "macos")]
             shell: None,
             doc: None,
-            ed: editor::Editor::default(),
+            ed: editor::Editor::from_settings(&settings),
             pins: vec![],
             next_pin: 1,
             thumb: None,
@@ -277,6 +282,7 @@ impl App {
             open_at_start,
             started: false,
             quitting: false,
+            keys_suspended: false,
             hidden: !show_at_start,
             startup_hide: false,
             waking: false,
@@ -489,8 +495,9 @@ impl App {
         };
         // Scrolling for the user needs the Accessibility permission; ask for it the first time. Without it
         // the capture still works, the user scrolls.
-        let auto = autoscroll::trusted(true);
-        self.scroll = Some(scroll::Session::start(rect, pos, auto, self.scroll_dir, self.queue.clone(), self.ctx.clone()));
+        let limits = scroll::Limits::from_settings(&self.settings);
+        let auto = !limits.manual && autoscroll::trusted(true);
+        self.scroll = Some(scroll::Session::start(rect, pos, auto, self.scroll_dir, limits, self.queue.clone(), self.ctx.clone()));
         self.grab_escape(true);
         // The control is a new window and the app has no Dock icon: wake the UI pass that creates it
         // while the editor is hidden, and show it without taking the keyboard from the page.
@@ -499,23 +506,43 @@ impl App {
         self.ctx.request_repaint();
     }
 
+    /// Return: ends the running scrolling capture and gives Return back at once. With no capture
+    /// running (a press that was already queued when the capture ended, or a double press) nothing
+    /// happens: it must never open the area picker of a new capture.
+    fn finish_scrolling(&mut self) {
+        if let Some(s) = &self.scroll {
+            s.finish();
+        }
+        self.release_enter();
+    }
+
+    fn release_enter(&mut self) {
+        #[cfg(target_os = "macos")]
+        if let Some(s) = &mut self.shell {
+            s.release_enter();
+        }
+    }
+
     fn scrolling_finished(&mut self, res: Result<Option<scroll::Outcome>, String>) {
         self.scroll = None;
         let up = self.scroll_dir == scroll::Direction::Up;
         self.grab_escape(false);
         match res {
             Ok(Some(o)) => {
-                let (frames, lost, capped) = (o.frames, o.lost, o.capped);
+                let (frames, lost, capped, max_height) = (o.frames, o.lost, o.capped, o.max_height);
+                let size = (o.img.w, o.img.h);
                 let (img, scale) = (o.img, o.scale);
                 self.handle(Action::Captured(Ok(Some(Captured { img, scale, area: None, mode: CaptureMode::Area }))));
                 if capped {
-                    self.say(format!("Stopped at the height limit of {} px", stitch::MAX_HEIGHT));
+                    self.say(format!("Stopped at the height limit of {max_height} px. Change it in Preferences"));
                 } else if frames <= 1 && lost > 0 {
                     self.say("Lost track while scrolling, so this is only the first view. Scroll slower and try again");
                 } else if frames <= 1 && up {
                     self.say("The page didn't scroll up, so this is a regular screenshot. Scroll to the bottom of the page first");
                 } else if frames <= 1 {
                     self.say("The page didn't scroll, so this is a regular screenshot");
+                } else {
+                    self.say(format!("Final image size: {} × {} px", size.0, size.1));
                 }
             }
             Ok(None) => self.handle(Action::Captured(Ok(None))),
@@ -575,7 +602,8 @@ impl App {
 
     fn save_target(&self, img: &Image) -> PathBuf {
         let ext = if self.settings.save_auto_format && system::looks_like_photo(img) { "jpg" } else { "png" };
-        PathBuf::from(&self.settings.folder).join(format!("ShotCraft-{}.{ext}", system::file_stamp()))
+        let stem = settings::file_stem(&self.settings.file_name_template, &system::now_stamp());
+        system::unique_path(&PathBuf::from(&self.settings.folder), &stem, ext)
     }
 
     fn prepared_for_save(&self) -> Option<Image> {
@@ -657,9 +685,9 @@ impl App {
         }
         self.ocr_running = true;
         self.say("Reading text…");
-        let (img, queue, ctx) = (img.clone(), self.queue.clone(), self.ctx.clone());
+        let (img, queue, ctx, language) = (img.clone(), self.queue.clone(), self.ctx.clone(), self.settings.ocr_language.clone());
         std::thread::spawn(move || {
-            let result = system::recognize(&img);
+            let result = system::recognize_in(&img, &language);
             queue.lock().unwrap().push(Action::OcrDone(result));
             ctx.request_repaint();
         });
@@ -743,6 +771,7 @@ impl App {
                     s.press_escape();
                 }
             }
+            Action::ScrollingFinish => self.finish_scrolling(),
             Action::ScrollingArea(res) => self.scrolling_area(res),
             Action::ScrollingFinished(res) => self.scrolling_finished(res),
             Action::OpenClipboard => match system::clipboard_image() {
@@ -852,6 +881,22 @@ impl App {
         #[cfg(target_os = "macos")]
         if let Some(s) = &mut self.shell {
             s.sync(&self.settings);
+        }
+    }
+
+    /// Switches the menu key equivalents and the global hotkeys off while Preferences records a
+    /// shortcut, and back on afterwards.
+    pub fn set_keys_suspended(&mut self, on: bool) {
+        if self.keys_suspended == on {
+            return;
+        }
+        self.keys_suspended = on;
+        #[cfg(target_os = "macos")]
+        if let Some(s) = &mut self.shell {
+            let refused = s.suspend_keys(on, &self.settings);
+            if !on {
+                self.prefs.lock().unwrap().set_refused(refused);
+            }
         }
     }
 
@@ -1126,7 +1171,7 @@ fn pin_window(ui: &mut egui::Ui, pin: &mut Pin, queue: &Queue) {
     if resp.double_clicked() {
         send(&ctx, queue, Action::PinEdit(img.clone(), scale));
     }
-    if close || ui.input(|i| i.viewport().close_requested() || i.key_pressed(egui::Key::Escape)) {
+    if close || ui.input(|i| i.viewport().close_requested() || i.key_pressed(egui::Key::Escape) || (i.modifiers.command && i.key_pressed(egui::Key::W))) {
         pin.open = false;
         ctx.request_repaint_of(ViewportId::ROOT);
     }
@@ -1288,4 +1333,21 @@ fn main() -> eframe::Result {
     #[cfg(target_os = "macos")]
     let options = eframe::NativeOptions { event_loop_builder: Some(app_mode::event_loop_hook(show_at_start)), ..options };
     eframe::run_native("ShotCraft", options, Box::new(move |cc| Ok(Box::new(App::new(cc, screenshot, show_at_start, open)))))
+}
+
+#[cfg(test)]
+mod return_key_tests {
+    use super::*;
+
+    /// Return is a global hotkey for the length of a scrolling capture. A press that is processed
+    /// after the capture ended (it was queued before, or Return was pressed twice) must not open
+    /// the area picker of a new capture.
+    #[test]
+    fn return_without_a_running_capture_starts_nothing() {
+        let mut app = App::headless(egui::Context::default());
+        assert!(app.scroll.is_none());
+        app.handle(Action::ScrollingFinish);
+        assert!(!app.busy, "a new scrolling capture was started");
+        assert!(app.scroll.is_none());
+    }
 }

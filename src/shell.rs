@@ -19,15 +19,17 @@ use tray_icon::{TrayIcon, TrayIconBuilder};
 
 pub struct Shell {
     tray: Option<TrayIcon>,
-    _menubar: Menu,
+    menubar: Menu,
     autostart_item: CheckMenuItem,
     /// "Delayed Screenshot (Ns)": the wait is a setting.
     delayed_item: Option<MenuItem>,
     auto_updates_item: CheckMenuItem,
     /// Draw ▸ Snap to Objects / Snap to Similar Objects.
     snap_items: Vec<(String, CheckMenuItem)>,
-    /// Items whose enabled state follows the editor (see `menu_model::item_enabled`), by id.
+    /// Menu bar items whose enabled state follows the editor (see `menu_model::item_enabled`), by id.
     stateful: Vec<(String, MenuItem)>,
+    /// The same for the status menu (see `menu_model::tray_item_enabled`).
+    tray_stateful: Vec<(String, MenuItem)>,
     /// Status menu items that show a global hotkey, kept to update when it changes.
     hotkey_items: Vec<(HotkeyAction, MenuItem)>,
     state: Option<MenuState>,
@@ -41,6 +43,9 @@ pub struct Shell {
     escape_id: Arc<AtomicU32>,
     enter: Option<HotKey>,
     enter_id: Arc<AtomicU32>,
+    /// A shortcut is being recorded: the menu bar and the global hotkeys are off, so every key
+    /// combination reaches the window.
+    keys_suspended: bool,
 }
 
 fn action_for(id: &str) -> Option<Action> {
@@ -65,7 +70,7 @@ fn action_for(id: &str) -> Option<Action> {
         "snap" => Action::ToggleSnap(false),
         "snapsimilar" => Action::ToggleSnap(true),
         "quit" => Action::Quit,
-        "copy" => Action::Copy,
+        "copy" | "editcopy" => Action::Copy,
         "save" => Action::Save,
         "saveas" => Action::SaveAs,
         "pin" => Action::Pin,
@@ -160,12 +165,6 @@ impl Parts {
                 Native::Hide => PredefinedMenuItem::hide(*title),
                 Native::HideOthers => PredefinedMenuItem::hide_others(*title),
                 Native::ShowAll => PredefinedMenuItem::show_all(*title),
-                Native::Cut => PredefinedMenuItem::cut(*title),
-                Native::Copy => PredefinedMenuItem::copy(*title),
-                Native::Paste => PredefinedMenuItem::paste(*title),
-                Native::PasteAndMatchStyle => PredefinedMenuItem::paste_and_match_style(*title),
-                Native::Delete => PredefinedMenuItem::delete(*title),
-                Native::SelectAll => PredefinedMenuItem::select_all(*title),
                 Native::FullScreen => PredefinedMenuItem::fullscreen(*title),
             }),
         }
@@ -278,10 +277,10 @@ impl Shell {
         if let Some(help) = &parts.help {
             help.set_as_help_menu_for_nsapp();
         }
-        let mut stateful = std::mem::take(&mut parts.stateful);
+        let stateful = std::mem::take(&mut parts.stateful);
         let tray_items: Vec<Box<dyn IsMenuItem>> = menu_model::status_menu().iter().map(|e| parts.build(e)).collect();
         let tray_menu = Menu::with_items(&tray_items.iter().map(|b| &**b).collect::<Vec<_>>()).expect("menu");
-        stateful.append(&mut parts.stateful);
+        let tray_stateful = std::mem::take(&mut parts.stateful);
         let delayed_item = parts.delayed_item.take();
         let snap_items = std::mem::take(&mut parts.snap_items);
         let (autostart_item, auto_updates_item, hotkey_items) = (parts.autostart_item.expect("autostart item"), parts.auto_updates_item.expect("updates item"), parts.hotkey_items);
@@ -325,7 +324,8 @@ impl Shell {
                 return;
             }
             if e.id == ent.load(Ordering::SeqCst) {
-                queue.lock().unwrap().push(Action::ScrollingCapture);
+                // Return only ends a capture that runs; it never starts one.
+                queue.lock().unwrap().push(Action::ScrollingFinish);
                 ctx.request_repaint();
                 return;
             }
@@ -345,7 +345,7 @@ impl Shell {
             ctx.request_repaint();
         }));
 
-        let mut shell = Shell { tray, _menubar: menubar, autostart_item, auto_updates_item, snap_items, delayed_item, stateful, hotkey_items, state: None, updater, hotkeys: GlobalHotKeyManager::new().ok(), registered: vec![], show_hotkey_works: false, hotkey_map, escape: None, escape_id, enter: None, enter_id };
+        let mut shell = Shell { tray, menubar, autostart_item, auto_updates_item, snap_items, delayed_item, stateful, tray_stateful, hotkey_items, state: None, updater, hotkeys: GlobalHotKeyManager::new().ok(), registered: vec![], show_hotkey_works: false, hotkey_map, escape: None, escape_id, enter: None, enter_id, keys_suspended: false };
         shell.apply_hotkeys(settings);
         shell
     }
@@ -353,6 +353,10 @@ impl Shell {
     /// Re-register global hotkeys from the settings; returns the ones macOS refused.
     pub fn apply_hotkeys(&mut self, settings: &Settings) -> Vec<HotkeyAction> {
         let Some(mgr) = &self.hotkeys else { return vec![] };
+        if self.keys_suspended {
+            // Registered again when the recording ends, from the settings of that moment.
+            return vec![];
+        }
         let _ = mgr.unregister_all(&self.registered);
         self.registered.clear();
         let mut map = self.hotkey_map.lock().unwrap();
@@ -371,6 +375,41 @@ impl Shell {
         self.show_hotkey_works = settings.hotkey(HotkeyAction::Show).is_some() && !failed.contains(&HotkeyAction::Show);
         self.sync(settings);
         failed
+    }
+
+    /// Switches the menu bar's key equivalents and the global hotkeys off while a shortcut is being
+    /// recorded in Preferences, and back on afterwards. A key equivalent is run by AppKit before the
+    /// window sees the key (⌘Q would quit in the middle of recording, ⌘S would save) and a registered
+    /// global hotkey never reaches the app as a key at all, so neither could be recorded. Removing the
+    /// main menu takes all of its items out, the predefined ones (Hide, Full Screen...) included.
+    /// Returns the hotkeys macOS refused when they are registered again.
+    pub fn suspend_keys(&mut self, on: bool, settings: &Settings) -> Vec<HotkeyAction> {
+        if self.keys_suspended == on {
+            return vec![];
+        }
+        if on {
+            self.menubar.remove_for_nsapp();
+            if let Some(mgr) = &self.hotkeys {
+                let _ = mgr.unregister_all(&self.registered);
+            }
+            self.registered.clear();
+            self.hotkey_map.lock().unwrap().clear();
+            self.keys_suspended = true;
+            vec![]
+        } else {
+            self.keys_suspended = false;
+            self.menubar.init_for_nsapp();
+            self.apply_hotkeys(settings)
+        }
+    }
+
+    /// Gives Return back as soon as it has ended the capture; Esc stays until the capture is over.
+    pub fn release_enter(&mut self) {
+        let Some(mgr) = &self.hotkeys else { return };
+        if let Some(hk) = self.enter.take() {
+            self.enter_id.store(0, Ordering::SeqCst);
+            let _ = mgr.unregister(hk);
+        }
     }
 
     /// Takes Esc and Return for the length of a scrolling capture, or gives them back. The control
@@ -422,6 +461,9 @@ impl Shell {
         self.state = Some(st);
         for (id, item) in &self.stateful {
             item.set_enabled(menu_model::item_enabled(id, &st));
+        }
+        for (id, item) in &self.tray_stateful {
+            item.set_enabled(menu_model::tray_item_enabled(id, &st));
         }
     }
 

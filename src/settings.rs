@@ -50,16 +50,18 @@ pub enum HotkeyAction {
 }
 
 impl HotkeyAction {
+    /// The order of the rows in Preferences → Hotkeys: the original's order, with All displays
+    /// next to Fullscreen.
     pub const ALL: [HotkeyAction; 9] = [
         HotkeyAction::Fullscreen,
         HotkeyAction::AllDisplays,
         HotkeyAction::Area,
-        HotkeyAction::Window,
         HotkeyAction::ActiveWindow,
-        HotkeyAction::RepeatArea,
-        HotkeyAction::Ocr,
-        HotkeyAction::Show,
         HotkeyAction::Scrolling,
+        HotkeyAction::Ocr,
+        HotkeyAction::RepeatArea,
+        HotkeyAction::Window,
+        HotkeyAction::Show,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -73,6 +75,44 @@ impl HotkeyAction {
             HotkeyAction::Show => "Show ShotCraft",
             HotkeyAction::Scrolling => "Scrolling screenshot",
         }
+    }
+}
+
+/// Scrolling screenshot max height: pixels of the stitched picture. A hand-edited file can't ask for
+/// less than one screenful or for a picture that cannot fit in memory.
+pub const SCROLL_MAX_HEIGHT: u32 = 20_000;
+pub const SCROLL_MAX_HEIGHT_RANGE: (u32, u32) = (1_000, 400_000);
+/// Scrolling speed levels, 0 (slowest) to `SCROLL_SPEED_MAX`.
+pub const SCROLL_SPEED_DEFAULT: u8 = 2;
+pub const SCROLL_SPEED_MAX: u8 = 4;
+pub const SCROLL_SPEED_LABELS: [&str; 5] = ["Slowest", "Slow", "Normal", "Fast", "Fastest"];
+
+/// What a saved screenshot is called, without the extension. The tokens are in `file_stem`.
+pub const FILE_NAME_TEMPLATE: &str = "ShotCraft-%Y%m%d-%t";
+
+/// The shape of an annotation tool's style as it is kept between launches. Mirrors the editor's
+/// style; the editor converts both ways, so this file stays free of the editor's types. Choices are
+/// small numbers (the position in the editor's list) and the editor clamps what it reads back.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct ToolStyle {
+    pub color: String,
+    pub size: u8,
+    pub dashed: bool,
+    pub arrow: u8,
+    pub fill: u8,
+    pub shape: u8,
+    pub font: u8,
+    pub blur: u8,
+    pub smooth: u8,
+    pub vary: u8,
+    pub round_cap: bool,
+    pub dim: f32,
+}
+
+impl Default for ToolStyle {
+    fn default() -> Self {
+        ToolStyle { color: crate::model::DEFAULT_COLOR.into(), size: crate::model::SIZE_DEFAULT, dashed: false, arrow: 0, fill: 1, shape: 0, font: 0, blur: 0, smooth: 0, vary: 0, round_cap: false, dim: crate::model::SPOTLIGHT_DIM }
     }
 }
 
@@ -108,6 +148,22 @@ pub struct Settings {
     pub logical_points: bool,
     pub ocr_remove_breaks: bool,
     pub hide_menubar_icon: bool,
+    /// Scrolling screenshot max height, in pixels of the stitched picture. Read it with `scroll_max_height`.
+    pub scroll_max_height: u32,
+    /// Scrolling screenshot speed, 0 to `SCROLL_SPEED_MAX`. Read it with `scroll_speed_level`.
+    pub scroll_speed: u8,
+    /// For apps that turn the wheel around: scroll the other way.
+    pub scroll_reverse: bool,
+    /// Scroll by hand even when ShotCraft could do it.
+    pub scroll_manual: bool,
+    /// Name of saved screenshots; see `file_stem` for the tokens.
+    pub file_name_template: String,
+    /// Language the text recognition tries first, as a Vision language code; empty for automatic.
+    pub ocr_language: String,
+    /// Tool that is selected when a screenshot opens, by its name; empty keeps the one in use.
+    pub default_tool: String,
+    /// Last style of each annotation tool, by tool name.
+    pub tool_styles: std::collections::BTreeMap<String, ToolStyle>,
     pub hotkeys: Vec<(HotkeyAction, String)>,
     pub last_area: Option<[f32; 4]>,
     /// Draw menu: Snap to Objects (edges and centres line up with other annotations).
@@ -145,6 +201,14 @@ impl Default for Settings {
             logical_points: false,
             ocr_remove_breaks: false,
             hide_menubar_icon: false,
+            scroll_max_height: SCROLL_MAX_HEIGHT,
+            scroll_speed: SCROLL_SPEED_DEFAULT,
+            scroll_reverse: false,
+            scroll_manual: false,
+            file_name_template: FILE_NAME_TEMPLATE.into(),
+            ocr_language: String::new(),
+            default_tool: String::new(),
+            tool_styles: Default::default(),
             hotkeys: vec![
                 (HotkeyAction::Fullscreen, "super+shift+Digit1".into()),
                 (HotkeyAction::Area, "super+shift+Digit2".into()),
@@ -159,13 +223,47 @@ impl Default for Settings {
     }
 }
 
+/// Where an unreadable settings file is kept: `settings.json.bad` next to it.
+fn bad_copy_path(p: &std::path::Path) -> PathBuf {
+    let mut name = p.file_name().unwrap_or_default().to_os_string();
+    name.push(".bad");
+    p.with_file_name(name)
+}
+
 fn path() -> PathBuf {
     crate::system::home().join("Library/Application Support/ShotCraft/settings.json")
 }
 
 impl Settings {
     pub fn load() -> Settings {
-        std::fs::read(path()).ok().and_then(|b| serde_json::from_slice::<Settings>(&b).ok()).unwrap_or_default().migrated()
+        Settings::load_from(&path())
+    }
+
+    /// Reads the settings file. A missing file gives the defaults silently. A file that exists but
+    /// can't be read as settings (damaged, or written by another version with a value this one
+    /// doesn't know) is copied to `settings.json.bad` first, and the reason is logged: the next save
+    /// would overwrite it with the defaults, and the user's choices would be gone for good.
+    fn load_from(p: &std::path::Path) -> Settings {
+        let bytes = match std::fs::read(p) {
+            Ok(b) => b,
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!("settings: can't read {}: {e}; using the defaults", p.display());
+                }
+                return Settings::default();
+            }
+        };
+        match serde_json::from_slice::<Settings>(&bytes) {
+            Ok(s) => s.migrated(),
+            Err(e) => {
+                let bad = bad_copy_path(p);
+                match std::fs::write(&bad, &bytes) {
+                    Ok(()) => eprintln!("settings: {} is unreadable ({e}); kept a copy in {} and using the defaults", p.display(), bad.display()),
+                    Err(w) => eprintln!("settings: {} is unreadable ({e}) and the copy to {} failed ({w}); using the defaults", p.display(), bad.display()),
+                }
+                Settings::default()
+            }
+        }
     }
 
     /// Carries the old "Trim shadow" checkbox over to the window background mode.
@@ -190,6 +288,15 @@ impl Settings {
     /// effect while the Show ShotCraft hotkey works: without either, nothing could open it again.
     pub fn menubar_icon_visible(&self, show_hotkey_works: bool) -> bool {
         !self.hide_menubar_icon || !show_hotkey_works
+    }
+
+    /// The height limit of a scrolling screenshot, kept in range.
+    pub fn scroll_max_height(&self) -> u32 {
+        self.scroll_max_height.clamp(SCROLL_MAX_HEIGHT_RANGE.0, SCROLL_MAX_HEIGHT_RANGE.1)
+    }
+
+    pub fn scroll_speed_level(&self) -> u8 {
+        self.scroll_speed.min(SCROLL_SPEED_MAX)
     }
 
     /// The wait of Delayed Screenshot: a hand-edited settings file can't make it zero or endless.
@@ -222,6 +329,62 @@ pub fn pretty_hotkey(s: &str) -> String {
         });
     }
     out
+}
+
+/// A date and time on the clock, for names.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Stamp {
+    pub year: i32,
+    pub month: u32,
+    pub day: u32,
+    pub hour: u32,
+    pub minute: u32,
+    pub second: u32,
+}
+
+const NAME_MAX: usize = 120;
+/// File names are limited in bytes too (255 on macOS, and the extension and a `-N` suffix come after).
+const NAME_MAX_BYTES: usize = 200;
+
+/// The name of a saved screenshot (no extension) from `template` and the time. Tokens: `%Y` year,
+/// `%y` two-digit year, `%m` month, `%d` day, `%H` hour, `%M` minute, `%S` second, `%t` the time as
+/// `%H%M%S`, `%%` a percent sign. Other text, including unknown tokens, stays as typed. Characters a
+/// file name can't hold become `-`; an empty result falls back to the default template.
+pub fn file_stem(template: &str, now: &Stamp) -> String {
+    let render = |t: &str| {
+        let mut out = String::new();
+        let mut chars = t.chars();
+        while let Some(c) = chars.next() {
+            if c != '%' {
+                out.push(c);
+                continue;
+            }
+            match chars.next() {
+                Some('Y') => out.push_str(&format!("{:04}", now.year)),
+                Some('y') => out.push_str(&format!("{:02}", now.year.rem_euclid(100))),
+                Some('m') => out.push_str(&format!("{:02}", now.month)),
+                Some('d') => out.push_str(&format!("{:02}", now.day)),
+                Some('H') => out.push_str(&format!("{:02}", now.hour)),
+                Some('M') => out.push_str(&format!("{:02}", now.minute)),
+                Some('S') => out.push_str(&format!("{:02}", now.second)),
+                Some('t') => out.push_str(&format!("{:02}{:02}{:02}", now.hour, now.minute, now.second)),
+                Some('%') => out.push('%'),
+                Some(other) => {
+                    out.push('%');
+                    out.push(other);
+                }
+                None => out.push('%'),
+            }
+        }
+        let clean: String = out.chars().map(|c| if matches!(c, '/' | '\\' | ':') || c.is_control() { '-' } else { c }).collect();
+        clean.trim().trim_start_matches('.').chars().scan(0usize, |bytes, c| { *bytes += c.len_utf8(); (*bytes <= NAME_MAX_BYTES).then_some(c) }).take(NAME_MAX).collect::<String>().trim_end().to_string()
+    };
+    let name = render(template);
+    if name.is_empty() {
+        render(FILE_NAME_TEMPLATE)
+    } else {
+        name
+    }
 }
 
 #[cfg(test)]
@@ -271,6 +434,96 @@ mod window_bg_tests {
         assert!(!json.contains("trim_shadow"));
         let again: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(again, Settings::default());
+    }
+}
+
+#[cfg(test)]
+mod preference_tests {
+    use super::*;
+
+    const NOW: Stamp = Stamp { year: 2026, month: 11, day: 5, hour: 9, minute: 7, second: 3 };
+
+    #[test]
+    fn old_settings_files_get_the_new_defaults() {
+        let old: Settings = serde_json::from_str(r#"{"after_show":"Thumbnail","folder":"/tmp/x","hotkeys":[["Area","super+shift+Digit2"]]}"#).unwrap();
+        assert_eq!(old.after_show, AfterShow::Thumbnail);
+        assert_eq!(old.folder, "/tmp/x");
+        assert_eq!(old.hotkey(HotkeyAction::Area), Some("super+shift+Digit2"));
+        assert_eq!((old.scroll_max_height(), old.scroll_speed_level(), old.scroll_reverse, old.scroll_manual), (20_000, 2, false, false));
+        assert_eq!(old.file_name_template, "ShotCraft-%Y%m%d-%t");
+        assert_eq!((old.ocr_language.as_str(), old.default_tool.as_str()), ("", ""));
+        assert!(old.tool_styles.is_empty());
+        let empty: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(empty.scroll_max_height, SCROLL_MAX_HEIGHT);
+    }
+
+    #[test]
+    fn the_new_fields_survive_a_round_trip() {
+        let mut s = Settings::default();
+        s.scroll_max_height = 50_000;
+        s.scroll_speed = 4;
+        s.scroll_reverse = true;
+        s.scroll_manual = true;
+        s.file_name_template = "SCR-%Y%m%d-%t".into();
+        s.ocr_language = "fr-FR".into();
+        s.default_tool = "Arrow".into();
+        s.tool_styles.insert("Rectangle".into(), ToolStyle { size: 1, color: "#00A490".into(), ..ToolStyle::default() });
+        let back: Settings = serde_json::from_str(&serde_json::to_string_pretty(&s).unwrap()).unwrap();
+        assert_eq!(back, s);
+    }
+
+    #[test]
+    fn a_stored_style_missing_fields_fills_them_in() {
+        let s: Settings = serde_json::from_str(r##"{"tool_styles":{"Oval":{"size":4}}}"##).unwrap();
+        let oval = &s.tool_styles["Oval"];
+        assert_eq!((oval.size, oval.color.as_str()), (4, "#FF0C01"));
+    }
+
+    #[test]
+    fn the_scrolling_limits_stay_in_range() {
+        let mut s = Settings::default();
+        s.scroll_max_height = 0;
+        assert_eq!(s.scroll_max_height(), 1_000);
+        s.scroll_max_height = 4_000_000_000;
+        assert_eq!(s.scroll_max_height(), 400_000);
+        s.scroll_max_height = 123_456;
+        assert_eq!(s.scroll_max_height(), 123_456);
+        s.scroll_speed = 200;
+        assert_eq!(s.scroll_speed_level(), SCROLL_SPEED_MAX);
+        assert_eq!(SCROLL_SPEED_LABELS.len(), SCROLL_SPEED_MAX as usize + 1);
+    }
+
+    #[test]
+    fn hotkey_rows_follow_the_original_order() {
+        use HotkeyAction::*;
+        assert_eq!(HotkeyAction::ALL, [Fullscreen, AllDisplays, Area, ActiveWindow, Scrolling, Ocr, RepeatArea, Window, Show]);
+        let mut seen = HotkeyAction::ALL.to_vec();
+        seen.dedup();
+        assert_eq!(seen.len(), 9);
+    }
+
+    #[test]
+    fn the_default_name_is_the_old_name() {
+        assert_eq!(file_stem(FILE_NAME_TEMPLATE, &NOW), "ShotCraft-20261105-090703");
+    }
+
+    #[test]
+    fn name_tokens_turn_into_the_date_and_time() {
+        assert_eq!(file_stem("SCR-%Y%m%d-%t", &NOW), "SCR-20261105-090703");
+        assert_eq!(file_stem("%y-%m-%d %H.%M.%S", &NOW), "26-11-05 09.07.03");
+        assert_eq!(file_stem("100%% %Q", &NOW), "100% %Q");
+        assert_eq!(file_stem("end%", &NOW), "end%");
+    }
+
+    #[test]
+    fn names_are_made_safe_and_never_empty() {
+        assert_eq!(file_stem("a/b:c\\d", &NOW), "a-b-c-d");
+        assert_eq!(file_stem("..hidden", &NOW), "hidden");
+        assert_eq!(file_stem("", &NOW), "ShotCraft-20261105-090703");
+        assert_eq!(file_stem("   ", &NOW), "ShotCraft-20261105-090703");
+        assert_eq!(file_stem(&"x".repeat(500), &NOW).len(), 120);
+        let wide = file_stem(&"名".repeat(500), &NOW);
+        assert!(wide.len() <= 200 && wide.chars().all(|c| c == '名'), "{}", wide.len());
     }
 }
 
@@ -325,5 +578,46 @@ mod tests {
             assert!(keys.parse::<global_hotkey::hotkey::HotKey>().is_ok(), "{keys}");
         }
         assert_eq!(pretty_hotkey(settings.hotkey(HotkeyAction::Ocr).unwrap()), "⌃⌥⌘O");
+    }
+}
+
+#[cfg(test)]
+mod load_tests {
+    use super::*;
+
+    fn dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("shotcraft-settings-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn a_missing_file_gives_the_defaults_and_no_backup() {
+        let d = dir("missing");
+        let s = Settings::load_from(&d.join("settings.json"));
+        assert_eq!(s.delay_secs, Settings::default().delay_secs);
+        assert!(!d.join("settings.json.bad").exists());
+    }
+
+    #[test]
+    fn an_unreadable_file_is_kept_as_bad_before_the_defaults_are_used() {
+        let d = dir("bad");
+        let file = d.join("settings.json");
+        // A value this version doesn't know (what a downgrade leaves behind) next to settings that matter.
+        let text = r#"{"after_show": "FromTheFuture", "folder": "/precious"}"#;
+        std::fs::write(&file, text).unwrap();
+        let s = Settings::load_from(&file);
+        assert_eq!(s.folder, Settings::default().folder, "falls back to the defaults");
+        assert_eq!(std::fs::read_to_string(d.join("settings.json.bad")).unwrap(), text, "the original is kept");
+    }
+
+    #[test]
+    fn a_good_file_is_loaded_and_leaves_no_backup() {
+        let d = dir("good");
+        let file = d.join("settings.json");
+        std::fs::write(&file, r#"{"folder": "/pics"}"#).unwrap();
+        assert_eq!(Settings::load_from(&file).folder, "/pics");
+        assert!(!d.join("settings.json.bad").exists());
     }
 }
