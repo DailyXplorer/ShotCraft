@@ -142,6 +142,10 @@ pub fn apply_input(st: &mut State, display: usize, inp: &Input) {
     if let (true, Some(p)) = (inp.pressed, inp.latest) {
         st.grab.press(display, global(inp.press_origin.unwrap_or(p)), inp.shift);
     }
+    if inp.released && inp.latest.is_none() && st.grab.selection().map(|(d, _)| d) == Some(display) {
+        // The button went up with no pointer position (it left the window): what is drawn stands.
+        st.grab.confirm();
+    }
     if let (Some(p), true) = (inp.latest, st.grab.selection().map(|(d, _)| d) == Some(display)) {
         if inp.released {
             st.grab.release(global(p), inp.shift);
@@ -351,6 +355,15 @@ mod shots {
         let both = Input { hover: Some(pos2(150.0, 120.0)), latest: Some(pos2(150.0, 120.0)), press_origin: Some(pos2(50.0, 50.0)), pressed: true, down: true, ..Input::default() };
         apply_input(&mut st, 0, &both);
         assert_eq!(st.grab.selection().unwrap().1, Rect::new(50.0, 50.0, 100.0, 70.0));
+    }
+
+    #[test]
+    fn a_release_without_a_pointer_position_confirms_what_is_drawn() {
+        let mut st = state(&[(MAIN, 1)]);
+        apply_input(&mut st, 0, &frame_input(Ev::Press(50.0, 50.0), false));
+        apply_input(&mut st, 0, &frame_input(Ev::Drag(150.0, 120.0), false));
+        apply_input(&mut st, 0, &Input { released: true, ..Input::default() });
+        assert_eq!(st.outcome(), Some(Outcome::Done(0, Rect::new(50.0, 50.0, 100.0, 70.0))));
     }
 
     #[test]
