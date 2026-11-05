@@ -14,6 +14,7 @@ mod render;
 mod autoscroll;
 mod scroll;
 mod selection;
+mod snap;
 mod scroll_control;
 mod settings;
 mod sizing;
@@ -48,6 +49,8 @@ pub enum Action {
     ToggleAutostart,
     CheckForUpdates,
     ToggleAutoUpdates,
+    /// Draw menu: Snap to Objects (false) or Snap to Similar Objects (true).
+    ToggleSnap(bool),
     Quit,
     Copy,
     Save,
@@ -881,6 +884,12 @@ impl App {
                 if let Some(s) = &self.shell {
                     s.toggle_auto_updates();
                 }
+            }
+            Action::ToggleSnap(similar) => {
+                let flag = if similar { &mut self.settings.snap_similar } else { &mut self.settings.snap_objects };
+                *flag = !*flag;
+                self.settings.save();
+                self.sync_shell();
             }
             Action::ToggleAutostart => {
                 self.settings.autostart = !self.settings.autostart;

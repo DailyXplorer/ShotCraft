@@ -141,11 +141,10 @@ fn edit_menu() -> Entry {
 
 fn draw_menu() -> Entry {
     let mut items: Vec<Entry> = DRAW.iter().map(|(title, tool, code)| item(&format!("{TOOL_PREFIX}{}", tool.name()), title, key(0, code))).collect();
-    // The two snapping modes are listed as in the original; they stay off until the feature exists.
     items.push(item("addcapture", "Add Capture", None));
     items.push(Entry::Sep);
-    items.push(Entry::Check { id: "snap".into(), title: "Snap to Objects", enabled: false });
-    items.push(Entry::Check { id: "snapsimilar".into(), title: "Snap to Similar Objects", enabled: false });
+    items.push(Entry::Check { id: "snap".into(), title: "Snap to Objects", enabled: true });
+    items.push(Entry::Check { id: "snapsimilar".into(), title: "Snap to Similar Objects", enabled: true });
     Entry::Sub { title: "Draw", items }
 }
 
@@ -451,7 +450,7 @@ mod tests {
             }
         }
         walk(&bar, &mut disabled);
-        assert_eq!(disabled, ["Snap to Objects", "Snap to Similar Objects"]);
+        assert!(disabled.is_empty(), "{disabled:?}");
     }
 
     #[test]
