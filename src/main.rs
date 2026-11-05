@@ -2,6 +2,8 @@ mod app_mode;
 mod color;
 mod dragout;
 mod editor;
+mod frozen;
+mod frozen_ui;
 #[cfg(test)]
 mod headless;
 #[cfg(test)]
@@ -96,6 +98,26 @@ pub enum Action {
     ScrollingFinished(Result<Option<scroll::Outcome>, String>),
     OcrCaptured(Result<Option<Captured>, String>),
     OcrDone(Result<system::OcrResult, String>),
+    /// The screens are photographed: the frozen area grabber can open its windows.
+    FrozenShots(Box<FrozenStart>),
+}
+
+/// What the frozen area grabber starts from.
+pub struct FrozenStart {
+    shots: Vec<frozen::Shot>,
+    /// Kept for the fall back to the system selector.
+    opt: system::CaptureOptions,
+    for_ocr: bool,
+}
+
+/// A frozen area grab under way.
+struct Frozen {
+    shared: frozen_ui::Shared,
+    opt: system::CaptureOptions,
+    /// The display under the mouse when the grab began: its window takes the keyboard.
+    key: usize,
+    /// The windows are above the menu bar and in front.
+    raised: bool,
 }
 
 pub type Queue = Arc<Mutex<Vec<Action>>>;
@@ -198,6 +220,7 @@ pub struct App {
     front_title: &'static str,
     front_focus: bool,
     scroll: Option<scroll::Session>,
+    frozen: Option<Frozen>,
     /// Which way the scrolling capture being set up goes.
     scroll_dir: scroll::Direction,
     ocr_running: bool,
@@ -276,6 +299,7 @@ impl App {
             front_title: "",
             front_focus: true,
             scroll: None,
+            frozen: None,
             scroll_dir: scroll::Direction::Down,
             ocr_running: false,
             busy: false,
@@ -318,6 +342,7 @@ impl App {
             front_title: "",
             front_focus: true,
             scroll: None,
+            frozen: None,
             scroll_dir: scroll::Direction::Down,
             ocr_running: false,
             busy: false,
@@ -462,14 +487,89 @@ impl App {
         };
         let q = self.queue.clone();
         let ctx = self.ctx.clone();
+        let frozen = mode == CaptureMode::Area && frozen::wanted(self.settings.frozen_area, &opt.snapshot.displays);
         std::thread::spawn(move || {
             if was_visible {
                 std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            if frozen {
+                // Photograph every display before any window of ours is up. When that fails the
+                // system selector does the job as it always did.
+                match system::grab_displays(&opt) {
+                    Ok(shots) => {
+                        q.lock().unwrap().push(Action::FrozenShots(Box::new(FrozenStart { shots, opt, for_ocr })));
+                        ctx.request_repaint();
+                        return;
+                    }
+                    Err(e) => eprintln!("frozen area capture unavailable, using the system selector: {e}"),
+                }
             }
             let res = system::capture(mode, &opt);
             q.lock().unwrap().push(if for_ocr { Action::OcrCaptured(res) } else { Action::Captured(res) });
             ctx.request_repaint();
         });
+    }
+
+    /// The pictures are taken: open one window per display and let the user draw on them.
+    fn frozen_start(&mut self, start: FrozenStart) {
+        let snap = &start.opt.snapshot;
+        let key = snap.mouse.and_then(|m| targets::display_at(&snap.displays, m)).unwrap_or(0).min(start.shots.len().saturating_sub(1));
+        let shared = Arc::new(Mutex::new(frozen_ui::State::new(start.shots, start.for_ocr)));
+        self.frozen = Some(Frozen { shared, opt: start.opt, key, raised: false });
+        // The windows are new and the app has no Dock icon: wake the UI pass that creates them,
+        // and give the keyboard to the one under the mouse.
+        self.wake_ui();
+        self.bring_to_front(frozen_ui::TITLES[key]);
+    }
+
+    /// Every pass while a frozen grab runs: shows its windows, and ends it when it is over.
+    fn frozen_ui(&mut self, ctx: &egui::Context) {
+        let Some(f) = &mut self.frozen else { return };
+        let (outcome, timed_out, frames) = {
+            let st = f.shared.lock().unwrap();
+            (st.outcome(), st.timed_out(), st.grab.frames().to_vec())
+        };
+        if let Some(out) = outcome {
+            return self.frozen_done(out);
+        }
+        if timed_out {
+            // No window came up: the system selector takes over.
+            if let Some(f) = self.frozen.take() {
+                let for_ocr = f.shared.lock().unwrap().for_ocr;
+                eprintln!("frozen area capture windows did not appear, using the system selector");
+                let (q, c) = (self.queue.clone(), self.ctx.clone());
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    let res = system::capture(CaptureMode::Area, &f.opt);
+                    q.lock().unwrap().push(if for_ocr { Action::OcrCaptured(res) } else { Action::Captured(res) });
+                    c.request_repaint();
+                });
+            }
+            return;
+        }
+        for (i, frame) in frames.iter().enumerate() {
+            show_window(ctx, frozen_ui::viewport_id(i), frozen_ui::builder(i, *frame), frozen_ui::body(f.shared.clone(), i));
+        }
+        if !f.raised {
+            f.raised = frozen_ui::raise_windows(frames.len(), f.key) == frames.len();
+        }
+        ctx.request_repaint_after_for(std::time::Duration::from_millis(100), ViewportId::ROOT);
+    }
+
+    fn frozen_done(&mut self, out: frozen::Outcome) {
+        let Some(f) = self.frozen.take() else { return };
+        let st = f.shared.lock().unwrap();
+        let res = match out {
+            frozen::Outcome::Cancelled => Ok(None),
+            frozen::Outcome::Done(d, sel) => match st.shots.get(d).and_then(|shot| frozen::crop(shot, sel).map(|img| (img, shot.px_per_point().0 as f32))) {
+                Some((img, scale)) => {
+                    let area = model::R { x0: sel.x as f32, y0: sel.y as f32, x1: (sel.x + sel.w) as f32, y1: (sel.y + sel.h) as f32 };
+                    Ok(Some(Captured { img, scale, area: Some(area), mode: CaptureMode::Area }))
+                }
+                None => Err("Can't cut that area from the picture of the screen.".to_string()),
+            },
+        };
+        self.push(if st.for_ocr { Action::OcrCaptured(res) } else { Action::Captured(res) });
     }
 
     /// Starts a scrolling capture, or ends the running one (the hotkey and the menu item act as Done).
@@ -885,6 +985,7 @@ impl App {
                 }
             }
             Action::OcrDone(result) => self.ocr_done(result),
+            Action::FrozenShots(start) => self.frozen_start(*start),
             Action::ScrollingCapture => self.start_scrolling(scroll::Direction::Down),
             Action::ScrollingCaptureUp => self.start_scrolling(scroll::Direction::Up),
             Action::ScrollingCancel => {
@@ -1441,6 +1542,7 @@ impl eframe::App for App {
         self.pins_ui(&ctx);
         self.thumb_ui(&ctx);
         self.scroll_ui(&ctx);
+        self.frozen_ui(&ctx);
         self.prefs_ui(&ctx);
         self.settle_windows();
         self.screenshot_tick(ui);

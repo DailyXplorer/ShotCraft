@@ -133,6 +133,9 @@ pub struct Settings {
     pub capture_cursor: bool,
     /// Seconds Delayed Screenshot waits before it takes the picture.
     pub delay_secs: u32,
+    /// Area Capture freezes the screen and draws its own selection on the frozen picture, instead
+    /// of the system selector. Off by default, as in the original (where it is experimental).
+    pub frozen_area: bool,
     /// Settings files written before `WindowBg::Trimmed` kept "Trim shadow" as its own checkbox.
     /// Only read, to carry an old choice over; never written.
     #[serde(skip_serializing)]
@@ -189,6 +192,7 @@ impl Default for Settings {
             window_solid: "#C4C6C8".into(),
             capture_cursor: false,
             delay_secs: DEFAULT_DELAY,
+            frozen_area: false,
             trim_shadow: false,
             always_on_top: false,
             reverse_zoom: false,
@@ -547,6 +551,15 @@ mod capture_option_tests {
         assert_eq!(s.delay(), 1);
         let s: Settings = serde_json::from_str(r#"{"delay_secs":100000}"#).unwrap();
         assert_eq!(s.delay(), 60);
+    }
+
+    #[test]
+    fn the_frozen_grabber_is_off_until_chosen_and_old_files_keep_it_off() {
+        assert!(!Settings::default().frozen_area);
+        let old: Settings = serde_json::from_str("{}").unwrap();
+        assert!(!old.frozen_area);
+        let on: Settings = serde_json::from_str(r#"{"frozen_area":true}"#).unwrap();
+        assert!(on.frozen_area);
     }
 
     #[test]

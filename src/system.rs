@@ -1,3 +1,4 @@
+use crate::frozen;
 use crate::model::{Image, R};
 use crate::settings::WindowBg;
 use crate::targets::{self, Snapshot, Target};
@@ -173,6 +174,29 @@ fn capture_target(target: Target, mode: CaptureMode, opt: &CaptureOptions) -> Re
 
 fn frame_of(r: R) -> Frame {
     (r.x0 as f64, r.y0 as f64, r.w() as f64, r.h() as f64)
+}
+
+/// A picture of every display, taken before the selection overlay opens, so that the overlay
+/// shows the screen as it was and never itself. Display order is the snapshot's. Any failure
+/// (a display that gives no picture, an odd size) is an `Err`: the caller falls back to the system selector.
+pub fn grab_displays(opt: &CaptureOptions) -> Result<Vec<frozen::Shot>, String> {
+    let displays = &opt.snapshot.displays;
+    if displays.is_empty() || displays.len() > frozen::MAX_DISPLAYS {
+        return Err("The display layout is unknown.".into());
+    }
+    let extra = targets::extra_args(opt.cursor, 0);
+    let mut shots = Vec::new();
+    for d in displays {
+        let mut run = targets::display_args(*d);
+        run.extend(extra.iter().cloned());
+        let Some((img, _)) = shoot(&run, |_| ())? else { return Err("A display gave no picture.".into()) };
+        let shot = frozen::Shot { frame: *d, img };
+        if !shot.looks_right() {
+            return Err("A display picture has an unexpected size.".into());
+        }
+        shots.push(shot);
+    }
+    Ok(shots)
 }
 
 pub fn capture(mode: CaptureMode, opt: &CaptureOptions) -> Result<Option<Captured>, String> {
