@@ -1580,7 +1580,7 @@ impl App {
         let in_drag = ui.data(|m| m.get_temp::<bool>(id)).unwrap_or(false);
         let changed = bd != before;
         if changed {
-            if !using || !in_drag {
+            if !in_drag {
                 d.checkpoint();
             } else {
                 d.touch();

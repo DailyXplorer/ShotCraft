@@ -1810,7 +1810,7 @@ mod tests {
         let img = flat(30, 20, [9, 9, 9, 255]);
         for r in [R { x0: -5.0, y0: 0.0, x1: 35.0, y1: 20.0 }, R { x0: 0.0, y0: -5.0, x1: 30.0, y1: 25.0 }] {
             let out = cut_out(&img, &r);
-            assert!(out.w >= 1 && out.h >= 1);
+            assert_eq!((out.w, out.h, out.px.len()), (img.w, img.h, img.px.len()));
         }
     }
 
