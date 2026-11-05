@@ -2743,6 +2743,7 @@ impl App {
                         ("C (with a selection)", "Copy the average colour"),
                         ("Del", "Delete object or erase the selection"),
                         ("Esc", "Deselect, or copy and close"),
+                        ("Esc (scrolling capture)", "Finish it and keep what was captured, from any app"),
                         ("⌘C  ⌘⇧C  ⌘S  ⌘⇧S  ⌘P", "Copy, Copy Image, Save, Save As, Pin to Screen"),
                         ("⌘V", "Paste the clipboard image over the screenshot"),
                         ("⌘⇧P", "Print"),
