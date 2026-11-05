@@ -233,6 +233,81 @@ pub fn editor_window(content: Size, chrome: f32, margin: f32, min_width: f32, mi
     (width, height)
 }
 
+/// Editor chrome, in points. The toolbar sits in the title bar (traffic lights on its left), the
+/// options bar under it holds the active tool's settings, the status bar is the bottom strip.
+pub const TOOLBAR_H: f32 = 38.0;
+pub const OPTIONS_H: f32 = 48.0;
+pub const STATUS_H: f32 = 34.0;
+/// The editor window never gets smaller than this.
+pub const EDITOR_MIN_SIZE: Size = (480.0, 270.0);
+pub const TRAFFIC_LIGHTS_W: f32 = 78.0;
+pub const TOOLBAR_SEG_W: f32 = 30.0;
+pub const TOOLBAR_GROUP_GAP: f32 = 10.0;
+pub const TOOLBAR_EDGE: f32 = 12.0;
+/// Segments in the toolbar groups: Copy/Save/Pin, the drawing tools, the selection actions, Preferences.
+pub const TOOLBAR_COPY_ITEMS: usize = 3;
+pub const TOOLBAR_TOOL_ITEMS: usize = crate::model::Tool::TOOLBAR.len();
+pub const TOOLBAR_ACTION_ITEMS: usize = 7;
+
+/// Width of a segmented control of `items` segments (a 2 pt frame on each side).
+pub fn seg_group_w(items: usize) -> f32 {
+    TOOLBAR_SEG_W * items as f32 + 4.0
+}
+
+/// What the toolbar shows in a window of a given width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolbarFit {
+    /// How many of the tool and action segments (tools first, then the selection actions) are laid
+    /// out; the others go in the overflow menu.
+    pub visible: usize,
+}
+
+impl ToolbarFit {
+    pub const ALL: usize = TOOLBAR_TOOL_ITEMS + TOOLBAR_ACTION_ITEMS;
+
+    pub fn overflows(self) -> bool {
+        self.visible < Self::ALL
+    }
+
+    pub fn tools(self) -> usize {
+        self.visible.min(TOOLBAR_TOOL_ITEMS)
+    }
+
+    pub fn actions(self) -> usize {
+        self.visible.saturating_sub(TOOLBAR_TOOL_ITEMS)
+    }
+
+    /// Width taken by the segments laid out, with the overflow button when needed.
+    pub fn width(self) -> f32 {
+        let mut w = seg_group_w(TOOLBAR_COPY_ITEMS) + seg_group_w(1) + TOOLBAR_GROUP_GAP;
+        for n in [self.tools(), self.actions()] {
+            if n > 0 {
+                w += seg_group_w(n) + TOOLBAR_GROUP_GAP;
+            }
+        }
+        if self.overflows() {
+            w += seg_group_w(1) + TOOLBAR_GROUP_GAP;
+        }
+        w
+    }
+}
+
+/// Most segments that fit in a toolbar of `window_width`: Copy/Save/Pin and Preferences stay, the
+/// selection actions then the last tools move into the overflow menu as the window narrows.
+pub fn toolbar_fit(window_width: f32) -> ToolbarFit {
+    let room = window_width - TRAFFIC_LIGHTS_W - TOOLBAR_EDGE;
+    (0..=ToolbarFit::ALL)
+        .rev()
+        .map(|visible| ToolbarFit { visible })
+        .find(|f| f.width() <= room)
+        .unwrap_or(ToolbarFit { visible: 0 })
+}
+
+/// Narrowest window that shows every tool (and the selection actions) in the toolbar.
+pub fn full_toolbar_width() -> f32 {
+    ToolbarFit { visible: ToolbarFit::ALL }.width() + TRAFFIC_LIGHTS_W + TOOLBAR_EDGE
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,5 +581,46 @@ mod tests {
         let p = pin_layout((500.0 * pct as f32 / 100.0, 400.0 * pct as f32 / 100.0), max);
         assert!(p.window.0 <= max.0 + 0.01 && p.window.1 <= max.1 + 0.01);
         assert!(pct > 100);
+    }
+
+    #[test]
+    fn editor_minimum_window_is_480_by_270() {
+        assert_eq!(EDITOR_MIN_SIZE, (480.0, 270.0));
+        assert!(TOOLBAR_H + OPTIONS_H + STATUS_H < EDITOR_MIN_SIZE.1, "the canvas keeps some room at the minimum height");
+        assert_eq!(OPTIONS_H, 48.0);
+    }
+
+    #[test]
+    fn toolbar_shows_every_tool_when_the_window_is_wide_enough() {
+        let full = full_toolbar_width();
+        assert!(toolbar_fit(full).visible == ToolbarFit::ALL && !toolbar_fit(full).overflows());
+        assert!(toolbar_fit(full + 400.0).visible == ToolbarFit::ALL);
+        assert!(toolbar_fit(full - 1.0).overflows());
+        // The default window and a typical screenshot window show everything.
+        assert!(toolbar_fit(1180.0).visible == ToolbarFit::ALL);
+        assert!(full <= 940.0, "the window a picture opens in shows every tool: {full}");
+    }
+
+    #[test]
+    fn toolbar_drops_actions_first_then_tools_from_the_end() {
+        let full = full_toolbar_width();
+        let f = toolbar_fit(full - 1.0);
+        assert!(f.overflows() && f.tools() == TOOLBAR_TOOL_ITEMS && f.actions() < TOOLBAR_ACTION_ITEMS);
+        let narrow = toolbar_fit(EDITOR_MIN_SIZE.0);
+        assert!(narrow.actions() == 0 && narrow.tools() >= 4 && narrow.tools() < TOOLBAR_TOOL_ITEMS, "{narrow:?}");
+    }
+
+    #[test]
+    fn toolbar_never_needs_more_than_the_window_and_only_shrinks_with_it() {
+        let mut last = ToolbarFit::ALL;
+        let mut w = 2000.0;
+        while w >= EDITOR_MIN_SIZE.0 {
+            let f = toolbar_fit(w);
+            assert!(f.visible <= last, "monotonic at {w}");
+            assert!(f.width() + TRAFFIC_LIGHTS_W + TOOLBAR_EDGE <= w, "fits at {w}: {f:?}");
+            last = f.visible;
+            w -= 7.0;
+        }
+        assert_eq!(toolbar_fit(0.0).visible, 0);
     }
 }
