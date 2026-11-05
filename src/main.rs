@@ -736,6 +736,7 @@ impl App {
             self.error(format!("Can't drag the image: {e}"));
         } else {
             self.drag_release = Some(pointer);
+            self.ctx.request_repaint();
         }
     }
 

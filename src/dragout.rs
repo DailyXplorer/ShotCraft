@@ -124,6 +124,11 @@ pub fn preview_png(img: &Image) -> Option<Vec<u8>> {
     crate::system::encode_png(&small).ok()
 }
 
+/// Whether a `pressedMouseButtons` bit mask has the primary button down.
+pub fn primary_button_down(mask: usize) -> bool {
+    mask & 1 != 0
+}
+
 /// What to tell egui when a native drag took over: the primary button went up where the pointer
 /// was (the drag loop swallows the real release, so egui would keep the button held), and the
 /// pointer left the window.
@@ -201,6 +206,11 @@ mod native {
             let app = NSApplication::sharedApplication(mtm);
             let event = app.currentEvent().ok_or("No mouse event to start the drag from")?;
             if !matches!(event.r#type(), NSEventType::LeftMouseDown | NSEventType::LeftMouseDragged) {
+                return Err("The mouse button was already released".to_string());
+            }
+            // The export before this call can take a while: the button may be up by now while the
+            // release is still queued and the current event is still the old drag.
+            if !super::primary_button_down(objc2_app_kit::NSEvent::pressedMouseButtons()) {
                 return Err("The mouse button was already released".to_string());
             }
             let window = event.window(mtm).ok_or("The mouse event has no window")?;
@@ -335,6 +345,12 @@ mod tests {
         let ev = release_events(Pos2::new(10.0, 20.0), Modifiers::NONE);
         assert!(matches!(ev[0], Event::PointerButton { pressed: false, button: PointerButton::Primary, pos, .. } if pos == Pos2::new(10.0, 20.0)));
         assert!(matches!(ev[1], Event::PointerGone));
+    }
+
+    #[test]
+    fn only_the_primary_button_counts_for_a_drag() {
+        assert!(primary_button_down(0b1) && primary_button_down(0b11));
+        assert!(!primary_button_down(0) && !primary_button_down(0b10));
     }
 
     #[test]

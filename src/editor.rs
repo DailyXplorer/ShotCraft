@@ -350,7 +350,6 @@ fn icon_btn(ui: &mut Ui, icon: Icon, selected: bool, tip: &str, t: &Th, w: f32) 
     }
 }
 
-/// A row of icon segments framed like a macOS segmented control; returns the clicked index.
 /// The drag-out handle: pressing it and moving starts a native drag of the edited picture as a
 /// file. True on the frame the drag begins.
 fn drag_handle(ui: &mut Ui, t: &Th, enabled: bool) -> bool {
@@ -368,6 +367,7 @@ fn drag_handle(ui: &mut Ui, t: &Th, enabled: bool) -> bool {
     enabled && resp.drag_started()
 }
 
+/// A row of icon segments framed like a macOS segmented control; returns the clicked index.
 fn segments(ui: &mut Ui, items: &[(Icon, &str, bool)], t: &Th, seg_w: f32) -> Option<usize> {
     let w = seg_w * items.len() as f32 + 4.0;
     let (rect, _) = ui.allocate_exact_size(vec2(w, 28.0), Sense::hover());
@@ -3698,6 +3698,9 @@ mod toolbar_look_tests {
         rig.render_window(size, 2.0, events, |ui| app.editor_ui(ui));
         let to = from + egui::vec2(30.0, 25.0);
         rig.render_window(size, 2.0, vec![Event::PointerMoved(to)], |ui| app.editor_ui(ui));
+        // The rig's context is shared by every test: leave no button held.
+        let up = vec![Event::PointerButton { pos: to, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE }, Event::PointerGone];
+        rig.render_window(size, 2.0, up, |ui| app.editor_ui(ui));
     }
 
     #[test]
@@ -3721,6 +3724,7 @@ mod toolbar_look_tests {
             let up = vec![Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE }];
             rig.render_window(size, 2.0, up, |ui| app.editor_ui(ui));
             assert!(app.toast.is_none());
+            rig.render_window(size, 2.0, vec![Event::PointerGone], |ui| app.editor_ui(ui));
             // Without a picture there is nothing to drag.
             let mut app = rig.app();
             pull(&mut app, rig, size, at);
@@ -3745,7 +3749,9 @@ mod toolbar_look_tests {
             let mut app = rig.app();
             app.doc = Some(Doc::new(picture(), 2.0));
             rig.render_window(size, 2.0, vec![egui::Event::PointerMoved(at)], |ui| app.editor_ui(ui));
-            rig.render_window(size, 2.0, vec![], |ui| app.editor_ui(ui))
+            let img = rig.render_window(size, 2.0, vec![], |ui| app.editor_ui(ui));
+            rig.render_window(size, 2.0, vec![egui::Event::PointerGone], |ui| app.editor_ui(ui));
+            img
         });
         crate::headless::save_png(&img, &std::path::Path::new(&dir).join("after-handle-hover.png"));
     }
