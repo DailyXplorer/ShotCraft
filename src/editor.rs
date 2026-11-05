@@ -1083,15 +1083,15 @@ impl App {
         let mut pct = (opacity * 100.0).round();
         let r = ui.add_sized([120.0, 24.0], egui::Slider::new(&mut pct, 0.0..=100.0).show_value(false)).on_hover_text("Opacity");
         ui.label(format!("{pct:.0}%"));
+        // One undo step per drag of the slider, one per click.
+        let id = ui.id().with("opacity-undo");
+        let saved = ui.data(|m| m.get_temp::<bool>(id)).unwrap_or(false);
+        ui.data_mut(|m| m.insert_temp(id, r.dragged() && (saved || r.changed())));
         if r.changed() {
             if let Some(d) = &mut self.doc {
-                // One undo step per drag of the slider, one per click.
-                let id = ui.id().with("opacity-undo");
-                let started = ui.data(|m| m.get_temp::<bool>(id)).unwrap_or(false);
-                if !r.dragged() || !started {
+                if !r.dragged() || !saved {
                     d.checkpoint();
                 }
-                ui.data_mut(|m| m.insert_temp(id, r.dragged()));
                 if let Kind::Image { opacity, .. } = &mut d.objs[i].kind {
                     *opacity = pct / 100.0;
                 }

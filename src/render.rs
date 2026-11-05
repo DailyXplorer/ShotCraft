@@ -1525,17 +1525,18 @@ pub fn apply_backdrop(content: &Pixmap, bd: &Backdrop) -> Pixmap {
 
 /// Final picture: objects, crop, then backdrop.
 pub fn export(doc: &Doc, fonts: &Fonts) -> Image {
-    export_without(doc, fonts, None)
+    export_without(doc, fonts, None, false)
 }
 
-/// `export` with one object left out.
-pub fn export_without(doc: &Doc, fonts: &Fonts, skip: Option<usize>) -> Image {
+/// `export` with one object left out, and optionally the backdrop's automatic crop off.
+pub fn export_without(doc: &Doc, fonts: &Fonts, skip: Option<usize>, keep_size: bool) -> Image {
     let pm = compose(doc, fonts, skip);
     let pm = match doc.crop {
         Some(r) => crop_pixmap(&pm, &r),
         None => pm,
     };
     let pm = match &doc.backdrop {
+        Some(bd) if keep_size && bd.autocrop => apply_backdrop(&pm, &Backdrop { autocrop: false, ..bd.clone() }),
         Some(bd) => apply_backdrop(&pm, bd),
         None => pm,
     };
@@ -1555,7 +1556,12 @@ pub fn gif_frames(doc: &Doc, fonts: &Fonts) -> Result<(Image, Image), String> {
     if r.x1.min(v.x1) - r.x0.max(v.x0) < 1.0 || r.y1.min(v.y1) - r.y0.max(v.y0) < 1.0 {
         return Err("The pasted picture must overlap the screenshot. Move it over the screenshot first.".into());
     }
-    Ok((export_without(doc, fonts, Some(i)), export(doc, fonts)))
+    let (before, after) = (export_without(doc, fonts, Some(i), false), export(doc, fonts));
+    if (before.w, before.h) == (after.w, after.h) {
+        return Ok((before, after));
+    }
+    // The backdrop's automatic crop trimmed the two differently: leave it off so the frames match.
+    Ok((export_without(doc, fonts, Some(i), true), export_without(doc, fonts, None, true)))
 }
 
 /// Delay between the two frames of the before/after GIF.
@@ -1565,6 +1571,9 @@ pub const GIF_DELAY_MS: u32 = 1000;
 /// transparency, so frames are laid on white first.
 pub fn encode_gif(frames: &[Image]) -> Result<Vec<u8>, String> {
     use image::codecs::gif::{GifEncoder, Repeat};
+    if frames.windows(2).any(|p| (p[0].w, p[0].h) != (p[1].w, p[1].h)) {
+        return Err("The GIF frames have different sizes".into());
+    }
     let mut out = Vec::new();
     {
         let mut enc = GifEncoder::new_with_speed(&mut out, 10);
@@ -2426,5 +2435,32 @@ mod tests {
             *r = R { x0: 100.0, y0: 100.0, x1: 110.0, y1: 110.0 };
         }
         assert!(gif_frames(&doc, &fonts).err().unwrap().contains("overlap"));
+    }
+
+    #[test]
+    fn the_two_gif_frames_keep_one_size_even_with_an_autocropping_backdrop() {
+        let fonts = Fonts::load();
+        // A see-through margin the picture covers in the "after" frame only.
+        let mut doc = doc_of(60, 40, [0, 0, 0, 0]);
+        let mut base = (*doc.base.px).clone();
+        for y in 10..30 {
+            for x in 10..30 {
+                base[((y * 60 + x) * 4) as usize..][..4].copy_from_slice(&[255, 255, 255, 255]);
+            }
+        }
+        doc.base = Image { w: 60, h: 40, px: Arc::new(base) };
+        let i = doc.paste_image(flat(10, 10, [255, 0, 0, 255]));
+        if let Kind::Image { r, .. } = &mut doc.objs[i].kind {
+            *r = R { x0: 20.0, y0: 20.0, x1: 50.0, y1: 40.0 };
+        }
+        let mut bd = Backdrop::default();
+        bd.autocrop = true;
+        doc.backdrop = Some(bd);
+        let (raw_a, raw_b) = (export_without(&doc, &fonts, Some(i), false), export(&doc, &fonts));
+        assert_ne!((raw_a.w, raw_a.h), (raw_b.w, raw_b.h), "the set-up must trim the frames differently");
+        let (a, b) = gif_frames(&doc, &fonts).unwrap();
+        assert_eq!((a.w, a.h), (b.w, b.h));
+        assert!(encode_gif(&[a, b]).is_ok());
+        assert!(encode_gif(&[flat(4, 4, [0, 0, 0, 255]), flat(5, 4, [0, 0, 0, 255])]).is_err());
     }
 }
