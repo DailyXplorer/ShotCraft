@@ -769,6 +769,24 @@ pub fn backdrop_too_large(w: u32, h: u32) -> bool {
 }
 
 impl Backdrop {
+    /// The settings file can be edited by hand or come from another version: values the sliders
+    /// can't produce (and that would make the render allocate absurd sizes) are brought in range.
+    pub fn sanitised(mut self) -> Backdrop {
+        let slider = |v: f32| if v.is_finite() { v.clamp(0.0, BACKDROP_SLIDER_MAX) } else { 0.0 };
+        self.padding = slider(self.padding);
+        self.shadow = slider(self.shadow);
+        self.inset = slider(self.inset);
+        self.outer_radius = slider(self.outer_radius);
+        self.inner_radius = slider(self.inner_radius);
+        self.blur = if self.blur.is_finite() { self.blur.clamp(0.0, BACKDROP_BLUR_MAX) } else { 0.0 };
+        self.ratio = self.ratio.filter(|r| r.is_finite() && (0.1..=10.0).contains(r));
+        self.gradient %= GRADIENTS.len();
+        if !self.offset.iter().all(|v| v.is_finite()) {
+            self.offset = [0.0, 0.0];
+        }
+        self
+    }
+
     /// Padding: round(v² × 0.5)
     pub fn padding_px(&self) -> f32 {
         (self.padding * self.padding * 0.5).round()
@@ -908,6 +926,28 @@ pub fn zoom_wheel_target(z: f32, zoom_in: bool) -> f32 {
 }
 
 pub const RESIZE_STEPS: [(&str, f32); 6] = [("25%", 0.25), ("33%", 1.0 / 3.0), ("50%", 0.5), ("1×", 1.0), ("2×", 2.0), ("4×", 4.0)];
+
+/// A pasted picture over this many pixels is scaled down first (an 8K screenshot is 33 M).
+pub const MAX_PASTE_PIXELS: u64 = 40_000_000;
+
+pub fn too_big_to_paste(img: &Image) -> bool {
+    img.w as u64 * img.h as u64 > MAX_PASTE_PIXELS
+}
+
+/// The factor that brings a pasted picture down to `MAX_PASTE_PIXELS`.
+pub fn paste_shrink_factor(img: &Image) -> f32 {
+    ((MAX_PASTE_PIXELS as f64 / (img.w as f64 * img.h as f64).max(1.0)).sqrt() as f32).min(1.0)
+}
+
+/// Most pixels a resized picture may have (a 4× enlargement of a 5K screenshot is ~236 M).
+pub const MAX_RESIZE_PIXELS: f64 = 300_000_000.0;
+
+/// Whether resizing a `w` × `h` picture by `factor` would make it unreasonably large (the pixel
+/// buffer alone is 4 bytes a pixel, and a failed allocation aborts the app).
+pub fn resize_too_large(w: f32, h: f32, factor: f32) -> bool {
+    let f = factor as f64;
+    w as f64 * h as f64 * f * f > MAX_RESIZE_PIXELS
+}
 
 #[derive(Clone)]
 pub struct Image {
@@ -1113,6 +1153,43 @@ impl Doc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hand_edited_backdrop_is_brought_back_in_range() {
+        let bd: Backdrop = serde_json::from_str(r#"{"padding":20000,"shadow":-3,"ratio":0.0,"gradient":99,"blur":50,"offset":[1e30,0]}"#).unwrap();
+        let ok = bd.sanitised();
+        assert_eq!((ok.padding, ok.shadow, ok.blur), (BACKDROP_SLIDER_MAX, 0.0, BACKDROP_BLUR_MAX));
+        assert_eq!(ok.ratio, None);
+        assert!(ok.gradient < GRADIENTS.len());
+        let sane = Backdrop { ratio: Some(1.5), padding: 7.0, ..Backdrop::default() };
+        assert_eq!(sane.clone().sanitised(), sane);
+        let nan = Backdrop { padding: f32::NAN, ratio: Some(f32::INFINITY), offset: [f32::NAN, 0.0], ..Backdrop::default() }.sanitised();
+        assert_eq!((nan.padding, nan.ratio, nan.offset), (0.0, None, [0.0, 0.0]));
+    }
+
+    #[test]
+    fn a_huge_pasted_picture_is_brought_down_to_the_pixel_budget() {
+        let big = Image { w: 20_000, h: 20_000, px: Arc::new(vec![]) };
+        assert!(too_big_to_paste(&big));
+        let f = paste_shrink_factor(&big);
+        let (w, h) = ((20_000.0 * f) as u64, (20_000.0 * f) as u64);
+        assert!(w * h <= MAX_PASTE_PIXELS && w * h > MAX_PASTE_PIXELS * 9 / 10, "{w}x{h}");
+        let ok = Image { w: 7680, h: 4320, px: Arc::new(vec![]) };
+        assert!(!too_big_to_paste(&ok));
+        assert_eq!(paste_shrink_factor(&ok), 1.0);
+    }
+
+    #[test]
+    fn resize_refuses_pictures_that_would_not_fit_in_memory() {
+        // Every preset is fine on a 5K screenshot and on an ordinary one.
+        for (_, f) in RESIZE_STEPS {
+            assert!(!resize_too_large(5120.0, 2880.0, f));
+            assert!(!resize_too_large(1440.0, 900.0, f));
+        }
+        // A very tall scrolling capture doubled or quadrupled is refused, shrinking it is not.
+        assert!(resize_too_large(1600.0, 60_000.0, 4.0));
+        assert!(!resize_too_large(1600.0, 60_000.0, 0.5));
+    }
 
     #[test]
     fn backdrop_config_round_trips_through_json() {

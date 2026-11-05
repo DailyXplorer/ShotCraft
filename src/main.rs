@@ -639,6 +639,8 @@ impl App {
         }
         match system::clipboard_image() {
             Ok(img) => {
+                // The picture is converted at full size on every redraw: a huge one is brought down first.
+                let img = if model::too_big_to_paste(&img) { render::resize(&img, model::paste_shrink_factor(&img)) } else { img };
                 let d = self.doc.as_mut().unwrap();
                 let i = d.paste_image(img);
                 self.select_object(i);
@@ -1395,6 +1397,9 @@ impl eframe::App for App {
         } else {
             self.editor_ui(ui);
         }
+        // The editor may have started typing or made a selection in this frame: the menu keys must
+        // know before the next key arrives, not a frame later.
+        self.sync_menu_state();
         self.pins_ui(&ctx);
         self.thumb_ui(&ctx);
         self.scroll_ui(&ctx);

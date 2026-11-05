@@ -1312,6 +1312,8 @@ pub fn compose_canvas(doc: &Doc, fonts: &Fonts, skip: Option<usize>, cv: &R) -> 
 
 pub fn crop_pixmap(pm: &Pixmap, r: &R) -> Pixmap {
     let (x0, y0, x1, y1) = region(pm, r);
+    // An empty region (a rectangle outside the picture) gives one pixel taken inside it.
+    let (x0, y0) = (x0.min(pm.width() as i32 - 1).max(0), y0.min(pm.height() as i32 - 1).max(0));
     let (w, h) = ((x1 - x0).max(1) as u32, (y1 - y0).max(1) as u32);
     let mut out = Pixmap::new(w, h).unwrap();
     let sw = pm.width() as usize;
@@ -1604,6 +1606,9 @@ pub fn export_without(doc: &Doc, fonts: &Fonts, skip: Option<usize>, keep_size: 
         None => compose_canvas(doc, fonts, skip, &canvas_rect(doc, fonts)),
     };
     let pm = match &doc.backdrop {
+        // The backdrop's shadow and blur need ~40 bytes a pixel: when the picture has grown past the
+        // size a backdrop is allowed on (Add Capture, annotations, a paste), it is left out.
+        Some(_) if backdrop_too_large(pm.width(), pm.height()) => pm,
         Some(bd) if keep_size && bd.autocrop => apply_backdrop(&pm, &Backdrop { autocrop: false, ..bd.clone() }),
         Some(bd) => apply_backdrop(&pm, bd),
         None => pm,
@@ -1682,6 +1687,11 @@ pub fn resize(img: &Image, factor: f32) -> Image {
 pub fn cut_out(img: &Image, r: &R) -> Image {
     let r = r.clamp_to(img.w as f32, img.h as f32);
     let (w, h) = (img.w as usize, img.h as usize);
+    // A band that covers the whole picture would leave nothing: leave the picture as it is.
+    let whole = if r.w() >= r.h() { r.y0.round() <= 0.0 && r.y1.round() >= h as f32 } else { r.x0.round() <= 0.0 && r.x1.round() >= w as f32 };
+    if whole || w == 0 || h == 0 {
+        return img.clone();
+    }
     if r.w() >= r.h() {
         let (y0, y1) = (r.y0.round() as usize, r.y1.round() as usize);
         let mut out = Vec::with_capacity(img.px.len());
@@ -1784,6 +1794,24 @@ mod tests {
             }
         }
         Image { w, h, px: Arc::new(px) }
+    }
+
+    #[test]
+    fn cropping_to_an_area_outside_the_picture_does_not_panic() {
+        let pm = Pixmap::new(40, 30).unwrap();
+        for r in [R { x0: 100.0, y0: 100.0, x1: 150.0, y1: 140.0 }, R { x0: -50.0, y0: -50.0, x1: -10.0, y1: -10.0 }, R { x0: 40.0, y0: 30.0, x1: 41.0, y1: 31.0 }] {
+            let out = crop_pixmap(&pm, &r);
+            assert!(out.width() >= 1 && out.height() >= 1, "{r:?}");
+        }
+    }
+
+    #[test]
+    fn cutting_out_a_band_that_covers_everything_leaves_the_picture() {
+        let img = flat(30, 20, [9, 9, 9, 255]);
+        for r in [R { x0: -5.0, y0: 0.0, x1: 35.0, y1: 20.0 }, R { x0: 0.0, y0: -5.0, x1: 30.0, y1: 25.0 }] {
+            let out = cut_out(&img, &r);
+            assert!(out.w >= 1 && out.h >= 1);
+        }
     }
 
     fn flat(w: u32, h: u32, c: [u8; 4]) -> Image {

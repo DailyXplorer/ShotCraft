@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use tiny_skia::Pixmap;
 
 pub use crate::sizing::{OPTIONS_H, STATUS_H, TOOLBAR_H};
-use crate::sizing::{seg_group_w, toolbar_fit, TOOLBAR_EDGE, TOOLBAR_GROUP_GAP as GROUP_GAP, TOOLBAR_SEG_W as SEG_W, TRAFFIC_LIGHTS_W};
+use crate::sizing::{seg_group_w, toolbar_cluster_left, toolbar_fit, TOOLBAR_EDGE, TOOLBAR_GROUP_GAP as GROUP_GAP, TOOLBAR_SEG_W as SEG_W};
 /// Narrowest width the editor window can have.
 pub const MIN_W: f32 = crate::sizing::EDITOR_MIN_SIZE.0;
 pub const MIN_H: f32 = crate::sizing::EDITOR_MIN_SIZE.1;
@@ -514,17 +514,27 @@ impl App {
         let ppp = self.ctx.pixels_per_point();
         let center = self.ed.canvas.center();
         match a {
-            Action::Undo => {
+            Action::Undo | Action::Redo => {
                 if let Some(d) = &mut self.doc {
-                    d.undo();
+                    let before = (d.base.w, d.base.h, d.crop);
+                    if matches!(a, Action::Undo) {
+                        d.undo();
+                    } else {
+                        d.redo();
+                    }
                     self.ed.selected = None;
                     self.ed.editing_text = false;
-                }
-            }
-            Action::Redo => {
-                if let Some(d) = &mut self.doc {
-                    d.redo();
-                    self.ed.selected = None;
+                    if matches!(self.ed.drag, Drag::Move { .. } | Drag::Handle { .. }) {
+                        self.ed.drag = Drag::None;
+                        self.ed.snap_guides.clear();
+                    }
+                    // A step that changed the picture's size or crop (Add Capture, Rasterize, Cut Out,
+                    // Crop) moves what the old area and crop frame refer to: drop them.
+                    if before != (d.base.w, d.base.h, d.crop) {
+                        self.ed.selection = None;
+                        self.ed.crop_draft = None;
+                        self.ed.fit = true;
+                    }
                 }
             }
             Action::ResetCrop => {
@@ -629,6 +639,14 @@ impl App {
         }
     }
 
+    /// Stops a drag of an object whose index may no longer mean the same one.
+    fn cancel_object_drag(&mut self) {
+        if matches!(self.ed.drag, Drag::Move { .. } | Drag::Handle { .. }) {
+            self.ed.drag = Drag::None;
+            self.ed.snap_guides.clear();
+        }
+    }
+
     fn delete_selected(&mut self) {
         if let (Some(d), Some(i)) = (&mut self.doc, self.ed.selected) {
             if i < d.objs.len() {
@@ -637,6 +655,7 @@ impl App {
             }
             self.ed.selected = None;
             self.ed.editing_text = false;
+            self.cancel_object_drag();
         }
     }
 
@@ -671,6 +690,10 @@ impl App {
         if let Some(d) = &mut self.doc {
             if (factor - 1.0).abs() < 1e-3 {
                 return;
+            }
+            let cv = render::canvas_rect(d, &self.fonts);
+            if resize_too_large(cv.w(), cv.h(), factor) {
+                return self.error("The picture would be too large: resize it by a smaller factor.");
             }
             render::rasterize(d, &self.fonts);
             if let Some(c) = d.crop.take() {
@@ -767,6 +790,8 @@ impl App {
             }
             return;
         }
+        // Cmd+V may arrive as a paste event and as a key in one frame: it pastes once.
+        let mut pasted = false;
         for e in &events {
             // Cmd+C reaches egui as `Event::Copy` and never as a key (egui-winit swallows the key event),
             // so this is the only place the shortcut is seen.
@@ -777,7 +802,9 @@ impl App {
             // Cmd+V reaches egui as `Event::Paste` when the clipboard holds text, as nothing when it
             // holds a picture (the Edit ▸ Paste menu item takes that one); the picture is wanted here.
             if matches!(e, egui::Event::Paste(_)) {
-                self.push(Action::Paste);
+                if !std::mem::replace(&mut pasted, true) {
+                    self.push(Action::Paste);
+                }
                 continue;
             }
             let egui::Event::Key { key, pressed: true, modifiers, repeat, .. } = e else { continue };
@@ -790,7 +817,11 @@ impl App {
                 Key::Z if cmd => self.push(Action::Undo),
                 Key::S if cmd && shift => self.push(Action::SaveAs),
                 Key::S if cmd => self.push(Action::Save),
-                Key::V if cmd && !shift && !alt => self.push(Action::Paste),
+                Key::V if cmd && !shift && !alt => {
+                    if !std::mem::replace(&mut pasted, true) {
+                        self.push(Action::Paste);
+                    }
+                }
                 Key::P if cmd && !shift && !alt => self.push(Action::Pin),
                 Key::O if cmd && !shift => self.set_tool(Tool::Ocr),
                 Key::Equals | Key::Plus if cmd => self.push(Action::ZoomIn),
@@ -1055,10 +1086,8 @@ impl App {
         ui.scope_builder(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(0.0, 5.0))), |ui| {
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = GROUP_GAP;
-                // The groups are centred between the traffic lights and the right edge.
-                let free = rect.width() - TRAFFIC_LIGHTS_W - seg_group_w(1) - GROUP_GAP - TOOLBAR_EDGE;
-                let groups_w = fit.width() - seg_group_w(1) - GROUP_GAP - GROUP_GAP;
-                ui.add_space(TRAFFIC_LIGHTS_W + ((free - groups_w) / 2.0).max(0.0));
+                // The groups are centred in the window (the Preferences button is pinned right).
+                ui.add_space(toolbar_cluster_left(rect.width(), fit));
                 if let Some(i) = segments(
                     ui,
                     &[(Icon::Copy, "Copy (Esc or ⌘C)", false), (Icon::Save, "Save (⌘S)", false), (Icon::Pin, "Pin to Screen (⌘P)", false)],
@@ -1381,7 +1410,7 @@ impl App {
 
     /// A fresh backdrop: the last configuration used (kept in the settings), with its picture reloaded.
     fn new_backdrop(&self) -> Backdrop {
-        let mut bd = self.settings.backdrop.clone().unwrap_or_default();
+        let mut bd = self.settings.backdrop.clone().unwrap_or_default().sanitised();
         bd.restore_image();
         bd.recenter();
         bd
@@ -1545,17 +1574,27 @@ impl App {
             self.ed.tool = Tool::Select;
             return;
         }
-        if bd != before {
-            if self.ed.drag == Drag::None && !ui.ctx().egui_is_using_pointer() {
+        // One undo step per drag of a slider (the first change of it), one per click.
+        let using = self.ed.drag != Drag::None || ui.ctx().egui_is_using_pointer();
+        let id = ui.id().with("backdrop-undo");
+        let in_drag = ui.data(|m| m.get_temp::<bool>(id)).unwrap_or(false);
+        let changed = bd != before;
+        if changed {
+            if !using || !in_drag {
                 d.checkpoint();
-                self.settings.backdrop = Some(bd.clone());
-                self.settings.save();
             } else {
                 d.touch();
-                self.settings.backdrop = Some(bd.clone());
+            }
+            self.settings.backdrop = Some(bd.clone());
+            if !using {
+                self.settings.save();
             }
             d.backdrop = Some(bd.clone());
+        } else if in_drag && !using {
+            // The drag ended: keep its last value.
+            self.settings.save();
         }
+        ui.data_mut(|m| m.insert_temp(id, using && (in_drag || changed)));
         if ok {
             self.settings.backdrop = Some(bd);
             self.settings.save();
@@ -1946,6 +1985,12 @@ impl App {
                 self.begin_drag(q, tol);
             }
         }
+        // The object being dragged can be gone (Delete or Undo during the drag).
+        if let Drag::Move { idx, .. } | Drag::Handle { idx, .. } = self.ed.drag {
+            if self.doc.as_ref().map_or(true, |d| idx >= d.objs.len()) {
+                self.ed.drag = Drag::None;
+            }
+        }
         if resp.dragged() {
             if let Some(cs) = cur {
                 let q = self.ed.to_img(cs);
@@ -2162,6 +2207,14 @@ impl App {
         (0..d.objs.len()).rev().find(|i| hit(&d.objs[*i], q, tol, &self.fonts))
     }
 
+    /// `top_hit` as `tool` sees it: Text and Counter place new marks on a pasted picture instead of
+    /// grabbing it, so a picture laid over the whole screenshot does not swallow every click.
+    fn top_hit_for(&self, tool: Tool, q: P, tol: f32) -> Option<usize> {
+        let d = self.doc.as_ref()?;
+        let skip_pictures = matches!(tool, Tool::Text | Tool::Counter);
+        (0..d.objs.len()).rev().find(|i| !(skip_pictures && matches!(d.objs[*i].kind, Kind::Image { .. })) && hit(&d.objs[*i], q, tol, &self.fonts))
+    }
+
     fn begin_drag(&mut self, q: P, tol: f32) {
         let tool = self.ed.tool;
         if tool == Tool::Crop {
@@ -2197,7 +2250,7 @@ impl App {
                 return;
             }
         }
-        if let Some(i) = self.top_hit(q, tol) {
+        if let Some(i) = self.top_hit_for(tool, q, tol) {
             if self.doc.as_ref().unwrap().objs[i].tool() == tool || matches!(tool, Tool::Counter | Tool::Text) {
                 self.ed.selected = Some(i);
                 self.doc.as_mut().unwrap().checkpoint();
@@ -2287,7 +2340,7 @@ impl App {
         let tool = self.ed.tool;
         let was_editing = self.ed.editing_text;
         self.finish_text();
-        let hit_i = self.top_hit(q, tol);
+        let hit_i = self.top_hit_for(tool, q, tol);
         if let Some(i) = hit_i {
             let is_text = matches!(self.doc.as_ref().unwrap().objs[i].kind, Kind::Text { .. });
             self.ed.selected = Some(i);
@@ -2648,7 +2701,7 @@ impl App {
             let mut open = true;
             egui::Window::new("About ShotCraft").open(&mut open).frame(panel_frame(ctx, t)).fade_in(false).fade_out(false).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
                 ui.heading("ShotCraft");
-                ui.label("Version 0.1");
+                ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
                 ui.label(egui::RichText::new("A screenshot tool with an annotation editor. Everything stays on this computer.").color(t.dim));
                 ui.add_space(6.0);
                 ui.label(egui::RichText::new("Font: DM Sans (SIL Open Font License). Icons: Hugeicons free set (MIT).").size(11.0).color(t.dim));
@@ -2670,6 +2723,7 @@ impl App {
                         ("Del", "Delete object or erase the selection"),
                         ("Esc", "Deselect, or copy and close"),
                         ("⌘C  ⌘⇧C  ⌘S  ⌘⇧S  ⌘P", "Copy, Copy Image, Save, Save As, Pin to Screen"),
+                        ("⌘V", "Paste the clipboard image over the screenshot"),
                         ("⌘⇧P", "Print"),
                         ("⌘W  ⌘⌥W", "Hide the editor, Close All"),
                         ("⌘⇧O  ⌘⇧V", "Open a file, open the clipboard image"),
@@ -2904,6 +2958,37 @@ mod key_tests {
     }
 
     #[test]
+    fn deleting_or_undoing_during_a_drag_does_not_leave_a_stale_drag() {
+        let mut t = Rig::new();
+        two_boxes(&mut t);
+        let from = t.at(35.0, 10.0);
+        let to = t.at(80.0, 40.0);
+        let button = |pos, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: NONE };
+        t.frame(vec![Event::PointerMoved(from)], NONE);
+        t.frame(vec![button(from, true)], NONE);
+        t.frame(vec![Event::PointerMoved(to)], NONE);
+        assert!(matches!(t.app.ed.drag, Drag::Move { .. }));
+        t.app.doc.as_mut().unwrap().objs.clear();
+        // Two frames more with the pointer still down must not index a missing object.
+        t.frame(vec![Event::PointerMoved(from)], NONE);
+        t.frame(vec![Event::PointerMoved(to)], NONE);
+        t.frame(vec![button(to, false)], NONE);
+        assert!(matches!(t.app.ed.drag, Drag::None));
+    }
+
+    #[test]
+    fn a_pasted_picture_does_not_swallow_clicks_of_the_text_and_counter_tools() {
+        let mut t = Rig::new();
+        let (w, h) = (t.app.doc.as_ref().unwrap().base.w as f32, t.app.doc.as_ref().unwrap().base.h as f32);
+        let d = t.app.doc.as_mut().unwrap();
+        d.objs.push(Obj { kind: Kind::Image { pic: Pic::new(rgba(10, 10, |_, _| [1, 2, 3, 255])), r: r(0.0, 0.0, w, h), opacity: 1.0 }, style: Style::default() });
+        let q = P { x: 50.0, y: 50.0 };
+        assert_eq!(t.app.top_hit_for(Tool::Text, q, 4.0), None);
+        assert_eq!(t.app.top_hit_for(Tool::Counter, q, 4.0), None);
+        assert_eq!(t.app.top_hit_for(Tool::Select, q, 4.0), Some(0));
+    }
+
+    #[test]
     fn shift_moves_an_annotation_without_snapping() {
         let mut t = Rig::new();
         two_boxes(&mut t);
@@ -2971,6 +3056,46 @@ mod key_tests {
         t.drag(a, b, shift());
         let m = rect_of(&t, 0);
         assert!(m.x1 < 196.0 && (m.w() - m.h()).abs() < 0.01, "shift leaves the corner under the pointer: {m:?}");
+    }
+
+    #[test]
+    fn undoing_an_add_capture_drops_the_area_selected_on_the_wider_canvas() {
+        let mut t = Rig::new();
+        t.app.doc.as_mut().unwrap().append_capture(&rgba(300, 200, |_, _| [9, 9, 9, 255]));
+        t.app.ed.selection = Some(r(450.0, 20.0, 650.0, 150.0));
+        t.app.ed.crop_draft = Some(r(450.0, 20.0, 650.0, 150.0));
+        t.key(Key::Z, cmd());
+        assert_eq!(t.app.doc.as_ref().unwrap().base.w, 400);
+        assert_eq!(t.sel(), None, "the old selection lies outside the picture now");
+        assert_eq!(t.app.ed.crop_draft, None);
+        // Redo brings the wider canvas back, and nothing is selected there either.
+        t.key(Key::Z, cmd_shift());
+        assert_eq!(t.app.doc.as_ref().unwrap().base.w, 700);
+        assert_eq!(t.sel(), None);
+    }
+
+    #[test]
+    fn undo_that_changes_no_size_keeps_the_selection() {
+        let mut t = Rig::new();
+        t.app.doc.as_mut().unwrap().checkpoint();
+        t.app.ed.selection = Some(r(50.0, 50.0, 110.0, 100.0));
+        t.key(Key::Z, cmd());
+        assert_eq!(t.sel(), Some(r(50.0, 50.0, 110.0, 100.0)));
+    }
+
+    #[test]
+    fn cmd_v_pastes_once_even_when_egui_reports_it_as_an_event_and_as_a_key() {
+        let mut t = Rig::new();
+        t.app.queue.lock().unwrap().clear();
+        let key = Event::Key { key: Key::V, physical_key: Some(Key::V), pressed: true, repeat: false, modifiers: cmd() };
+        let mut input = egui::RawInput::default();
+        input.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, vec2(SIZE.0, SIZE.1)));
+        input.time = Some(t.t + 0.05);
+        input.events = vec![Event::ModifiersChanged(cmd()), Event::Paste("text".into()), key];
+        let app = &mut t.app;
+        let _ = t.ctx.run_ui(input, |ui| app.editor_ui(ui));
+        let pastes = t.app.queue.lock().unwrap().iter().filter(|a| matches!(a, Action::Paste)).count();
+        assert_eq!(pastes, 1);
     }
 
     #[test]
@@ -3533,8 +3658,9 @@ mod toolbar_look_tests {
     fn overflow_menu_picture_for_the_eyes() {
         let Ok(dir) = std::env::var("SHOTCRAFT_SHOTS") else { return };
         let size = (480.0, 270.0);
-        // The More button is the last segment before Preferences.
-        let at = egui::pos2(size.0 - TOOLBAR_EDGE - seg_group_w(1) - GROUP_GAP - seg_group_w(1) / 2.0, 19.0);
+        // The More button ends the centred groups.
+        let fit = toolbar_fit(size.0);
+        let at = egui::pos2(toolbar_cluster_left(size.0, fit) + fit.cluster_width() - seg_group_w(1) / 2.0, 19.0);
         let img = overflow_menu_shot(size, at);
         crate::headless::save_png(&img, &std::path::Path::new(&dir).join("after-480-more-menu.png"));
     }

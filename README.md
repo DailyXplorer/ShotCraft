@@ -2,7 +2,7 @@
 
 A simple, private screenshot tool for macOS. Capture an area, a window or the full screen, then annotate, blur, measure, read text (OCR) and pin the result on screen. Everything stays on your Mac: no account, no upload, no telemetry. The only network access is the update check in release builds, which the app asks about first.
 
-ShotCraft is written in Rust. It is an early version (0.1.2).
+ShotCraft is written in Rust. It is an early version (0.2.0).
 
 ## Features
 
@@ -46,7 +46,7 @@ The preview thumbnail sits in the bottom-right corner of the screen. Hover it fo
 * Blur tool with four modes: Blur, Blur Text, Erase and Erase Text. The text modes detect text with the macOS Vision framework and cover only those areas.
 * Ruler: measure sizes in pixels or points (toggle with `P`). Hold `2` (or left/right arrows) for the horizontal span of similar pixels under the cursor, `1` (or up/down arrows) for the vertical span. The arrows measure only when nothing is selected (with a selection they move it) and the digits are ruler keys except with the Spotlight tool, where they set the darkness. You can also add rulers around a selected area.
 * Color helper: press `Tab` over a pixel to copy its color, `Shift+Tab` to copy the darkest color within 20 px, or `C` with a selection to copy its average color. Nine formats are available: HEX with or without `#`, RGB (0-255 or 0-1), UIColor (Swift), CSS `rgba()`, C# Color, Android and OKLCH.
-* Crop, Cut Out (removes a horizontal or vertical band and joins the rest), and Resize (25%, 33%, 50%, 1x, 2x, 4x, or an exact width and height). Resize cannot be undone.
+* Crop, Cut Out (removes a horizontal or vertical band and joins the rest), and Resize (25%, 33%, 50%, 1x, 2x, 4x, or an exact width and height; a result over 300 million pixels is refused). Resize cannot be undone.
 * Text recognition (OCR) on a selected area, using the macOS Vision framework. It also reads QR codes and other barcodes. The result is copied to the clipboard, optionally without line breaks.
 * Eight preset colors per tool plus a custom color picker, ten sizes, solid or dashed strokes.
 * Expandable canvas: annotations and pasted pictures can reach past the edges of the screenshot; the canvas grows to hold them when you copy, save or rasterize (the new area is transparent, white in JPEG). A crop cuts to its area instead.
@@ -137,7 +137,7 @@ ShotCraft makes no network connections of its own: the source contains no networ
 
 ## Install
 
-Download `ShotCraft-0.1.2.zip` from the [Releases page](https://github.com/DailyXplorer/ShotCraft/releases/latest), unzip it and move `ShotCraft.app` to `/Applications`. The app is universal (Apple Silicon and Intel).
+Download `ShotCraft-0.2.0.zip` from the [Releases page](https://github.com/DailyXplorer/ShotCraft/releases/latest), unzip it and move `ShotCraft.app` to `/Applications`. The app is universal (Apple Silicon and Intel).
 
 ShotCraft is signed with its own certificate, not an Apple Developer ID, and it is not notarized, so macOS refuses to open it the first time (`spctl` reports "rejected"). To open it anyway:
 
@@ -173,7 +173,7 @@ Updates come through [Sparkle](https://sparkle-project.org), which installs a ne
 
 ## Releasing
 
-Set the version in `Cargo.toml`, then push a tag such as `v0.1.0`. The Release workflow tests, signs and publishes the app. The tag must match the version.
+Set the version in `Cargo.toml`, then push a tag such as `v0.2.0`. The Release workflow tests, signs and publishes the app. The tag must match the version.
 
 ## Credits
 
