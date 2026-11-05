@@ -802,4 +802,35 @@ mod tests {
         });
         save_png(&shot, &dir.join("editor-backdrop-picture-dark.png"));
     }
+
+    /// Optional (`SHOTCRAFT_TEST_OUT`): the snap guides while an annotation is dragged.
+    #[test]
+    fn snap_guides_for_the_eyes() {
+        use crate::model::{Kind, Obj, Style, R, p};
+        let Some(dir) = out_dir() else { return };
+        let dir = dir.join("snap");
+        let boxed = |x0, y0, x1, y1, seed| Obj { kind: Kind::Rect { r: R { x0, y0, x1, y1 }, seed }, style: Style::default() };
+        let scenes: Vec<(&str, bool, bool, Vec<Obj>, f32, (f32, f32))> = vec![
+            // Edges and centres: dragged box (index 0) near the two others.
+            ("edges-and-centres", true, false, vec![boxed(40.0, 30.0, 140.0, 90.0, 1), boxed(200.0, 130.0, 330.0, 200.0, 2), boxed(60.0, 150.0, 120.0, 215.0, 3)], 1.0, (162.0, 2.0)),
+            // Equal spacing in a row of similar boxes.
+            ("equal-spacing", false, true, vec![boxed(300.0, 40.0, 360.0, 100.0, 1), boxed(30.0, 40.0, 110.0, 100.0, 2), boxed(150.0, 40.0, 230.0, 100.0, 3)], 1.0, (-26.0, 3.0)),
+        ];
+        for (name, objects, similar, objs, _z, (dx, dy)) in scenes {
+            let shot = with_rig(|rig| {
+                let mut app = rig.app();
+                let mut doc = Doc::new(shot_picture(), PPP);
+                doc.objs = objs;
+                app.doc = Some(doc);
+                app.settings.snap_objects = objects;
+                app.settings.snap_similar = similar;
+                app.ed.tool = crate::model::Tool::Select;
+                rig.render_editor(&mut app, SIZE, PPP, false);
+                let from = p(10.0, 10.0);
+                app.preview_snap_drag(0, from, p(10.0 + dx, 10.0 + dy));
+                rig.render_editor(&mut app, SIZE, PPP, false)
+            });
+            save_png(&shot, &dir.join(format!("{name}.png")));
+        }
+    }
 }

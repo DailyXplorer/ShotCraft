@@ -24,6 +24,8 @@ pub struct Shell {
     /// "Delayed Screenshot (Ns)": the wait is a setting.
     delayed_item: Option<MenuItem>,
     auto_updates_item: CheckMenuItem,
+    /// Draw ▸ Snap to Objects / Snap to Similar Objects.
+    snap_items: Vec<(String, CheckMenuItem)>,
     /// Menu bar items whose enabled state follows the editor (see `menu_model::item_enabled`), by id.
     stateful: Vec<(String, MenuItem)>,
     /// The same for the status menu (see `menu_model::tray_item_enabled`).
@@ -65,6 +67,8 @@ fn action_for(id: &str) -> Option<Action> {
         "autostart" => Action::ToggleAutostart,
         "updates" => Action::CheckForUpdates,
         "autoupdates" => Action::ToggleAutoUpdates,
+        "snap" => Action::ToggleSnap(false),
+        "snapsimilar" => Action::ToggleSnap(true),
         "quit" => Action::Quit,
         "copy" | "editcopy" => Action::Copy,
         "save" => Action::Save,
@@ -109,6 +113,8 @@ fn key_equivalent(k: menu_model::Key) -> Option<Accelerator> {
 struct Parts {
     updates_available: bool,
     autostart: bool,
+    snap: (bool, bool),
+    snap_items: Vec<(String, CheckMenuItem)>,
     stateful: Vec<(String, MenuItem)>,
     hotkey_items: Vec<(HotkeyAction, MenuItem)>,
     delayed_item: Option<MenuItem>,
@@ -136,11 +142,12 @@ impl Parts {
                 Box::new(item)
             }
             Entry::Check { id, title, enabled } => {
-                let checked = id == "autostart" && self.autostart;
+                let checked = (id == "autostart" && self.autostart) || (id == "snap" && self.snap.0) || (id == "snapsimilar" && self.snap.1);
                 let item = CheckMenuItem::with_id(id.as_str(), *title, *enabled && (id != "autoupdates" || self.updates_available), checked, None);
                 match id.as_str() {
                     "autostart" => self.autostart_item = Some(item.clone()),
                     "autoupdates" => self.auto_updates_item = Some(item.clone()),
+                    "snap" | "snapsimilar" => self.snap_items.push((id.clone(), item.clone())),
                     _ => {}
                 }
                 Box::new(item)
@@ -262,7 +269,7 @@ fn tray_icon_image() -> tray_icon::Icon {
 impl Shell {
     pub fn start(queue: Queue, ctx: eframe::egui::Context, settings: &Settings) -> Shell {
         let updater = Updater::start();
-        let mut parts = Parts { updates_available: updater.is_some(), autostart: settings.autostart, ..Parts::default() };
+        let mut parts = Parts { updates_available: updater.is_some(), autostart: settings.autostart, snap: (settings.snap_objects, settings.snap_similar), ..Parts::default() };
         let bar_items: Vec<Box<dyn IsMenuItem>> = menu_model::menu_bar().iter().map(|e| parts.build(e)).collect();
         let menubar = Menu::with_items(&bar_items.iter().map(|b| &**b).collect::<Vec<_>>()).expect("menu");
         add_menu_symbols(&menubar);
@@ -275,6 +282,7 @@ impl Shell {
         let tray_menu = Menu::with_items(&tray_items.iter().map(|b| &**b).collect::<Vec<_>>()).expect("menu");
         let tray_stateful = std::mem::take(&mut parts.stateful);
         let delayed_item = parts.delayed_item.take();
+        let snap_items = std::mem::take(&mut parts.snap_items);
         let (autostart_item, auto_updates_item, hotkey_items) = (parts.autostart_item.expect("autostart item"), parts.auto_updates_item.expect("updates item"), parts.hotkey_items);
         if let Some(updater) = &updater {
             auto_updates_item.set_checked(updater.checks_automatically());
@@ -337,7 +345,7 @@ impl Shell {
             ctx.request_repaint();
         }));
 
-        let mut shell = Shell { tray, menubar, autostart_item, auto_updates_item, delayed_item, stateful, tray_stateful, hotkey_items, state: None, updater, hotkeys: GlobalHotKeyManager::new().ok(), registered: vec![], show_hotkey_works: false, hotkey_map, escape: None, escape_id, enter: None, enter_id, keys_suspended: false };
+        let mut shell = Shell { tray, menubar, autostart_item, auto_updates_item, snap_items, delayed_item, stateful, tray_stateful, hotkey_items, state: None, updater, hotkeys: GlobalHotKeyManager::new().ok(), registered: vec![], show_hotkey_works: false, hotkey_map, escape: None, escape_id, enter: None, enter_id, keys_suspended: false };
         shell.apply_hotkeys(settings);
         shell
     }
@@ -466,6 +474,9 @@ impl Shell {
             let _ = item.set_accelerator(accel);
         }
         self.autostart_item.set_checked(settings.autostart);
+        for (id, item) in &self.snap_items {
+            item.set_checked(if id == "snap" { settings.snap_objects } else { settings.snap_similar });
+        }
         if let Some(item) = &self.delayed_item {
             item.set_text(crate::settings::delayed_label(settings.delay()));
         }
