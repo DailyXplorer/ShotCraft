@@ -766,30 +766,37 @@ pub fn bounds(obj: &Obj, fonts: &Fonts) -> R {
 }
 
 /// Box blur on premultiplied pixels in place, `passes` times (3 passes ≈ gaussian).
-/// The area an annotation really paints, which decides how far the canvas has to grow for it
-/// (see `canvas_rect`). Tighter than `bounds`, which also serves hit tests and repaints. `None`
-/// for annotations that only change pixels already there (blur, spotlight).
-pub fn ink_rect(obj: &Obj, fonts: &Fonts) -> Option<R> {
+/// The area an annotation really paints, and the geometry it is drawn around, which together
+/// decide how far the canvas has to grow for it (see `canvas_rect`). Tighter than `bounds`, which
+/// also serves hit tests and repaints. `None` for annotations that only change pixels already
+/// there (blur, spotlight).
+pub fn ink_rect(obj: &Obj, fonts: &Fonts) -> Option<(R, R)> {
     let st = &obj.style;
     let w = st.width();
     Some(match &obj.kind {
         Kind::Blur { .. } | Kind::Spotlight { .. } => return None,
-        Kind::Line { a, b } => R::from_points(*a, *b).expand(w / 2.0),
-        Kind::Rect { r, .. } | Kind::Oval { r, .. } => r.expand(if st.fill == Fill::HandDrawn { w } else { w / 2.0 }),
-        Kind::Image { r, .. } => *r,
-        _ => bounds(obj, fonts),
+        Kind::Line { a, b } => (R::from_points(*a, *b), R::from_points(*a, *b).expand(w / 2.0)),
+        Kind::Rect { r, .. } | Kind::Oval { r, .. } => (*r, r.expand(if st.fill == Fill::HandDrawn { w } else { w / 2.0 })),
+        Kind::Image { r, .. } => (*r, *r),
+        _ => {
+            let b = bounds(obj, fonts);
+            (b, b)
+        }
     })
 }
 
 /// The canvas the document exports to: the picture, grown to hold annotations (and pasted
-/// pictures) that stick out of it. A crop is an explicit choice of area, so with one the canvas is
-/// just the picture and whatever is outside it is cut.
+/// pictures) that stick out of it. An annotation whose geometry lies inside the picture adds
+/// nothing, even when its stroke is half outside, so a line ended at the edge does not widen the
+/// picture by a sliver. A crop is an explicit choice of area, so with one the canvas is just the
+/// picture and whatever is outside it is cut.
 pub fn canvas_rect(doc: &Doc, fonts: &Fonts) -> R {
     let base = R { x0: 0.0, y0: 0.0, x1: doc.base.w as f32, y1: doc.base.h as f32 };
     if doc.crop.is_some() {
         return base;
     }
-    grow_canvas(base, doc.objs.iter().filter_map(|o| ink_rect(o, fonts)))
+    let inside = |c: &R| c.x0 >= base.x0 && c.y0 >= base.y0 && c.x1 <= base.x1 && c.y1 <= base.y1;
+    grow_canvas(base, doc.objs.iter().filter_map(|o| ink_rect(o, fonts)).filter(|(core, _)| !inside(core)).map(|(_, ink)| ink))
 }
 
 pub fn box_blur(pm: &mut Pixmap, r: &R, radius: i32, passes: usize) {
@@ -2528,9 +2535,8 @@ mod tests {
         let fonts = Fonts::load();
         let mut doc = doc_of(100, 50, [255, 255, 255, 255]);
         doc.objs.push(line_obj((10.0, 25.0), (100.0, 25.0)));
-        let reach = export(&doc, &fonts);
-        // A line that ends on the edge adds nothing but its cap.
-        assert!(reach.w <= 100 + doc.objs[0].style.width().ceil() as u32 / 2, "{}", reach.w);
+        // A line that ends on the edge does not widen the picture by its cap.
+        assert_eq!(export(&doc, &fonts).w, 100);
         let w = doc.objs[0].style.width();
         doc.objs[0] = line_obj((10.0, 25.0), (130.0, 25.0));
         let out = export(&doc, &fonts);
@@ -2606,9 +2612,11 @@ mod tests {
         let mut st = Style::default();
         st.fill = Fill::Transparent;
         doc.objs.push(Obj { kind: Kind::Rect { r: R { x0: 0.0, y0: 0.0, x1: 100.0, y1: 50.0 }, seed: 1 }, style: st });
-        // A rectangle on the very edge is drawn half outside: that half gets its room.
-        let cv = canvas_rect(&doc, &fonts);
-        assert_eq!(cv.x1, (100.0 + w / 2.0).round());
+        // A rectangle on the very edge has its stroke half outside: cut, as before, no sliver.
+        assert_eq!(canvas_rect(&doc, &fonts), R { x0: 0.0, y0: 0.0, x1: 100.0, y1: 50.0 });
+        // Pushed 10 px past the edge, the whole stroke gets its room.
+        doc.objs[2].translate(10.0, 0.0);
+        assert_eq!(canvas_rect(&doc, &fonts).x1, (110.0 + w / 2.0).round());
     }
 
     #[test]
