@@ -766,6 +766,32 @@ pub fn bounds(obj: &Obj, fonts: &Fonts) -> R {
 }
 
 /// Box blur on premultiplied pixels in place, `passes` times (3 passes ≈ gaussian).
+/// The area an annotation really paints, which decides how far the canvas has to grow for it
+/// (see `canvas_rect`). Tighter than `bounds`, which also serves hit tests and repaints. `None`
+/// for annotations that only change pixels already there (blur, spotlight).
+pub fn ink_rect(obj: &Obj, fonts: &Fonts) -> Option<R> {
+    let st = &obj.style;
+    let w = st.width();
+    Some(match &obj.kind {
+        Kind::Blur { .. } | Kind::Spotlight { .. } => return None,
+        Kind::Line { a, b } => R::from_points(*a, *b).expand(w / 2.0),
+        Kind::Rect { r, .. } | Kind::Oval { r, .. } => r.expand(if st.fill == Fill::HandDrawn { w } else { w / 2.0 }),
+        Kind::Image { r, .. } => *r,
+        _ => bounds(obj, fonts),
+    })
+}
+
+/// The canvas the document exports to: the picture, grown to hold annotations (and pasted
+/// pictures) that stick out of it. A crop is an explicit choice of area, so with one the canvas is
+/// just the picture and whatever is outside it is cut.
+pub fn canvas_rect(doc: &Doc, fonts: &Fonts) -> R {
+    let base = R { x0: 0.0, y0: 0.0, x1: doc.base.w as f32, y1: doc.base.h as f32 };
+    if doc.crop.is_some() {
+        return base;
+    }
+    grow_canvas(base, doc.objs.iter().filter_map(|o| ink_rect(o, fonts)))
+}
+
 pub fn box_blur(pm: &mut Pixmap, r: &R, radius: i32, passes: usize) {
     let (w, h) = (pm.width() as i32, pm.height() as i32);
     let x0 = (r.x0.floor() as i32).clamp(0, w);
@@ -1213,32 +1239,60 @@ fn draw_text(pm: &mut Pixmap, at: P, text: &str, st: &Style, fonts: &Fonts) {
     }
 }
 
-/// Base image plus every object (optionally skipping one), no crop or backdrop.
+/// Base image plus every object (optionally skipping one), no crop or backdrop. Annotations that
+/// stick out of the picture are cut off; see `compose_canvas` for the enlarged canvas.
 pub fn compose(doc: &Doc, fonts: &Fonts, skip: Option<usize>) -> Pixmap {
     let mut pm = to_pixmap(&doc.base);
-    let holes: Vec<(R, Shape)> = doc
-        .objs
+    draw_objects(&mut pm, &doc.objs, doc.scale_factor, fonts, skip);
+    pm
+}
+
+fn draw_objects(pm: &mut Pixmap, objs: &[Obj], scale_factor: f32, fonts: &Fonts, skip: Option<usize>) {
+    let holes: Vec<(R, Shape)> = objs
         .iter()
         .enumerate()
         .filter(|(i, _)| Some(*i) != skip)
         .filter_map(|(_, o)| if let Kind::Spotlight { r } = o.kind { Some((r, o.style.shape)) } else { None })
         .collect();
     // Every spotlight shares one dark layer, as dark as the newest spotlight says.
-    let dim = doc.objs.iter().enumerate().rev().find(|(i, o)| Some(*i) != skip && matches!(o.kind, Kind::Spotlight { .. })).map_or(SPOTLIGHT_DIM, |(_, o)| o.style.dim);
+    let dim = objs.iter().enumerate().rev().find(|(i, o)| Some(*i) != skip && matches!(o.kind, Kind::Spotlight { .. })).map_or(SPOTLIGHT_DIM, |(_, o)| o.style.dim);
     let mut spot_done = false;
-    for (i, o) in doc.objs.iter().enumerate() {
+    for (i, o) in objs.iter().enumerate() {
         if Some(i) == skip {
             continue;
         }
         if let Kind::Spotlight { .. } = o.kind {
             if !spot_done {
-                draw_spotlight(&mut pm, &holes, dim);
+                draw_spotlight(pm, &holes, dim);
                 spot_done = true;
             }
             continue;
         }
-        draw_obj(&mut pm, o, fonts, doc.scale_factor);
+        draw_obj(pm, o, fonts, scale_factor);
     }
+}
+
+/// `compose` on the canvas `cv` (from `canvas_rect`, whole pixels): the picture sits at its place
+/// inside it, the rest is see-through, and nothing is cut off. Pixel (0, 0) of the result is
+/// `(cv.x0, cv.y0)` in picture coordinates.
+pub fn compose_canvas(doc: &Doc, fonts: &Fonts, skip: Option<usize>, cv: &R) -> Pixmap {
+    let (w, h) = (cv.w().round().max(1.0) as u32, cv.h().round().max(1.0) as u32);
+    if (cv.x0, cv.y0) == (0.0, 0.0) && (w, h) == (doc.base.w, doc.base.h) {
+        return compose(doc, fonts, skip);
+    }
+    let Some(mut pm) = Pixmap::new(w, h) else { return compose(doc, fonts, skip) };
+    let (ox, oy) = (-cv.x0, -cv.y0);
+    pm.draw_pixmap(ox as i32, oy as i32, to_pixmap(&doc.base).as_ref(), &PixmapPaint::default(), Transform::identity(), None);
+    let moved: Vec<Obj> = doc
+        .objs
+        .iter()
+        .map(|o| {
+            let mut o = o.clone();
+            o.translate(ox, oy);
+            o
+        })
+        .collect();
+    draw_objects(&mut pm, &moved, doc.scale_factor, fonts, skip);
     pm
 }
 
@@ -1530,10 +1584,10 @@ pub fn export(doc: &Doc, fonts: &Fonts) -> Image {
 
 /// `export` with one object left out, and optionally the backdrop's automatic crop off.
 pub fn export_without(doc: &Doc, fonts: &Fonts, skip: Option<usize>, keep_size: bool) -> Image {
-    let pm = compose(doc, fonts, skip);
+    // The canvas does not depend on `skip`: frames of one document keep one size and one place.
     let pm = match doc.crop {
-        Some(r) => crop_pixmap(&pm, &r),
-        None => pm,
+        Some(r) => crop_pixmap(&compose(doc, fonts, skip), &r),
+        None => compose_canvas(doc, fonts, skip, &canvas_rect(doc, fonts)),
     };
     let pm = match &doc.backdrop {
         Some(bd) if keep_size && bd.autocrop => apply_backdrop(&pm, &Backdrop { autocrop: false, ..bd.clone() }),
@@ -1587,7 +1641,7 @@ pub fn encode_gif(frames: &[Image]) -> Result<Vec<u8>, String> {
 
 /// Flatten every object into the base picture (used by Rasterize, Resize and Cut Out).
 pub fn rasterize(doc: &mut Doc, fonts: &Fonts) {
-    let pm = compose(doc, fonts, None);
+    let pm = compose_canvas(doc, fonts, None, &canvas_rect(doc, fonts));
     doc.base = from_pixmap(&pm);
     doc.objs.clear();
 }
@@ -2382,7 +2436,7 @@ mod tests {
     }
 
     #[test]
-    fn a_picture_hanging_over_the_edge_is_cut_at_the_edge() {
+    fn a_picture_hanging_over_the_edge_grows_the_canvas() {
         let fonts = Fonts::load();
         let mut doc = doc_of(20, 20, [255, 255, 255, 255]);
         let i = doc.paste_image(flat(10, 10, [255, 0, 0, 255]));
@@ -2390,8 +2444,10 @@ mod tests {
             *r = R { x0: 15.0, y0: 15.0, x1: 25.0, y1: 25.0 };
         }
         let out = export(&doc, &fonts);
-        assert_eq!((out.w, out.h), (20, 20));
-        assert_eq!(out.get(19, 19), [255, 0, 0, 255]);
+        assert_eq!((out.w, out.h), (25, 25));
+        assert_eq!(out.get(24, 24), [255, 0, 0, 255]);
+        assert_eq!(out.get(0, 0), [255, 255, 255, 255]);
+        assert_eq!(out.get(24, 0)[3], 0, "the new corner holds nothing: see-through");
     }
 
     #[test]
@@ -2459,5 +2515,113 @@ mod tests {
         assert_eq!((a.w, a.h), (b.w, b.h));
         assert!(encode_gif(&[a, b]).is_ok());
         assert!(encode_gif(&[flat(4, 4, [0, 0, 0, 255]), flat(5, 4, [0, 0, 0, 255])]).is_err());
+    }
+
+    fn line_obj(a: (f32, f32), b: (f32, f32)) -> Obj {
+        let mut st = Style::default();
+        st.color = [255, 0, 0, 255];
+        Obj { kind: Kind::Line { a: p(a.0, a.1), b: p(b.0, b.1) }, style: st }
+    }
+
+    #[test]
+    fn a_line_end_past_the_right_edge_widens_the_export_by_the_overhang() {
+        let fonts = Fonts::load();
+        let mut doc = doc_of(100, 50, [255, 255, 255, 255]);
+        doc.objs.push(line_obj((10.0, 25.0), (100.0, 25.0)));
+        let reach = export(&doc, &fonts);
+        // A line that ends on the edge adds nothing but its cap.
+        assert!(reach.w <= 100 + doc.objs[0].style.width().ceil() as u32 / 2, "{}", reach.w);
+        let w = doc.objs[0].style.width();
+        doc.objs[0] = line_obj((10.0, 25.0), (130.0, 25.0));
+        let out = export(&doc, &fonts);
+        assert_eq!(out.h, 50);
+        assert_eq!(out.w, (130.0 + w / 2.0).round() as u32, "30 px of overhang plus the cap");
+        // The picture keeps its place, the line runs on into the new area, which is see-through.
+        assert_eq!(out.get(5, 5), [255, 255, 255, 255]);
+        assert_eq!(out.get(120, 25)[3], 255);
+        assert_eq!(out.get(120, 5)[3], 0);
+    }
+
+    #[test]
+    fn overhang_on_the_left_and_top_shifts_the_picture_inside_the_canvas() {
+        let fonts = Fonts::load();
+        let mut doc = doc_of(100, 50, [255, 255, 255, 255]);
+        doc.objs.push(line_obj((-20.0, -10.0), (50.0, 25.0)));
+        let cv = canvas_rect(&doc, &fonts);
+        let w = doc.objs[0].style.width();
+        let (dx, dy) = ((20.0 + w / 2.0).round(), (10.0 + w / 2.0).round());
+        assert_eq!((cv.x0, cv.y0), (-dx, -dy));
+        let out = export(&doc, &fonts);
+        assert_eq!((out.w as f32, out.h as f32), (100.0 + dx, 50.0 + dy));
+        assert_eq!(out.get(dx as i32 + 90, dy as i32 + 40), [255, 255, 255, 255], "bottom right of the picture");
+        assert_eq!(out.get(out.w as i32 - 1, 0)[3], 0, "top right is canvas, not picture");
+    }
+
+    #[test]
+    fn undo_and_delete_give_the_canvas_back() {
+        let fonts = Fonts::load();
+        let mut doc = doc_of(100, 50, [255, 255, 255, 255]);
+        doc.checkpoint();
+        doc.objs.push(line_obj((10.0, 25.0), (140.0, 25.0)));
+        doc.touch();
+        assert!(export(&doc, &fonts).w > 140);
+        assert!(doc.undo());
+        assert_eq!((export(&doc, &fonts).w, export(&doc, &fonts).h), (100, 50));
+        assert!(doc.redo());
+        assert!(export(&doc, &fonts).w > 140);
+    }
+
+    #[test]
+    fn a_crop_is_an_explicit_choice_and_cuts_what_hangs_out() {
+        let fonts = Fonts::load();
+        let mut doc = doc_of(100, 50, [255, 255, 255, 255]);
+        doc.objs.push(line_obj((10.0, 25.0), (140.0, 25.0)));
+        doc.crop = Some(R { x0: 10.0, y0: 10.0, x1: 60.0, y1: 40.0 });
+        let out = export(&doc, &fonts);
+        assert_eq!((out.w, out.h), (50, 30));
+        assert_eq!(canvas_rect(&doc, &fonts), R { x0: 0.0, y0: 0.0, x1: 100.0, y1: 50.0 });
+    }
+
+    #[test]
+    fn rasterize_bakes_the_enlarged_canvas_into_the_picture() {
+        let fonts = Fonts::load();
+        let mut doc = doc_of(100, 50, [255, 255, 255, 255]);
+        doc.objs.push(line_obj((10.0, 25.0), (130.0, 25.0)));
+        let before = export(&doc, &fonts);
+        rasterize(&mut doc, &fonts);
+        assert!(doc.objs.is_empty());
+        assert_eq!((doc.base.w, doc.base.h), (before.w, before.h));
+        assert_eq!(doc.base.px, before.px);
+        assert_eq!(export(&doc, &fonts).px, before.px, "nothing grows twice");
+    }
+
+    #[test]
+    fn spotlight_and_blur_never_grow_the_canvas_and_the_ink_of_a_shape_is_its_stroke() {
+        let fonts = Fonts::load();
+        let mut doc = doc_of(100, 50, [255, 255, 255, 255]);
+        doc.objs.push(Obj { kind: Kind::Blur { r: R { x0: 50.0, y0: 10.0, x1: 200.0, y1: 90.0 }, text: None }, style: Style::default() });
+        doc.objs.push(Obj { kind: Kind::Spotlight { r: R { x0: -40.0, y0: -40.0, x1: 60.0, y1: 30.0 } }, style: Style::default() });
+        assert_eq!(canvas_rect(&doc, &fonts), R { x0: 0.0, y0: 0.0, x1: 100.0, y1: 50.0 });
+        let w = Style::default().width();
+        let mut st = Style::default();
+        st.fill = Fill::Transparent;
+        doc.objs.push(Obj { kind: Kind::Rect { r: R { x0: 0.0, y0: 0.0, x1: 100.0, y1: 50.0 }, seed: 1 }, style: st });
+        // A rectangle on the very edge is drawn half outside: that half gets its room.
+        let cv = canvas_rect(&doc, &fonts);
+        assert_eq!(cv.x1, (100.0 + w / 2.0).round());
+    }
+
+    #[test]
+    fn two_gif_frames_share_the_enlarged_canvas() {
+        let fonts = Fonts::load();
+        let mut doc = doc_of(40, 20, [255, 255, 255, 255]);
+        let i = doc.paste_image(flat(10, 10, [255, 0, 0, 255]));
+        if let Kind::Image { r, .. } = &mut doc.objs[i].kind {
+            *r = R { x0: 30.0, y0: 5.0, x1: 50.0, y1: 15.0 };
+        }
+        let (a, b) = gif_frames(&doc, &fonts).unwrap();
+        assert_eq!((a.w, a.h, b.w, b.h), (50, 20, 50, 20));
+        assert_eq!(a.get(45, 10)[3], 0);
+        assert_eq!(b.get(45, 10), [255, 0, 0, 255]);
     }
 }

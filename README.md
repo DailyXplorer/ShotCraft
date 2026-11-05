@@ -49,6 +49,7 @@ The preview thumbnail sits in the bottom-right corner of the screen. Hover it fo
 * Crop, Cut Out (removes a horizontal or vertical band and joins the rest), and Resize (25%, 33%, 50%, 1x, 2x, 4x, or an exact width and height). Resize cannot be undone.
 * Text recognition (OCR) on a selected area, using the macOS Vision framework. It also reads QR codes and other barcodes. The result is copied to the clipboard, optionally without line breaks.
 * Eight preset colors per tool plus a custom color picker, ten sizes, solid or dashed strokes.
+* Expandable canvas: annotations and pasted pictures can reach past the edges of the screenshot; the canvas grows to hold them when you copy, save or rasterize (the new area is transparent, white in JPEG). A crop cuts to its area instead.
 * Undo and redo, move selected objects with the arrow keys (Shift for 10 px steps), Reset Crop, and Rasterize (merge annotations into the image).
 * Add Capture (Draw menu) grabs another area and puts it beside the picture on a wider canvas.
 * Zoom with the menu, shortcuts or mouse wheel (the wheel direction can be reversed), and Space + drag to pan.
