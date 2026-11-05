@@ -310,9 +310,13 @@ impl PrefsState {
                 }
             });
         });
+        row(ui, "Area capture", |ui| {
+            ui.checkbox(&mut s.frozen_area, "Freeze the screen while selecting");
+            ui.label(egui::RichText::new("Draws the selection on a still picture of the screen, with guide lines. Space does not switch to a window.").color(dim).size(11.0));
+        });
         row(ui, "Mouse pointer", |ui| {
             ui.checkbox(&mut s.capture_cursor, "Include it in screenshots");
-            ui.label(egui::RichText::new("Fullscreen, Active Window, Delayed and Repeat Area. Not when you select.").color(dim).size(11.0));
+            ui.label(egui::RichText::new("Fullscreen, Active Window, Delayed, Repeat Area and frozen Area. Not with the system selector.").color(dim).size(11.0));
         });
         row(ui, "Scrolling screenshot max height", |ui| {
             ui.horizontal(|ui| {
