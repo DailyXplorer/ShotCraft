@@ -9,10 +9,10 @@ use crate::model::{Image, R};
 use crate::stitch::{frames_match, Push, Stitcher};
 pub use crate::stitch::Direction;
 use crate::{system, Action, Queue};
-use eframe::egui::{Context, ViewportId};
+use eframe::egui::Context;
 use image::RgbaImage;
 use std::process::Command;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -20,14 +20,10 @@ use std::time::{Duration, Instant};
 /// about four frames per second.
 const FRAME_INTERVAL: Duration = Duration::from_millis(100);
 /// In manual mode the capture ends by itself when the page has not moved for this long (once something
-/// was stitched), so the user does not have to reach for Done.
+/// was stitched), so the user does not have to press Esc.
 pub const IDLE_FINISH: Duration = Duration::from_secs(3);
 /// Consecutive failed grabs before the capture gives up (usually a missing Screen Recording permission).
 const MAX_FAILURES: u32 = 3;
-/// The control window, in points.
-pub const CONTROL_SIZE: [f32; 2] = [280.0, 124.0];
-/// Space kept between the captured area and the control window, in points.
-const GAP: f32 = 14.0;
 /// Areas smaller than this (points) are refused.
 const MIN_SIDE: f32 = 48.0;
 
@@ -106,15 +102,8 @@ impl Limits {
 }
 
 const RUNNING: u8 = 0;
+/// Esc (or the hotkey again): stop and keep what was stitched. There is no way to throw a capture away.
 const DONE: u8 = 1;
-const CANCEL: u8 = 2;
-
-/// Window title of the control; `app_mode::bring_to_front` finds the window by it.
-pub const CONTROL_TITLE: &str = "ShotCraft Scrolling Capture";
-
-pub fn control_id() -> ViewportId {
-    ViewportId::from_hash_of("scroll-control")
-}
 
 /// The area to grab, in whole points from the top left of the main display (what `screencapture -R` takes).
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -134,10 +123,6 @@ impl GrabRect {
         let (x, y) = (r.x0.floor() as i32, r.y0.floor() as i32);
         Some(GrabRect { x, y, w: (r.x1.ceil() as i32 - x) as u32, h: (r.y1.ceil() as i32 - y) as u32 })
     }
-
-    pub fn as_r(&self) -> R {
-        R { x0: self.x as f32, y0: self.y as f32, x1: (self.x + self.w as i32) as f32, y1: (self.y + self.h as i32) as f32 }
-    }
 }
 
 /// Who scrolls.
@@ -149,7 +134,8 @@ pub enum Mode {
     Manual,
 }
 
-/// What the control tells the user besides the numbers.
+/// What the capture is doing, and what went wrong. There is no window to show it: the notes that
+/// need the user's attention (`notice`) become one macOS notification per capture, at most.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Note {
     ScrollingForYou,
@@ -172,32 +158,21 @@ pub enum Note {
     PageDidNotMove,
     /// The page did not move and the Screen Recording permission looks off.
     CheckScreenRecording,
-    EscAgain,
 }
 
 impl Note {
-    pub fn text(self) -> &'static str {
-        match self {
-            Note::ScrollingForYou => "Scrolling for you",
-            Note::ScrollYourself => "Scroll the page",
-            Note::Capturing => "Capturing",
-            Note::AboveStart => "Above the start: not captured",
-            Note::BelowStart => "Below the start: not captured",
-            Note::ScrollSlower => "Scroll a bit slower",
-            Note::LostTrack => "Lost track: scroll by hand, slowly",
-            Note::SizeChanged => "The area changed size",
-            Note::HeightLimit => "Height limit reached",
-            Note::EndOfPage => "End of the page",
-            Note::NeedsAccessibility => "Allow Accessibility to scroll for you",
-            Note::PageDidNotMove => "The page didn't move: scroll it yourself",
-            Note::CheckScreenRecording => "Nothing changes: check Screen Recording",
-            Note::EscAgain => "Press Esc again to cancel",
-        }
-    }
-
-    /// Notes the user should act on.
-    pub fn is_warning(self) -> bool {
-        matches!(self, Note::ScrollSlower | Note::LostTrack | Note::NeedsAccessibility | Note::PageDidNotMove | Note::CheckScreenRecording | Note::SizeChanged)
+    /// The notification text for a note the user should act on; `None` for the others. Every text
+    /// that hands the scrolling over says how to end the capture.
+    pub fn notice(self) -> Option<&'static str> {
+        Some(match self {
+            Note::ScrollSlower => "Scroll a bit slower: part of the page was missed. Press Esc when you are done.",
+            Note::LostTrack => "ShotCraft lost track of the page. Scroll by hand, slowly, and press Esc when you are done.",
+            Note::SizeChanged => "The captured area changed size. Press Esc to keep what was captured.",
+            Note::NeedsAccessibility => "To scroll for you, ShotCraft needs the Accessibility permission (System Settings > Privacy & Security). For now, scroll the page by hand and press Esc when you are done.",
+            Note::PageDidNotMove => "The page didn't move. Scroll it by hand and press Esc when you are done.",
+            Note::CheckScreenRecording => "Nothing changes in the area. Check the Screen Recording permission in System Settings, then press Esc.",
+            _ => return None,
+        })
     }
 }
 
@@ -207,22 +182,6 @@ pub struct Progress {
     pub lost: u32,
     pub note: Note,
     pub mode: Mode,
-    /// When Esc was pressed once; a second press within `ESC_WINDOW` cancels.
-    esc_at: Option<Instant>,
-}
-
-/// Esc can be a key meant for the page being scrolled by hand, so a manual capture with something
-/// in it needs two presses.
-const ESC_WINDOW: Duration = Duration::from_secs(2);
-
-/// Esc: cancels at once when ShotCraft does the scrolling or nothing is captured yet, otherwise asks for a second press.
-fn press_escape(stop: &AtomicU8, progress: &Mutex<Progress>) {
-    let mut p = progress.lock().unwrap();
-    if p.mode == Mode::Auto || p.frames <= 1 || p.esc_at.is_some_and(|t| t.elapsed() < ESC_WINDOW) {
-        stop.store(CANCEL, Ordering::SeqCst);
-    } else {
-        p.esc_at = Some(Instant::now());
-    }
 }
 
 /// What a finished capture hands to the app.
@@ -239,75 +198,70 @@ pub struct Outcome {
     pub max_height: u32,
 }
 
+/// What to do with the notes of a capture: the first that needs the user becomes one message, the
+/// others are dropped. `told` is set once `send` was called.
+fn notifier<'a>(told: &'a AtomicBool, send: impl Fn(&str) + 'a) -> impl Fn(Note) + 'a {
+    move |n| {
+        if let Some(text) = n.notice() {
+            if !told.swap(true, Ordering::SeqCst) {
+                send(text);
+            }
+        }
+    }
+}
+
 pub struct Session {
-    pub control_pos: [f32; 2],
     stop: Arc<AtomicU8>,
-    progress: Arc<Mutex<Progress>>,
+    /// A notification was shown during the capture (see `Note::notice`): the app adds no second one.
+    notified: Arc<AtomicBool>,
 }
 
 impl Session {
     /// Starts the capture thread. `auto` is whether ShotCraft may scroll the page (the Accessibility
     /// permission is granted).
-    pub fn start(rect: GrabRect, control_pos: [f32; 2], auto: bool, dir: Direction, limits: Limits, queue: Queue, ctx: Context) -> Session {
+    pub fn start(rect: GrabRect, auto: bool, dir: Direction, limits: Limits, queue: Queue, ctx: Context) -> Session {
         let stop = Arc::new(AtomicU8::new(RUNNING));
         let (mode, note) = match (auto, limits.manual) {
             (true, _) => (Mode::Auto, Note::ScrollingForYou),
             (false, true) => (Mode::Manual, Note::ScrollYourself),
             (false, false) => (Mode::Manual, Note::NeedsAccessibility),
         };
-        let progress = Arc::new(Mutex::new(Progress { height: 0, frames: 0, lost: 0, note, mode, esc_at: None }));
-        let (s, p) = (stop.clone(), progress.clone());
+        let progress = Arc::new(Mutex::new(Progress { height: 0, frames: 0, lost: 0, note, mode }));
+        let (s, notified) = (stop.clone(), Arc::new(AtomicBool::new(false)));
+        let flag = notified.clone();
         std::thread::spawn(move || {
-            // A panic must not leave the control window up for ever: report it like any other error.
+            // A panic must not leave the app waiting for ever: report it like any other error.
             let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let mut page = ScreenPage { rect, scroller: autoscroll::Scroller::new(rect), started: Instant::now(), limits };
-                let repaint = || ctx.request_repaint_of(control_id());
-                run_with(&mut page, rect.w, rect.h, mode, dir, &limits, &s, &p, &repaint)
+                let notify = notifier(&flag, |text| system::notify("ShotCraft", text));
+                run_with(&mut page, rect.w, rect.h, mode, dir, &limits, &s, &progress, &notify)
             }))
             .unwrap_or_else(|_| Err("The scrolling capture stopped unexpectedly.".to_string()));
             queue.lock().unwrap().push(Action::ScrollingFinished(res));
             ctx.request_repaint();
         });
-        Session { control_pos, stop, progress }
+        Session { stop, notified }
     }
 
-    /// Ends the capture and keeps what was stitched.
+    /// Whether the capture already told the user something by notification.
+    pub fn notified(&self) -> bool {
+        self.notified.load(Ordering::SeqCst)
+    }
+
+    /// A session with no thread behind it, for the app's tests.
+    #[cfg(test)]
+    pub fn idle() -> Session {
+        Session { stop: Arc::new(AtomicU8::new(RUNNING)), notified: Arc::new(AtomicBool::new(false)) }
+    }
+
+    #[cfg(test)]
+    pub fn is_done(&self) -> bool {
+        self.stop.load(Ordering::SeqCst) == DONE
+    }
+
+    /// Ends the capture and keeps what was stitched (Esc, or the hotkey again).
     pub fn finish(&self) {
-        let _ = self.stop.compare_exchange(RUNNING, DONE, Ordering::SeqCst, Ordering::SeqCst);
-    }
-
-    /// The Esc key.
-    pub fn press_escape(&self) {
-        press_escape(&self.stop, &self.progress);
-    }
-
-    /// Draws the control window's content. `body` runs on the deferred viewport, so it only takes shared state.
-    pub fn control_body(&self) -> impl Fn(&mut eframe::egui::Ui) + Send + Sync + 'static {
-        let (stop, progress) = (self.stop.clone(), self.progress.clone());
-        move |ui| control_ui(ui, &stop, &progress)
-    }
-}
-
-fn control_ui(ui: &mut eframe::egui::Ui, stop: &AtomicU8, progress: &Mutex<Progress>) {
-    use crate::scroll_control::{draw, Click, View};
-    let view = {
-        let p = progress.lock().unwrap();
-        let asked = p.esc_at.is_some_and(|t| t.elapsed() < ESC_WINDOW);
-        View { height: p.height, frames: p.frames, note: if asked { Note::EscAgain } else { p.note }, auto: p.mode == Mode::Auto }
-    };
-    if ui.input(|i| i.key_pressed(eframe::egui::Key::Escape)) {
-        press_escape(stop, progress);
-        ui.ctx().request_repaint_after(ESC_WINDOW);
-    }
-    let click = draw(ui, &view);
-    let done = click == Click::Done || ui.input(|i| i.key_pressed(eframe::egui::Key::Enter));
-    if click == Click::Cancel {
-        stop.store(CANCEL, Ordering::SeqCst);
-    } else if done {
-        let _ = stop.compare_exchange(RUNNING, DONE, Ordering::SeqCst, Ordering::SeqCst);
-    }
-    if click != Click::None || done {
-        ui.ctx().request_repaint_of(ViewportId::ROOT);
+        self.stop.store(DONE, Ordering::SeqCst);
     }
 }
 
@@ -356,7 +310,8 @@ pub fn step_points(area_h: u32) -> i32 {
 struct Loop<'a> {
     stop: &'a AtomicU8,
     progress: &'a Mutex<Progress>,
-    repaint: &'a dyn Fn(),
+    /// Told of every note the capture shows. The app turns the first one worth a word into a notification.
+    notify: &'a dyn Fn(Note),
     limits: Limits,
 }
 
@@ -373,7 +328,7 @@ impl Loop<'_> {
         p.mode = mode;
         p.note = note;
         drop(p);
-        (self.repaint)();
+        (self.notify)(note);
     }
 }
 
@@ -415,15 +370,19 @@ fn settle(page: &mut dyn Page, lp: &Loop) -> Result<RgbaImage, String> {
 
 /// The capture loop. `area_w` is the area width in points, to know the display scale. Scrolling up
 /// (`dir`) starts at the bottom of the page: ShotCraft scrolls the other way and the page grows upwards.
-pub fn run(page: &mut dyn Page, area_w: u32, area_h: u32, mode: Mode, dir: Direction, stop: &AtomicU8, progress: &Mutex<Progress>, repaint: &dyn Fn()) -> Result<Option<Outcome>, String> {
-    run_with(page, area_w, area_h, mode, dir, &Limits::default(), stop, progress, repaint)
+pub fn run(page: &mut dyn Page, area_w: u32, area_h: u32, mode: Mode, dir: Direction, stop: &AtomicU8, progress: &Mutex<Progress>, notify: &dyn Fn(Note)) -> Result<Option<Outcome>, String> {
+    run_with(page, area_w, area_h, mode, dir, &Limits::default(), stop, progress, notify)
 }
 
 /// `run` with the limits from the settings.
-pub fn run_with(page: &mut dyn Page, area_w: u32, area_h: u32, mode: Mode, dir: Direction, limits: &Limits, stop: &AtomicU8, progress: &Mutex<Progress>, repaint: &dyn Fn()) -> Result<Option<Outcome>, String> {
-    let lp = Loop { stop, progress, repaint, limits: *limits };
+pub fn run_with(page: &mut dyn Page, area_w: u32, area_h: u32, mode: Mode, dir: Direction, limits: &Limits, stop: &AtomicU8, progress: &Mutex<Progress>, notify: &dyn Fn(Note)) -> Result<Option<Outcome>, String> {
+    let lp = Loop { stop, progress, notify, limits: *limits };
     let mut mode = mode;
     let mut lost = 0u32;
+    // Esc before anything was grabbed: nothing to keep.
+    if lp.state() != RUNNING {
+        return Ok(None);
+    }
     let first = grab_retrying(page)?;
     let max_height = limits.max_rows(first.width());
     let mut stitcher = Stitcher::with_direction(max_height, dir);
@@ -441,9 +400,6 @@ pub fn run_with(page: &mut dyn Page, area_w: u32, area_h: u32, mode: Mode, dir: 
     let mut last_move = page.now();
     loop {
         let state = lp.state();
-        if state == CANCEL {
-            return Ok(None);
-        }
         let note;
         match mode {
             Mode::Manual => {
@@ -482,7 +438,7 @@ pub fn run_with(page: &mut dyn Page, area_w: u32, area_h: u32, mode: Mode, dir: 
                 } else if page.now().saturating_sub(last_move) >= IDLE_FINISH {
                     break;
                 }
-                // Sleep in short slices so that Done and Cancel react at once.
+                // Sleep in short slices so that Esc reacts at once.
                 for _ in 0..(FRAME_INTERVAL.as_millis() / 20) {
                     if lp.state() != RUNNING {
                         break;
@@ -573,6 +529,9 @@ pub fn run_with(page: &mut dyn Page, area_w: u32, area_h: u32, mode: Mode, dir: 
         }
     }
     let (frames, capped) = (stitcher.frames_used(), stitcher.is_capped());
+    if frames == 0 {
+        return Ok(None);
+    }
     let img = stitcher.finish().map_err(|_| "No image was captured.".to_string())?;
     let (w, h) = img.dimensions();
     let scale = (w as f32 / area_w as f32).max(1.0);
@@ -612,59 +571,10 @@ pub fn select_area() -> Result<Option<R>, String> {
     rect.map(Some).ok_or_else(|| "Can't tell which area was selected.".to_string())
 }
 
-/// Where to put the control window so it never covers the captured area (it would end up in every
-/// frame, and catch the mouse wheel): below the area, centred on it; above when there is no room
-/// below; else on the right, then on the left. It stays inside the screen the area is on.
-/// `None` when no side has room. Everything is in points from the top left of the main display.
-pub fn control_position(area: &R, size: [f32; 2], screens: &[R]) -> Option<[f32; 2]> {
-    let overlap = |a: &R, b: &R| (a.x1.min(b.x1) - a.x0.max(b.x0)).max(0.0) * (a.y1.min(b.y1) - a.y0.max(b.y0)).max(0.0);
-    let screen = screens.iter().copied().max_by(|a, b| overlap(a, area).total_cmp(&overlap(b, area)))?;
-    let [w, h] = size;
-    let keep_out = area.expand(GAP - 1.0);
-    let clamp_y = |y: f32| y.clamp(screen.y0, (screen.y1 - h).max(screen.y0));
-    let clamp_x = |x: f32| x.clamp(screen.x0, (screen.x1 - w).max(screen.x0));
-    let centre_x = clamp_x((area.x0 + area.x1) / 2.0 - w / 2.0);
-    let candidates = [
-        [centre_x, area.y1 + GAP],
-        [centre_x, area.y0 - GAP - h],
-        [area.x1 + GAP, clamp_y(area.y0)],
-        [area.x0 - GAP - w, clamp_y(area.y0)],
-    ];
-    candidates.into_iter().find(|[x, y]| {
-        let win = R { x0: *x, y0: *y, x1: x + w, y1: y + h };
-        win.x0 >= screen.x0 && win.y0 >= screen.y0 && win.x1 <= screen.x1 && win.y1 <= screen.y1 && overlap(&win, &keep_out) == 0.0
-    })
-}
-
-/// Usable area (menu bar and Dock excluded) of every display, from the top left of the main display.
-#[cfg(target_os = "macos")]
-pub fn screens() -> Vec<R> {
-    use objc2::MainThreadMarker;
-    use objc2_app_kit::NSScreen;
-    let Some(mtm) = MainThreadMarker::new() else { return vec![] };
-    let all = NSScreen::screens(mtm);
-    let Some(main) = all.iter().next() else { return vec![] };
-    let top = main.frame().size.height;
-    all.iter()
-        .map(|s| {
-            let f = s.visibleFrame();
-            let (x, y_bottom) = (f.origin.x as f32, f.origin.y as f32);
-            let (w, h) = (f.size.width as f32, f.size.height as f32);
-            R { x0: x, y0: top as f32 - (y_bottom + h), x1: x + w, y1: top as f32 - y_bottom }
-        })
-        .collect()
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn screens() -> Vec<R> {
-    vec![R { x0: 0.0, y0: 0.0, x1: 1440.0, y1: 900.0 }]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use image::Rgba;
-    use std::sync::atomic::AtomicU32;
 
     fn hash(a: u32, b: u32, c: u32) -> u32 {
         let mut x = a.wrapping_mul(0x9e37_79b1) ^ b.wrapping_mul(0x85eb_ca6b) ^ c.wrapping_mul(0xc2b2_ae35);
@@ -725,7 +635,7 @@ mod tests {
         deaf: bool,
         /// Scripted positions for manual mode: the nth grab sees `script[n]` (the last one repeats).
         script: Vec<i32>,
-        /// Press Done after this many grabs.
+        /// Press Esc after this many grabs.
         done_after: Option<(u32, Arc<AtomicU8>)>,
         scrolls: Vec<i32>,
     }
@@ -790,7 +700,7 @@ mod tests {
     }
 
     fn progress(mode: Mode) -> Mutex<Progress> {
-        Mutex::new(Progress { height: 0, frames: 0, lost: 0, note: Note::ScrollingForYou, mode, esc_at: None })
+        Mutex::new(Progress { height: 0, frames: 0, lost: 0, note: Note::ScrollingForYou, mode })
     }
 
     fn capture(page: &mut FakePage, mode: Mode, stop: &AtomicU8) -> (Result<Option<Outcome>, String>, Mutex<Progress>) {
@@ -800,11 +710,7 @@ mod tests {
     fn capture_dir(page: &mut FakePage, mode: Mode, dir: Direction, stop: &AtomicU8) -> (Result<Option<Outcome>, String>, Mutex<Progress>) {
         let p = progress(mode);
         let (w, h) = (page.page.width(), page.area_h);
-        let repaints = AtomicU32::new(0);
-        let r = run(page, w, h, mode, dir, stop, &p, &|| {
-            repaints.fetch_add(1, Ordering::SeqCst);
-        });
-        assert!(repaints.load(Ordering::SeqCst) > 0, "the control is told to repaint");
+        let r = run(page, w, h, mode, dir, stop, &p, &|_| {});
         (r, p)
     }
 
@@ -925,10 +831,9 @@ mod tests {
         fake.done_after = Some((5, stop.clone()));
         let p = progress(Mode::Manual);
         let notes = Mutex::new(Vec::new());
-        let r = run(&mut fake, 300, 200, Mode::Manual, Direction::Up, &stop, &p, &|| notes.lock().unwrap().push(p.lock().unwrap().note)).unwrap().unwrap();
+        let r = run(&mut fake, 300, 200, Mode::Manual, Direction::Up, &stop, &p, &|n| notes.lock().unwrap().push(n)).unwrap().unwrap();
         assert_eq!(r.img.h, 120 + 200);
         assert!(notes.lock().unwrap().contains(&Note::BelowStart), "{:?}", notes.lock().unwrap());
-        assert_eq!(Note::BelowStart.text(), "Below the start: not captured");
     }
 
     #[test]
@@ -995,15 +900,18 @@ mod tests {
     }
 
     #[test]
-    fn cancel_throws_the_capture_away() {
+    fn esc_before_anything_was_grabbed_ends_without_a_result() {
         let mut fake = FakePage::new(inbox(300, 40, 40), 200);
-        let stop = AtomicU8::new(CANCEL);
-        let (r, _) = capture(&mut fake, Mode::Auto, &stop);
-        assert!(matches!(r, Ok(None)));
+        let stop = AtomicU8::new(DONE);
+        for mode in [Mode::Auto, Mode::Manual] {
+            let (r, _) = capture(&mut fake, mode, &stop);
+            assert!(matches!(r, Ok(None)), "{mode:?}");
+        }
+        assert_eq!(fake.grabs, 0, "nothing was even grabbed");
     }
 
     #[test]
-    fn done_keeps_what_was_captured() {
+    fn esc_keeps_what_was_captured() {
         let page = inbox(300, 40, 40);
         let mut fake = FakePage::new(page.clone(), 200);
         let stop = Arc::new(AtomicU8::new(RUNNING));
@@ -1052,32 +960,87 @@ mod tests {
         let stop = Arc::new(AtomicU8::new(RUNNING));
         fake.done_after = Some((7, stop.clone()));
         let p = progress(Mode::Manual);
-        let r = run(&mut fake, 300, 200, Mode::Manual, Direction::Down, &stop, &p, &|| {}).unwrap().unwrap();
+        let r = run(&mut fake, 300, 200, Mode::Manual, Direction::Down, &stop, &p, &|_| {}).unwrap().unwrap();
         assert!(r.lost > 0);
         assert_eq!(p.lock().unwrap().note, Note::ScrollSlower);
         assert_eq!(r.img.h, 120 + 200);
     }
 
     #[test]
-    fn escape_cancels_at_once_when_the_app_scrolls_and_asks_twice_when_the_user_does() {
-        let stop = AtomicU8::new(RUNNING);
-        let auto = progress(Mode::Auto);
-        press_escape(&stop, &auto);
-        assert_eq!(stop.load(Ordering::SeqCst), CANCEL);
+    fn esc_in_manual_mode_keeps_the_frames_captured_so_far() {
+        let page = inbox(300, 40, 40);
+        let mut fake = FakePage::new(page.clone(), 200);
+        fake.script = (0..30).map(|i| i * 40).collect();
+        let stop = Arc::new(AtomicU8::new(RUNNING));
+        fake.done_after = Some((8, stop.clone()));
+        let (r, _) = capture(&mut fake, Mode::Manual, &stop);
+        let o = r.unwrap().unwrap();
+        assert!(o.frames >= 4 && o.img.h > 200, "{} frames", o.frames);
+        assert_eq!(o.img.px.as_slice(), &page.as_raw()[..(o.img.w * o.img.h * 4) as usize]);
+    }
 
-        let stop = AtomicU8::new(RUNNING);
-        let manual = progress(Mode::Manual);
-        manual.lock().unwrap().frames = 5;
-        press_escape(&stop, &manual);
-        assert_eq!(stop.load(Ordering::SeqCst), RUNNING, "first press only asks");
-        press_escape(&stop, &manual);
-        assert_eq!(stop.load(Ordering::SeqCst), CANCEL);
+    #[test]
+    fn esc_in_a_scrolling_up_capture_keeps_the_bottom_of_the_page() {
+        let page = inbox(300, 90, 40);
+        let mut fake = FakePage::new(page.clone(), 200).at_bottom();
+        let stop = Arc::new(AtomicU8::new(RUNNING));
+        fake.done_after = Some((10, stop.clone()));
+        let (r, _) = capture_dir(&mut fake, Mode::Auto, Direction::Up, &stop);
+        let o = r.unwrap().unwrap();
+        assert!(o.frames >= 2 && o.img.h > 200 && o.img.h < page.height());
+        let from = (page.height() - o.img.h) as usize * 300 * 4;
+        assert_eq!(o.img.px.as_slice(), &page.as_raw()[from..]);
+    }
 
+    #[test]
+    fn only_the_notes_that_need_the_user_become_a_notification() {
+        use Note::*;
+        for n in [ScrollSlower, LostTrack, SizeChanged, NeedsAccessibility, PageDidNotMove, CheckScreenRecording] {
+            let text = n.notice().unwrap_or_else(|| panic!("{n:?}"));
+            assert!(text.contains("Esc"), "{n:?} says how to end the capture: {text}");
+        }
+        for n in [ScrollingForYou, ScrollYourself, Capturing, AboveStart, BelowStart, HeightLimit, EndOfPage] {
+            assert!(n.notice().is_none(), "{n:?}");
+        }
+    }
+
+    #[test]
+    fn a_capture_tells_the_user_once_even_when_several_things_go_wrong() {
+        let page = inbox(300, 60, 40);
+        let mut fake = FakePage::new(page, 200);
+        // Too fast twice: two frames the stitcher cannot place.
+        fake.script = vec![0, 0, 60, 1500, 1500, 0, 1500, 1500];
+        let stop = Arc::new(AtomicU8::new(RUNNING));
+        fake.done_after = Some((9, stop.clone()));
+        let p = progress(Mode::Manual);
+        let (told, sent) = (AtomicBool::new(false), Mutex::new(Vec::new()));
+        run(&mut fake, 300, 200, Mode::Manual, Direction::Down, &stop, &p, &notifier(&told, |t| sent.lock().unwrap().push(t.to_string()))).unwrap();
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert!(told.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_quiet_capture_sends_nothing() {
+        let page = inbox(300, 40, 40);
+        let mut fake = FakePage::new(page, 200);
         let stop = AtomicU8::new(RUNNING);
-        let empty = progress(Mode::Manual);
-        empty.lock().unwrap().frames = 1;
-        press_escape(&stop, &empty);
-        assert_eq!(stop.load(Ordering::SeqCst), CANCEL, "nothing to lose");
+        let p = progress(Mode::Auto);
+        let (told, sent) = (AtomicBool::new(false), Mutex::new(Vec::new()));
+        run(&mut fake, 300, 200, Mode::Auto, Direction::Down, &stop, &p, &notifier(&told, |t| sent.lock().unwrap().push(t.to_string()))).unwrap();
+        assert!(sent.lock().unwrap().is_empty());
+        assert!(!told.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_missing_accessibility_permission_is_told_once_at_the_start() {
+        let mut fake = FakePage::new(inbox(300, 40, 40), 200);
+        let stop = Arc::new(AtomicU8::new(RUNNING));
+        fake.done_after = Some((5, stop.clone()));
+        let p = Mutex::new(Progress { height: 0, frames: 0, lost: 0, note: Note::NeedsAccessibility, mode: Mode::Manual });
+        let told = Mutex::new(Vec::new());
+        run(&mut fake, 300, 200, Mode::Manual, Direction::Down, &stop, &p, &|n| told.lock().unwrap().push(n)).unwrap();
+        assert_eq!(told.lock().unwrap().first(), Some(&Note::NeedsAccessibility));
     }
 
     #[test]
@@ -1095,7 +1058,7 @@ mod tests {
     fn capture_with(page: &mut FakePage, mode: Mode, limits: &Limits, stop: &AtomicU8) -> Outcome {
         let p = progress(mode);
         let (w, h) = (page.page.width(), page.area_h);
-        run_with(page, w, h, mode, Direction::Down, limits, stop, &p, &|| {}).unwrap().unwrap()
+        run_with(page, w, h, mode, Direction::Down, limits, stop, &p, &|_| {}).unwrap().unwrap()
     }
 
     #[test]
@@ -1176,82 +1139,8 @@ mod tests {
         }
     }
 
-    // Control placement.
-
-    const SCREEN: R = R { x0: 0.0, y0: 24.0, x1: 1512.0, y1: 944.0 };
-
     fn area(x0: f32, y0: f32, x1: f32, y1: f32) -> R {
         R { x0, y0, x1, y1 }
-    }
-
-    fn placed(a: &R, screens: &[R]) -> Option<R> {
-        control_position(a, CONTROL_SIZE, screens).map(|[x, y]| R { x0: x, y0: y, x1: x + CONTROL_SIZE[0], y1: y + CONTROL_SIZE[1] })
-    }
-
-    fn overlaps(a: &R, b: &R) -> bool {
-        a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1
-    }
-
-    #[test]
-    fn the_control_goes_below_the_area_centred_on_it() {
-        let a = area(200.0, 100.0, 800.0, 500.0);
-        let c = placed(&a, &[SCREEN]).unwrap();
-        assert_eq!(c.y0, a.y1 + GAP);
-        assert!((((c.x0 + c.x1) / 2.0) - 500.0).abs() < 0.01);
-        assert!(!overlaps(&c, &a));
-    }
-
-    #[test]
-    fn the_control_goes_above_when_there_is_no_room_below() {
-        let a = area(200.0, 300.0, 800.0, 930.0);
-        let c = placed(&a, &[SCREEN]).unwrap();
-        assert_eq!(c.y1, a.y0 - GAP);
-        assert!(!overlaps(&c, &a));
-    }
-
-    #[test]
-    fn the_control_goes_beside_a_full_height_area() {
-        let a = area(300.0, 24.0, 900.0, 944.0);
-        let c = placed(&a, &[SCREEN]).unwrap();
-        assert!(c.x0 >= a.x1 + GAP, "{c:?}");
-        assert!(c.y0 >= SCREEN.y0 && c.y1 <= SCREEN.y1);
-        let left = area(900.0, 24.0, 1500.0, 944.0);
-        let c = placed(&left, &[SCREEN]).unwrap();
-        assert!(c.x1 <= left.x0 - GAP, "{c:?}");
-    }
-
-    #[test]
-    fn the_control_stays_inside_the_screen_when_the_area_touches_an_edge() {
-        let a = area(0.0, 100.0, 120.0, 500.0);
-        let c = placed(&a, &[SCREEN]).unwrap();
-        assert!(c.x0 >= SCREEN.x0 && c.x1 <= SCREEN.x1);
-        let a = area(1400.0, 100.0, 1512.0, 500.0);
-        let c = placed(&a, &[SCREEN]).unwrap();
-        assert!(c.x0 >= SCREEN.x0 && c.x1 <= SCREEN.x1, "{c:?}");
-    }
-
-    #[test]
-    fn no_room_means_no_placement_instead_of_covering_the_area() {
-        assert!(placed(&SCREEN, &[SCREEN]).is_none());
-        let nearly = area(10.0, 30.0, 1500.0, 940.0);
-        let c = placed(&nearly, &[SCREEN]);
-        assert!(c.is_none_or(|c| !overlaps(&c, &nearly)));
-    }
-
-    #[test]
-    fn the_control_follows_the_display_the_area_is_on() {
-        let second = R { x0: 1512.0, y0: -200.0, x1: 3432.0, y1: 880.0 };
-        let screens = [SCREEN, second];
-        let a = area(2000.0, 100.0, 2600.0, 500.0);
-        let c = placed(&a, &screens).unwrap();
-        assert!(c.x0 >= second.x0 && c.x1 <= second.x1 && c.y0 >= second.y0 && c.y1 <= second.y1, "{c:?}");
-        assert!(!overlaps(&c, &a));
-        // A display to the left has negative coordinates.
-        let left = R { x0: -1920.0, y0: 0.0, x1: 0.0, y1: 1080.0 };
-        let a = area(-1500.0, 100.0, -600.0, 1000.0);
-        let c = placed(&a, &[SCREEN, left]).unwrap();
-        assert!(c.x0 >= left.x0 && c.x1 <= left.x1 && c.y1 <= left.y1, "{c:?}");
-        assert!(!overlaps(&c, &a));
     }
 
     #[test]
