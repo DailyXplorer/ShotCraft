@@ -50,6 +50,7 @@ The preview thumbnail sits in the bottom-right corner of the screen. Hover it fo
 * Text recognition (OCR) on a selected area, using the macOS Vision framework. It also reads QR codes and other barcodes. The result is copied to the clipboard, optionally without line breaks.
 * Eight preset colors per tool plus a custom color picker, ten sizes, solid or dashed strokes.
 * Undo and redo, move selected objects with the arrow keys (Shift for 10 px steps), Reset Crop, and Rasterize (merge annotations into the image).
+* Add Capture (Draw menu) grabs another area and puts it beside the picture on a wider canvas.
 * Zoom with the menu, shortcuts or mouse wheel (the wheel direction can be reversed), and Space + drag to pan.
 
 ### Export
@@ -102,6 +103,7 @@ In the editor:
 | `Cmd++`, `Cmd+-`, `Cmd+0`, `Cmd+1` | Zoom in, zoom out, 100%, fit |
 | `Cmd+W`, `Cmd+Opt+W` | Hide the editor, Close All (the editor and every pin) |
 | `Cmd+Shift+O`, `Cmd+Shift+V` | Open a file, open the image on the clipboard |
+| `Cmd+V` | Paste the clipboard image over the screenshot as an object you can move, resize (corner handles) and make see-through; its options bar has Save GIF for a two-frame before/after GIF |
 | `Cmd+,`, `Cmd+Q` | Preferences, Quit |
 | `Del` | Delete the selected object, or erase the selected area |
 | `Esc` | Deselect, then copy and hide (copy on Esc is on by default) |
