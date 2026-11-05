@@ -778,10 +778,17 @@ pub fn ink_rect(obj: &Obj, fonts: &Fonts) -> Option<(R, R)> {
         Kind::Line { a, b } => (R::from_points(*a, *b), R::from_points(*a, *b).expand(w / 2.0)),
         Kind::Rect { r, .. } | Kind::Oval { r, .. } => (*r, r.expand(if st.fill == Fill::HandDrawn { w } else { w / 2.0 })),
         Kind::Image { r, .. } => (*r, *r),
-        _ => {
-            let b = bounds(obj, fonts);
-            (b, b)
+        Kind::Arrow { a, b, .. } | Kind::Ruler { a, b } | Kind::Highlighter { a, b } => (R::from_points(*a, *b), bounds(obj, fonts)),
+        Kind::Freehand { pts } => {
+            let mut r = R { x0: f32::MAX, y0: f32::MAX, x1: f32::MIN, y1: f32::MIN };
+            for q in pts {
+                r = r.union(&R { x0: q.x, y0: q.y, x1: q.x, y1: q.y });
+            }
+            (r, bounds(obj, fonts))
         }
+        Kind::Counter { at, .. } => (R { x0: at.x, y0: at.y, x1: at.x, y1: at.y }, bounds(obj, fonts)),
+        Kind::Text { at, text } => (text_box(*at, text, st, fonts), bounds(obj, fonts)),
+        Kind::Magnifier { r, lens } => (r.union(&magnifier_lens(r, *lens)), bounds(obj, fonts)),
     })
 }
 
@@ -2631,5 +2638,23 @@ mod tests {
         assert_eq!((a.w, a.h, b.w, b.h), (50, 20, 50, 20));
         assert_eq!(a.get(45, 10)[3], 0);
         assert_eq!(b.get(45, 10), [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn strokes_and_arrows_that_end_on_the_edge_add_no_sliver_but_those_past_it_do() {
+        let fonts = Fonts::load();
+        let base = R { x0: 0.0, y0: 0.0, x1: 100.0, y1: 50.0 };
+        for kind in [
+            Kind::Highlighter { a: p(10.0, 25.0), b: p(100.0, 25.0) },
+            Kind::Arrow { a: p(10.0, 25.0), b: p(100.0, 25.0), seed: 1 },
+            Kind::Freehand { pts: vec![p(10.0, 25.0), p(100.0, 25.0)] },
+            Kind::Counter { at: p(100.0, 25.0), n: 1 },
+        ] {
+            let mut doc = doc_of(100, 50, [255, 255, 255, 255]);
+            doc.objs.push(Obj { kind: kind.clone(), style: Style::default() });
+            assert_eq!(canvas_rect(&doc, &fonts), base, "{kind:?} on the edge");
+            doc.objs[0].translate(40.0, 0.0);
+            assert!(canvas_rect(&doc, &fonts).x1 >= 140.0, "{kind:?} past the edge");
+        }
     }
 }

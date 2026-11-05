@@ -541,6 +541,9 @@ impl App {
                     d.checkpoint();
                     render::rasterize(d, &self.fonts);
                     self.ed.selected = None;
+                    // A grown canvas moved the picture's origin: nothing in the old coordinates holds.
+                    self.ed.selection = None;
+                    self.ed.fit = true;
                 }
             }
             Action::ZoomIn | Action::ZoomOut => {
@@ -653,6 +656,9 @@ impl App {
     fn cut_out(&mut self, r: R) {
         if let Some(d) = &mut self.doc {
             d.checkpoint();
+            // Rasterizing onto a grown canvas moves the origin: the selection moves with it.
+            let cv = render::canvas_rect(d, &self.fonts);
+            let r = r.translate(-cv.x0, -cv.y0);
             render::rasterize(d, &self.fonts);
             d.base = render::cut_out(&d.base, &r);
             d.crop = None;
@@ -1384,10 +1390,8 @@ impl App {
     /// Backdrops are refused on pictures above 15 megapixels: says so and returns false.
     fn backdrop_allowed(&mut self) -> bool {
         let Some(d) = &self.doc else { return false };
-        let (w, h) = match d.crop {
-            Some(r) => (r.w() as u32, r.h() as u32),
-            None => (d.base.w, d.base.h),
-        };
+        let v = d.crop.unwrap_or_else(|| render::canvas_rect(d, &self.fonts));
+        let (w, h) = (v.w() as u32, v.h() as u32);
         if backdrop_too_large(w, h) {
             self.error("The image is too large. Crop or resize to 15 megapixel first.");
             return false;
@@ -1799,10 +1803,8 @@ impl App {
                 }
                 if resp.dragged() {
                     let delta = resp.drag_delta() / self.ed.zoom;
-                    let (cw, ch) = match d.crop {
-                        Some(r) => (r.w(), r.h()),
-                        None => (d.base.w as f32, d.base.h as f32),
-                    };
+                    let v = d.crop.unwrap_or_else(|| render::canvas_rect(d, &self.fonts));
+                    let (cw, ch) = (v.w(), v.h());
                     if let Some(bd) = &mut d.backdrop {
                         let (mx, my) = render::backdrop_max_offset(cw, ch, bd);
                         bd.offset = [(bd.offset[0] + delta.x).clamp(-mx, mx), (bd.offset[1] + delta.y).clamp(-my, my)];
@@ -2819,6 +2821,35 @@ mod key_tests {
     }
     fn r(x0: f32, y0: f32, x1: f32, y1: f32) -> R {
         R { x0, y0, x1, y1 }
+    }
+
+    #[test]
+    fn cut_out_and_rasterize_on_a_grown_canvas_keep_the_selection_where_it_was() {
+        let mut t = Rig::new();
+        let (w0, h0) = {
+            let d = t.app.doc.as_ref().unwrap();
+            (d.base.w, d.base.h)
+        };
+        let before = {
+            let d = t.app.doc.as_mut().unwrap();
+            let mut st = Style::default();
+            st.color = [230, 40, 40, 255];
+            d.objs.push(Obj { kind: Kind::Line { a: p(30.0, 20.0), b: p(-100.0, 20.0) }, style: st });
+            d.touch();
+            d.base.clone()
+        };
+        let cv = render::canvas_rect(t.app.doc.as_ref().unwrap(), &t.app.fonts);
+        assert!(cv.x0 <= -100.0, "{cv:?}");
+        // Cut out a band of the picture's own pixels (columns 40..50 in picture coordinates).
+        t.app.cut_out(r(40.0, 0.0, 50.0, h0 as f32 + 40.0));
+        let d = t.app.doc.as_ref().unwrap();
+        let grown_w = (w0 as f32 - cv.x0) as u32;
+        assert_eq!(d.base.w, grown_w - 10);
+        // Column 39 of the picture is the column left of the cut; it sits `-cv.x0` into the canvas.
+        let ox = (-cv.x0) as i32;
+        assert_eq!(d.base.get(ox + 39, 100), before.get(39, 100));
+        assert_eq!(d.base.get(ox + 40, 100), before.get(50, 100), "what was right of the cut moved in");
+        assert!(w0 > 50);
     }
 
     fn two_boxes(t: &mut Rig) {
