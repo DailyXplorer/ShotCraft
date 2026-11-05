@@ -1095,9 +1095,9 @@ impl App {
 
     /// A `shotcraft://` link asked for something. Links are off until the user allows them: the
     /// first one asks, and the answer is the "URL scheme" preference.
-    fn handle_url(&mut self, route: url_scheme::Route) {
+    fn handle_url(&mut self, route: url_scheme::Route) -> bool {
         if !self.settings.allow_links && !self.ask_allow_links() {
-            return;
+            return false;
         }
         use url_scheme::Route;
         match route {
@@ -1112,6 +1112,7 @@ impl App {
                 }
             }
         }
+        true
     }
 
     fn ask_allow_links(&mut self) -> bool {
@@ -1530,7 +1531,10 @@ impl eframe::App for App {
         // Links wait until the menu bar item exists: the first one may ask a question.
         if self.started {
             for route in url_scheme::take() {
-                self.handle_url(route);
+                // A No drops the links that came with it, so a loop elsewhere can't keep asking.
+                if !self.handle_url(route) {
+                    break;
+                }
             }
         }
         #[cfg(target_os = "macos")]
