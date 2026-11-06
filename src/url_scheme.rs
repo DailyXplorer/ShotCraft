@@ -343,6 +343,8 @@ mod tests {
     }
 
     #[test]
+    // Its file route uses a Unix path, which is not absolute on Windows.
+    #[cfg(unix)]
     fn every_route_has_its_link() {
         let table = [
             ("shotcraft://show", Route::Show),
@@ -421,6 +423,8 @@ mod tests {
     }
 
     #[test]
+    // Unix paths (/home/...): a Windows path starts with a drive, and Windows hands no links to the app yet.
+    #[cfg(unix)]
     fn a_picture_path_is_decoded_and_must_name_an_image() {
         assert_eq!(route("shotcraft://load/file?path=/home/me/My%20Shots/a%2Bb+c.PNG"), Route::LoadFile("/home/me/My Shots/a+b+c.PNG".into()));
         assert_eq!(route("shotcraft://load/file?x=1&path=%2Ftmp%2Fé.jpeg"), Route::LoadFile("/tmp/é.jpeg".into()));

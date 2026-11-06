@@ -1,9 +1,13 @@
+#[cfg(target_os = "macos")]
 use crate::frozen;
 use crate::model::{Image, R};
 use crate::settings::WindowBg;
-use crate::targets::{self, Snapshot, Target};
+use crate::targets::Snapshot;
+#[cfg(target_os = "macos")]
+use crate::targets::{self, Target};
 use crate::windowbg;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
 use std::process::Command;
 use std::sync::Arc;
 
@@ -25,6 +29,7 @@ pub struct Captured {
     pub mode: CaptureMode,
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn temp_png(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join("shotcraft");
     let _ = std::fs::create_dir_all(&dir);
@@ -43,6 +48,7 @@ pub fn load_image_file(path: &Path) -> Result<Image, String> {
 }
 
 /// Read the capture rectangle macOS stores on the file (kMDItemScreenCaptureGlobalRect).
+#[cfg(target_os = "macos")]
 pub(crate) fn capture_rect(path: &Path) -> Option<R> {
     let out = Command::new("xattr").args(["-px", "com.apple.metadata:kMDItemScreenCaptureGlobalRect"]).arg(path).output().ok()?;
     let hexs: String = String::from_utf8_lossy(&out.stdout).split_whitespace().collect();
@@ -65,6 +71,7 @@ pub struct CaptureOptions {
     pub window_bg: WindowBg,
     /// The colour of `WindowBg::Solid`, and what Wallpaper falls back to.
     pub solid_color: [u8; 3],
+    /// The editor's pixels per point.
     pub scale: f32,
     /// The mouse pointer is in the picture of captures that take no selection.
     pub cursor: bool,
@@ -74,8 +81,23 @@ pub struct CaptureOptions {
     pub snapshot: Snapshot,
 }
 
+impl CaptureOptions {
+    /// Windows and Linux: how a window capture is finished.
+    #[cfg(not(target_os = "macos"))]
+    pub fn window_look(&self) -> crate::capture::WindowLook {
+        use crate::capture::WindowLook;
+        let c = [self.solid_color[0], self.solid_color[1], self.solid_color[2], 255];
+        match self.window_bg {
+            WindowBg::Solid => WindowLook::Solid(c),
+            WindowBg::Wallpaper => WindowLook::Wallpaper(c),
+            WindowBg::Transparent | WindowBg::Trimmed => WindowLook::Plain,
+        }
+    }
+}
+
 /// Runs `screencapture` with `args` and reads the picture back. `Ok(None)` means the user cancelled.
 /// `from_file` runs while the file still exists, for what macOS stores on it.
+#[cfg(target_os = "macos")]
 fn shoot<T>(args: &[String], from_file: impl FnOnce(&Path) -> T) -> Result<Option<(Image, T)>, String> {
     let path = temp_png("capture");
     let status = Command::new("/usr/sbin/screencapture").args(args).arg(&path).status().map_err(|e| format!("Can't take a screenshot: {e}"))?;
@@ -92,6 +114,7 @@ fn shoot<T>(args: &[String], from_file: impl FnOnce(&Path) -> T) -> Result<Optio
 }
 
 /// Arguments for the modes that are not resolved to a target: the user selects, or the area is known.
+#[cfg(target_os = "macos")]
 fn selection_args(mode: CaptureMode, opt: &CaptureOptions) -> Result<Vec<String>, String> {
     let mut a = vec!["-x".to_string()];
     match mode {
@@ -110,6 +133,7 @@ fn selection_args(mode: CaptureMode, opt: &CaptureOptions) -> Result<Vec<String>
 }
 
 /// The interactive window picker.
+#[cfg(target_os = "macos")]
 fn pick_window_args(opt: &CaptureOptions) -> Vec<String> {
     let mut a = vec!["-x".to_string(), "-i".into(), "-w".into()];
     if opt.window_bg == WindowBg::Trimmed {
@@ -119,10 +143,12 @@ fn pick_window_args(opt: &CaptureOptions) -> Vec<String> {
 }
 
 /// Where a window sits on screen: x, y, width and height in global points.
+#[cfg(target_os = "macos")]
 type Frame = (f64, f64, f64, f64);
 
 /// The `screencapture` runs that take a resolved target: one per window or display. Delayed
 /// Screenshot waits in its one run; the pointer comes along when the option is on.
+#[cfg(target_os = "macos")]
 fn target_runs(target: &Target, mode: CaptureMode, opt: &CaptureOptions) -> Vec<Vec<String>> {
     let mut runs = match target {
         Target::Window(id, _) => vec![targets::window_args(*id, opt.window_bg == WindowBg::Trimmed)],
@@ -142,6 +168,7 @@ fn target_runs(target: &Target, mode: CaptureMode, opt: &CaptureOptions) -> Vec<
 
 /// Non-interactive capture of a resolved target, with the picture's pixels per point and, for a
 /// window, where it was on screen when that is known and needed.
+#[cfg(target_os = "macos")]
 fn capture_target(target: Target, mode: CaptureMode, opt: &CaptureOptions) -> Result<Option<(Image, f32, Option<Frame>)>, String> {
     let scale = opt.scale;
     let runs = target_runs(&target, mode, opt);
@@ -172,6 +199,7 @@ fn capture_target(target: Target, mode: CaptureMode, opt: &CaptureOptions) -> Re
     })
 }
 
+#[cfg(target_os = "macos")]
 fn frame_of(r: R) -> Frame {
     (r.x0 as f64, r.y0 as f64, r.w() as f64, r.h() as f64)
 }
@@ -179,6 +207,7 @@ fn frame_of(r: R) -> Frame {
 /// A picture of every display, taken before the selection overlay opens, so that the overlay
 /// shows the screen as it was and never itself. Display order is the snapshot's. Any failure
 /// (a display that gives no picture, an odd size) is an `Err`: the caller falls back to the system selector.
+#[cfg(target_os = "macos")]
 pub fn grab_displays(opt: &CaptureOptions) -> Result<Vec<frozen::Shot>, String> {
     let displays = &opt.snapshot.displays;
     if displays.is_empty() || displays.len() > frozen::MAX_DISPLAYS {
@@ -199,6 +228,8 @@ pub fn grab_displays(opt: &CaptureOptions) -> Result<Vec<frozen::Shot>, String> 
     Ok(shots)
 }
 
+/// macOS: `screencapture` does every mode, its crosshair included. Windows and Linux: `capture::start`.
+#[cfg(target_os = "macos")]
 pub fn capture(mode: CaptureMode, opt: &CaptureOptions) -> Result<Option<Captured>, String> {
     let is_window = matches!(mode, CaptureMode::Window | CaptureMode::ActiveWindow);
     let (img, scale, area, frame) = match targets::resolve(mode, &opt.snapshot) {
@@ -230,7 +261,26 @@ pub fn capture(mode: CaptureMode, opt: &CaptureOptions) -> Result<Option<Capture
     Ok(Some(Captured { img, scale, area, mode }))
 }
 
+/// Puts a see-through picture on `bg` (the Windows and Linux crosshair's Solid Color window background).
+#[cfg(not(target_os = "macos"))]
+pub fn flatten_on(img: &Image, bg: [u8; 4]) -> Image {
+    let mut out = Vec::with_capacity(img.px.len());
+    for s in img.px.chunks_exact(4) {
+        let a = s[3] as u32;
+        for c in 0..3 {
+            out.push(((s[c] as u32 * a + bg[c] as u32 * (255 - a)) / 255) as u8);
+        }
+        out.push(255);
+    }
+    Image {
+        w: img.w,
+        h: img.h,
+        px: Arc::new(out),
+    }
+}
+
 /// The final look of a window capture for the chosen background.
+#[cfg(target_os = "macos")]
 fn apply_window_bg(img: Image, scale: f32, frame: Option<Frame>, opt: &CaptureOptions) -> Image {
     match opt.window_bg {
         WindowBg::Transparent | WindowBg::Trimmed => windowbg::trim_transparent(&img),
@@ -246,6 +296,7 @@ fn apply_window_bg(img: Image, scale: f32, frame: Option<Frame>, opt: &CaptureOp
 }
 
 /// The wallpaper of the window's display, cut to the canvas of `img`.
+#[cfg(target_os = "macos")]
 fn wallpaper_backdrop(img: &Image, scale: f32, frame: Option<Frame>, opt: &CaptureOptions) -> Result<Image, String> {
     let snap = &opt.snapshot;
     let center = frame.map(|f| (f.0 + f.2 / 2.0, f.1 + f.3 / 2.0)).or(snap.mouse);
@@ -260,6 +311,7 @@ fn wallpaper_backdrop(img: &Image, scale: f32, frame: Option<Frame>, opt: &Captu
 
 /// Reads a desktop picture. Formats the `image` crate lacks (HEIC, the usual one on macOS) go
 /// through `sips`, which ships with macOS.
+#[cfg(target_os = "macos")]
 fn load_wallpaper(path: &Path) -> Result<Image, String> {
     if path.is_dir() {
         return Err("the desktop shows a folder of pictures".into());
@@ -302,8 +354,8 @@ pub fn snapshot(mode: CaptureMode) -> Snapshot {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn snapshot(_mode: CaptureMode) -> Snapshot {
-    Snapshot { own_pid: std::process::id() as i32, ..Snapshot::default() }
+pub fn snapshot(mode: CaptureMode) -> Snapshot {
+    crate::capture::snapshot(mode)
 }
 
 /// On-screen windows, front to back.
@@ -365,6 +417,7 @@ pub fn clipboard_image() -> Result<Image, String> {
     Ok(Image { w: data.width as u32, h: data.height as u32, px: Arc::new(data.bytes.into_owned()) })
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn encode_png(img: &Image) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
     let rgba = image::RgbaImage::from_raw(img.w, img.h, img.px.to_vec()).ok_or("bad image")?;
@@ -405,12 +458,29 @@ pub fn save_image(img: &Image, path: &Path) -> Result<(), String> {
 }
 
 /// The local date and time, for the names of saved files.
+#[cfg(target_os = "macos")]
 pub fn now_stamp() -> crate::settings::Stamp {
     let out = Command::new("date").arg("+%Y %m %d %H %M %S").output().ok();
     let text = out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
     parse_stamp(&text).unwrap_or(crate::settings::Stamp { year: 1970, month: 1, day: 1, hour: 0, minute: 0, second: 0 })
 }
 
+/// The local date and time, for the names of saved files (Windows and Linux: from the clock, with chrono).
+#[cfg(not(target_os = "macos"))]
+pub fn now_stamp() -> crate::settings::Stamp {
+    use chrono::{Datelike, Timelike};
+    let t = chrono::Local::now();
+    crate::settings::Stamp {
+        year: t.year(),
+        month: t.month(),
+        day: t.day(),
+        hour: t.hour(),
+        minute: t.minute(),
+        second: t.second(),
+    }
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn parse_stamp(text: &str) -> Option<crate::settings::Stamp> {
     let n: Vec<i32> = text.split_whitespace().map(|p| p.parse().ok()).collect::<Option<_>>()?;
     let [year, month, day, hour, minute, second] = n[..] else { return None };
@@ -427,10 +497,25 @@ pub fn unique_path(dir: &std::path::Path, stem: &str, ext: &str) -> PathBuf {
     (2u32..).map(|n| dir.join(format!("{stem}-{n}.{ext}"))).find(|p| !p.exists()).unwrap_or(first)
 }
 
+#[cfg(target_os = "macos")]
 pub fn notify(title: &str, body: &str) {
     let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
     let script = format!("display notification \"{}\" with title \"{}\"", esc(body), esc(title));
     let _ = Command::new("osascript").args(["-e", &script]).spawn();
+}
+
+/// A Windows toast or a Linux desktop notification. Sent from a thread: the D-Bus round trip on
+/// Linux shouldn't hold up the UI.
+#[cfg(not(target_os = "macos"))]
+pub fn notify(title: &str, body: &str) {
+    let (title, body) = (title.to_string(), body.to_string());
+    std::thread::spawn(move || {
+        let _ = notify_rust::Notification::new()
+            .appname("ShotCraft")
+            .summary(&title)
+            .body(&body)
+            .show();
+    });
 }
 
 /// Sizes the editor for the screen under the mouse and centres it there. `size` gets that screen's
@@ -458,19 +543,62 @@ pub fn center_main_window(_ctx: &eframe::egui::Context, size: impl Fn(f32, f32) 
     }
 }
 
+/// Sizes the editor for its screen and centres it there. The screen size includes the taskbar or
+/// panel and the window's own title bar, so `CHROME` is kept free for them.
 #[cfg(not(target_os = "macos"))]
 pub fn center_main_window(ctx: &eframe::egui::Context, size: impl Fn(f32, f32) -> (f32, f32)) {
-    let monitor = ctx.input(|i| i.viewport().monitor_size).unwrap_or(eframe::egui::vec2(1440.0, 900.0));
-    let (w, h) = size(monitor.x, monitor.y);
-    ctx.send_viewport_cmd(eframe::egui::ViewportCommand::InnerSize(eframe::egui::vec2(w, h)));
+    use eframe::egui::{pos2, vec2, ViewportCommand};
+    const CHROME: f32 = 90.0;
+    let (monitor, outer) = ctx.input(|i| (i.viewport().monitor_size, i.viewport().outer_rect));
+    let monitor = monitor.unwrap_or(vec2(1440.0, 900.0));
+    let (w, h) = size(monitor.x, (monitor.y - CHROME).max(300.0));
+    ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(w, h)));
+    let ppp = ctx.pixels_per_point().max(0.5);
+    let centre = outer.map_or(pos2(1.0, 1.0), |r| r.center());
+    // A window parked out of sight (the editor before its first show) goes to the main screen.
+    let screen = crate::capture::screen_at(centre.x * ppp, centre.y * ppp)
+        .or_else(|| crate::capture::screen_at(1.0, 1.0));
+    if let Some((x, y, sw, sh)) = screen {
+        let (ox, oy, sw, sh) = (
+            x as f32 / ppp,
+            y as f32 / ppp,
+            sw as f32 / ppp,
+            sh as f32 / ppp,
+        );
+        let pos = pos2(
+            ox + ((sw - w) / 2.0).max(0.0),
+            oy + ((sh - CHROME - h) / 2.0).max(0.0),
+        );
+        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(pos));
+    }
 }
 
+#[cfg(target_os = "macos")]
 pub fn home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"))
 }
 
+#[cfg(not(target_os = "macos"))]
+pub fn home() -> PathBuf {
+    dirs::home_dir().unwrap_or_else(std::env::temp_dir)
+}
+
+/// Windows and Linux: where screenshots go unless Preferences says otherwise, the Desktop as on macOS.
+#[cfg(not(target_os = "macos"))]
+pub fn default_folder() -> PathBuf {
+    dirs::desktop_dir().or_else(dirs::picture_dir).unwrap_or_else(home)
+}
+
+/// Windows and Linux: where settings.json (and crash.log) live.
+#[cfg(not(target_os = "macos"))]
+pub fn settings_dir() -> PathBuf {
+    dirs::config_dir().unwrap_or_else(home).join("ShotCraft")
+}
+
+#[cfg(target_os = "macos")]
 const AGENT: &str = "app.shotcraft.launcher";
 
+#[cfg(target_os = "macos")]
 pub fn set_autostart(on: bool) {
     let path = home().join("Library/LaunchAgents").join(format!("{AGENT}.plist"));
     if !on {
@@ -489,9 +617,25 @@ pub fn set_autostart(on: bool) {
 }
 
 /// Keeps the login item on the installed app, wherever it was first switched on from.
+#[cfg(target_os = "macos")]
 pub fn refresh_autostart(on: bool) {
     let bundled = std::env::current_exe().is_ok_and(|e| e.to_string_lossy().contains(".app/Contents/MacOS/"));
     if on && bundled {
+        set_autostart(true);
+    }
+}
+
+/// A placeholder until the Windows and Linux backends arrive: no login item yet.
+#[cfg(not(target_os = "macos"))]
+pub fn set_autostart(_on: bool) {}
+
+/// Keeps the login item pointing at this copy of ShotCraft, wherever it was first switched on from.
+/// A copy run from cargo's target folder (a development build) leaves the login item alone.
+#[cfg(not(target_os = "macos"))]
+pub fn refresh_autostart(on: bool) {
+    let dev_build =
+        std::env::current_exe().is_ok_and(|e| e.components().any(|c| c.as_os_str() == "target"));
+    if on && !dev_build {
         set_autostart(true);
     }
 }
@@ -628,6 +772,7 @@ fn supported_ocr_languages() -> Vec<(String, String)> {
 }
 
 /// Opens System Settings on the keyboard pane, where the system's own screenshot shortcuts can be switched off.
+#[cfg(target_os = "macos")]
 pub fn open_keyboard_settings() {
     let _ = Command::new("open").arg("x-apple.systempreferences:com.apple.Keyboard-Settings.extension").spawn();
 }
@@ -815,7 +960,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod window_bg_tests {
     use super::*;
     use crate::headless::window_capture;
@@ -878,7 +1023,7 @@ mod window_bg_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod capture_option_tests {
     use super::*;
     use crate::targets::Rect;

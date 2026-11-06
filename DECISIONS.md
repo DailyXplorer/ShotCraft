@@ -44,3 +44,39 @@ No Preferences tab (General, Hotkeys, Advanced) draws grey explanatory lines und
 * A new preference gets its explanation as a tooltip (`tip_row` in `src/prefs.rs`), never as a line under the row.
 
 Why: the lines crowded the window; the owner wants a plain page with help one hover away.
+
+## Windows and Linux (proposed, for the owner's approval)
+
+The rules above hold on every system. These entries say how Windows and Linux follow them where macOS has something they lack. Each one can be accepted or turned down on its own.
+
+### The tray icon is the menu bar icon, with a one-time tip on Windows
+
+On Windows and Linux the tray (notification area) icon does what the menu bar icon does on macOS: same menu, same rule that it can be hidden only while the Show ShotCraft hotkey works. Windows 11 puts a new tray icon in the hidden overflow, so on the first start, and only if the icon is not already on the taskbar, ShotCraft shows one notification saying where the icon is and how to pin it. It never shows again.
+
+Why: without the tip a first-time user sees nothing at all after starting the app, because of "Menu bar only".
+
+### The editor has its own menu bar on Windows and Linux
+
+macOS keeps no main menu bar ("No Dock icon"). Windows and Linux have no system menu bar to fall back on, so the editor window draws one across its top with the same menus and items as the macOS main menu. Its shortcuts use Ctrl where macOS uses Cmd.
+
+Why: on those systems a window's commands are expected in the window; without it they would exist only as shortcuts.
+
+### Default hotkeys are Ctrl+Shift+1 to 4
+
+Full screen, Area, Active window and Text recognition default to Ctrl+Shift+1, 2, 3 and 4 on Windows and Linux. Not Ctrl+Alt+letter: on many keyboard layouts Ctrl+Alt is AltGr, and AltGr+letter types a character there.
+
+### shotcraft:// is registered only while links are allowed
+
+There is no installer on Windows and Linux to declare the URL scheme, so ShotCraft registers it itself for the current user (Windows: `HKCU\Software\Classes\shotcraft`; Linux: a desktop entry and `xdg-mime`) when the user allows links in Preferences, and removes it when they turn links off. Everything in "URL scheme shotcraft:// added" still applies.
+
+Why: an app without an installer should leave nothing behind in the system that the user did not turn on. The difference from macOS: a link can start ShotCraft only after links are allowed, so the "first link asks" question does not come up there.
+
+### The mouse wheel scrolls the picture; Ctrl+wheel zooms
+
+On Windows and Linux the wheel scrolls a picture that is larger than the window, Shift+wheel scrolls sideways and Ctrl+wheel zooms (Reverse zoom applies). The canvas shows scroll bars, and Page Up, Page Down, Home and End move through a long capture. Scrolling stops at the picture's edges.
+
+Why: a mouse on those systems usually has a wheel and no trackpad, and long scrolling captures need a way to move through them.
+
+### One copy per user session
+
+On Windows and Linux a second start of ShotCraft does not run a second copy. It tells the running one to show itself (or passes on the `shotcraft://` link it was started with) and quits. macOS does this for the app bundle by itself.

@@ -45,6 +45,23 @@ pub enum Icon {
     Trash,
     Keyboard,
     Sliders,
+    // Drawn for the Windows and Linux menu bar (macOS uses SF Symbols there).
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    Folder,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    Timer,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    Window,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    Display,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    Undo,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    Redo,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    ZoomIn,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    ZoomOut,
     DragFile,
     Info,
 }
@@ -120,6 +137,14 @@ fn svg(icon: Icon) -> Option<&'static str> {
         Icon::Trash => Some(include_str!("../assets/icons/trash.svg")),
         Icon::Keyboard => Some(include_str!("../assets/icons/keyboard.svg")),
         Icon::Sliders => Some(include_str!("../assets/icons/sliders.svg")),
+        Icon::Folder => Some(include_str!("../assets/icons/folder.svg")),
+        Icon::Timer => Some(include_str!("../assets/icons/timer.svg")),
+        Icon::Window => Some(include_str!("../assets/icons/window.svg")),
+        Icon::Display => Some(include_str!("../assets/icons/display.svg")),
+        Icon::Undo => Some(include_str!("../assets/icons/undo.svg")),
+        Icon::Redo => Some(include_str!("../assets/icons/redo.svg")),
+        Icon::ZoomIn => Some(include_str!("../assets/icons/zoom_in.svg")),
+        Icon::ZoomOut => Some(include_str!("../assets/icons/zoom_out.svg")),
         Icon::DragFile => Some(include_str!("../assets/icons/drag_file.svg")),
         Icon::Info => Some(include_str!("../assets/icons/info.svg")),
         _ => None,

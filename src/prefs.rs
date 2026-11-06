@@ -8,7 +8,11 @@ const LABEL_W: f32 = 224.0;
 /// The info icon sits at the right end of the label column, so every icon lines up.
 const TIP_ICON: f32 = 14.0;
 const TIP_MAX_W: f32 = 300.0;
+#[cfg(target_os = "macos")]
 pub const WINDOW: [f32; 2] = [600.0, 604.0];
+/// Windows and Linux leave out macOS's own rows (trim, frozen area, the system's shortcuts).
+#[cfg(not(target_os = "macos"))]
+pub const WINDOW: [f32; 2] = [600.0, 552.0];
 /// The date the file name example is shown with.
 const SAMPLE: Stamp = Stamp { year: 2026, month: 11, day: 5, hour: 9, minute: 7, second: 3 };
 /// How small the scrolling speed slider's steps are: one per level.
@@ -25,6 +29,11 @@ pub struct PrefsState {
     queue: Queue,
     recording: Option<HotkeyAction>,
     refused: Vec<HotkeyAction>,
+    /// Windows and Linux: frames drawn since the window opened, and where it moves once drawn.
+    #[cfg(not(target_os = "macos"))]
+    drawn: u32,
+    #[cfg(not(target_os = "macos"))]
+    place: Option<egui::Pos2>,
     /// What is typed in the max height field while it has the keyboard.
     height_text: Option<String>,
     /// "Reset All Settings" was clicked and waits for its confirmation.
@@ -48,6 +57,10 @@ impl PrefsState {
             queue,
             recording: None,
             refused: vec![],
+            #[cfg(not(target_os = "macos"))]
+            drawn: 0,
+            #[cfg(not(target_os = "macos"))]
+            place: None,
             height_text: None,
             confirm_reset: false,
         }))
@@ -91,7 +104,13 @@ fn recorded(events: &[egui::Event], modifiers: egui::Modifiers) -> Option<Record
         if modifiers.shift {
             parts.push("shift");
         }
+        #[cfg(target_os = "macos")]
         if modifiers.mac_cmd || modifiers.command {
+            parts.push("super");
+        }
+        // Windows and Linux: `command` is Ctrl, already counted above.
+        #[cfg(not(target_os = "macos"))]
+        if modifiers.mac_cmd {
             parts.push("super");
         }
         if !parts.is_empty() {
@@ -188,6 +207,20 @@ impl App {
             ctx.send_viewport_cmd_to(vid, egui::ViewportCommand::Focus);
         }
         let builder = ViewportBuilder::default().with_title("Preferences").with_inner_size(WINDOW).with_resizable(false);
+        // Windows and Linux: the window opens out of sight and moves to the middle of the screen
+        // once drawn, so it doesn't flash at the default place first.
+        #[cfg(not(target_os = "macos"))]
+        let builder = {
+            let mut p = self.prefs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if p.drawn == 0 {
+                p.place = crate::dialog::centre_place(ctx, WINDOW);
+            }
+            if p.place.is_some() {
+                builder.with_position(crate::dialog::OUT_OF_SIGHT).with_visible(false)
+            } else {
+                builder
+            }
+        };
         let shared = self.prefs.clone();
         crate::show_window(ctx, vid, builder, move |ui| {
             let mut p = shared.lock().unwrap();
@@ -196,6 +229,26 @@ impl App {
                 p.open = false;
                 p.recording = None;
                 ui.ctx().request_repaint_of(ViewportId::ROOT);
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                if !p.open {
+                    p.drawn = 0;
+                } else {
+                    p.drawn = p.drawn.saturating_add(1);
+                    match p.drawn {
+                        1 => ui.ctx().request_repaint(),
+                        2 => {
+                            if let Some(pos) = p.place {
+                                ui.ctx()
+                                    .send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+                                ui.ctx()
+                                    .send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
             }
             // Recording ends when the window loses the keyboard: the keys would go somewhere else.
             if ui.input(|i| i.viewport().focused == Some(false)) {
@@ -217,6 +270,10 @@ impl App {
         let old = std::mem::replace(&mut self.settings, new);
         if old.autostart != self.settings.autostart {
             crate::system::set_autostart(self.settings.autostart);
+        }
+        #[cfg(not(target_os = "macos"))]
+        if old.allow_links != self.settings.allow_links {
+            crate::links::set_registered(self.settings.allow_links);
         }
         if old.always_on_top != self.settings.always_on_top {
             self.apply_window_level();
@@ -319,14 +376,27 @@ impl PrefsState {
                 ui.radio_value(&mut s.save_auto_format, true, "Auto (PNG/JPEG)").on_hover_text("Photos, gradients and noisy pictures are saved as JPEG; flat screenshots with text as PNG");
             });
         });
+        #[cfg(target_os = "macos")]
         row(ui, "Resize retina screenshots", |ui| {
+            ui.checkbox(&mut s.downscale_retina, "Downscale to 1× when saving");
+        });
+        #[cfg(not(target_os = "macos"))]
+        row(ui, "Resize high-DPI screenshots", |ui| {
             ui.checkbox(&mut s.downscale_retina, "Downscale to 1× when saving");
         });
         tip_row(ui, "Window Screenshot Background", "Applies to Active Window and Any Window screenshots, not to Area or Fullscreen.", |ui| {
             ui.horizontal(|ui| {
                 ui.radio_value(&mut s.window_bg, WindowBg::Wallpaper, "Wallpaper").on_hover_text("The window and its shadow on your desktop picture");
+                #[cfg(target_os = "macos")]
                 ui.radio_value(&mut s.window_bg, WindowBg::Transparent, "Transparent").on_hover_text("The window and its shadow on a see-through background");
+                #[cfg(target_os = "macos")]
                 ui.radio_value(&mut s.window_bg, WindowBg::Solid, "Solid Color").on_hover_text("The window and its shadow on a colour");
+                // Windows and Linux capture the window alone (no shadow; Wallpaper draws one,
+                // `capture::with_shadow`), and have no Trim shadow.
+                #[cfg(not(target_os = "macos"))]
+                ui.radio_value(&mut s.window_bg, WindowBg::Transparent, "Transparent").on_hover_text("The window as it is");
+                #[cfg(not(target_os = "macos"))]
+                ui.radio_value(&mut s.window_bg, WindowBg::Solid, "Solid Color").on_hover_text("The window on a colour");
                 if matches!(s.window_bg, WindowBg::Solid | WindowBg::Wallpaper) {
                     let c = crate::model::hex(&s.window_solid);
                     let mut col = Color32::from_rgb(c[0], c[1], c[2]);
@@ -335,6 +405,7 @@ impl PrefsState {
                     }
                 }
             });
+            #[cfg(target_os = "macos")]
             ui.radio_value(&mut s.window_bg, WindowBg::Trimmed, "Trim shadow").on_hover_text("The window cut out without its shadow");
         });
         row(ui, "Delayed screenshot", |ui| {
@@ -344,10 +415,20 @@ impl PrefsState {
                 }
             });
         });
+        // Windows and Linux always select on a frozen picture of the screens.
+        #[cfg(target_os = "macos")]
         tip_row(ui, "Area capture", "Draws the selection on a still picture of the screen, with guide lines. Space does not switch to a window.", |ui| {
             ui.checkbox(&mut s.frozen_area, "Freeze the screen while selecting");
         });
+        #[cfg(target_os = "macos")]
         tip_row(ui, "Mouse pointer", "Fullscreen, Active Window, Delayed, Repeat Area and frozen Area. Not with the system selector.", |ui| {
+            ui.checkbox(&mut s.capture_cursor, "Include it in screenshots");
+        });
+        // Windows and Linux draw the pointer into every capture but the Wayland desktop's own (its portal decides).
+        #[cfg(not(target_os = "macos"))]
+        let pointer_tip = "Every capture, where the pointer was when it began.";
+        #[cfg(not(target_os = "macos"))]
+        tip_row(ui, "Mouse pointer", pointer_tip, |ui| {
             ui.checkbox(&mut s.capture_cursor, "Include it in screenshots");
         });
         tip_row(ui, "Scrolling screenshot max height", &height_tip, |ui| {
@@ -376,6 +457,8 @@ impl PrefsState {
             });
             s.scroll_speed = level as u8;
         });
+        #[cfg(not(target_os = "macos"))]
+        let _ = &height_text;
     }
 
     fn prefs_hotkeys(&mut self, ui: &mut Ui, dim: Color32) {
@@ -394,12 +477,15 @@ impl PrefsState {
                 None => {}
             }
         }
+        #[cfg(target_os = "macos")]
         let steps = "macOS keeps Cmd+Shift+3 and Cmd+Shift+4 for its own screenshots until you free them.\n\n1. In System Settings > Keyboard > Keyboard Shortcuts, pick Screenshots.\n2. Untick the system screenshot shortcuts.\n3. Put Cmd+Shift+3 into Fullscreen and Cmd+Shift+4 into Area below.";
+        #[cfg(target_os = "macos")]
         tip_row(ui, "Reassign default shortcuts", steps, |ui| {
             if ui.button("Open System Settings").clicked() {
                 crate::system::open_keyboard_settings();
             }
         });
+        #[cfg(target_os = "macos")]
         ui.add_space(8.0);
         for a in crate::settings::HotkeyAction::ALL {
             let current = self.settings.hotkey(a).map(pretty_hotkey);
@@ -444,17 +530,31 @@ impl PrefsState {
         row(ui, "OCR line breaks", |ui| {
             ui.checkbox(&mut s.ocr_remove_breaks, "Remove line breaks");
         });
+        #[cfg(target_os = "macos")]
         tip_row(ui, "Menubar icon", "Needs a working Show ShotCraft hotkey", |ui| {
             ui.checkbox(&mut s.hide_menubar_icon, "Hide menubar icon");
+        });
+        // Windows and Linux: a tray icon; the wheel scrolls the picture there and Ctrl+wheel zooms.
+        #[cfg(not(target_os = "macos"))]
+        tip_row(ui, "Tray icon", "Needs a working Show ShotCraft hotkey", |ui| {
+            ui.checkbox(&mut s.hide_menubar_icon, "Hide tray icon");
         });
         row(ui, "Main window", |ui| {
             ui.checkbox(&mut s.always_on_top, "Always on top");
         });
+        #[cfg(target_os = "macos")]
         row(ui, "Zoom with mouse wheel", |ui| {
             ui.checkbox(&mut s.reverse_zoom, "Reverse scroll direction");
         });
+        #[cfg(not(target_os = "macos"))]
+        row(ui, "Zoom with Ctrl+wheel", |ui| {
+            ui.checkbox(&mut s.reverse_zoom, "Reverse scroll direction");
+        });
         row(ui, "Scrolling capture", |ui| {
+            #[cfg(target_os = "macos")]
             ui.checkbox(&mut s.scroll_reverse, "Reverse scroll direction").on_hover_text("For apps that reverse the mouse wheel. The macOS natural scrolling setting does not need this.");
+            #[cfg(not(target_os = "macos"))]
+            ui.checkbox(&mut s.scroll_reverse, "Reverse scroll direction").on_hover_text("For apps that reverse the mouse wheel.");
             ui.checkbox(&mut s.scroll_manual, "Scroll by hand").on_hover_text("ShotCraft grabs the area while you scroll it, instead of scrolling for you");
         });
         tip_row(ui, "Default zoom level", "When selected, Area Capture will open the editor at 100% zoom when possible, and Fullscreen Capture will open the editor at 80% zoom.", |ui| {
@@ -487,7 +587,13 @@ impl PrefsState {
                 ui.selectable_value(&mut s.confirmation, Confirm::None, "None");
             });
         });
+        #[cfg(target_os = "macos")]
         tip_row(ui, "Automation", "Shortcuts, Raycast, Alfred or a script can start a capture: open shotcraft://grab/area", |ui| {
+            ui.checkbox(&mut s.allow_links, "Allow shotcraft:// links from other apps");
+        });
+        // Windows and Linux register the link type while this is on (`links`); macOS has it in the app bundle.
+        #[cfg(not(target_os = "macos"))]
+        tip_row(ui, "Automation", "A launcher, a script or a browser can start a capture: open shotcraft://grab/area", |ui| {
             ui.checkbox(&mut s.allow_links, "Allow shotcraft:// links from other apps");
         });
         row(ui, "Reset", |ui| {
@@ -635,6 +741,12 @@ mod tooltip_tests {
             }
             // Tooltip open: hover the info icon of a General row, and of a Hotkeys row.
             for (tab, label, file) in [(0, "File name", "tooltip"), (1, "Reassign default shortcuts", "tooltip-hotkeys")] {
+                // Windows and Linux: the Hotkeys tab has no info icon (its one tip is about macOS's shortcuts).
+                #[cfg(not(target_os = "macos"))]
+                if tab == 1 {
+                    let _ = (label, file);
+                    continue;
+                }
                 let mut st = super::tests_state();
                 st.tab = tab;
                 TIP_ICONS.with(|v| v.borrow_mut().clear());
@@ -658,10 +770,18 @@ mod tooltip_tests {
             TIP_ICONS.with(|v| v.borrow_mut().clear());
             with_rig(|rig| rig.render_window_themed((WINDOW[0], WINDOW[1]), 2.0, false, None, |ui| st.body(ui)));
             let labels: Vec<String> = TIP_ICONS.with(|v| v.borrow().iter().map(|(l, _)| l.clone()).collect());
+            #[cfg(target_os = "macos")]
             let want: &[&str] = match tab {
                 0 => &["File name", "Window Screenshot Background", "Area capture", "Mouse pointer", "Scrolling screenshot max height", "Scrolling screenshot speed"],
                 1 => &["Reassign default shortcuts"],
                 _ => &["Menubar icon", "Default zoom level", "Automation"],
+            };
+            // Windows and Linux hide the macOS-only rows (frozen Area, the system's shortcuts).
+            #[cfg(not(target_os = "macos"))]
+            let want: &[&str] = match tab {
+                0 => &["File name", "Window Screenshot Background", "Mouse pointer", "Scrolling screenshot max height", "Scrolling screenshot speed"],
+                1 => &[],
+                _ => &["Tray icon", "Default zoom level", "Automation"],
             };
             for w in want {
                 assert!(labels.iter().any(|l| l == w), "tab {tab}: no info icon on {w}, got {labels:?}");
@@ -688,6 +808,13 @@ mod tooltip_tests {
 }
 
 #[cfg(test)]
+#[cfg(target_os = "macos")]
 fn tests_state() -> PrefsState {
     PrefsState { open: true, focus: false, tab: 0, settings: Settings::default(), edited: false, queue: Arc::new(Mutex::new(vec![])), recording: None, refused: vec![], height_text: None, confirm_reset: false }
+}
+
+/// Windows and Linux: with the fields for the window's first placement.
+#[cfg(all(test, not(target_os = "macos")))]
+fn tests_state() -> PrefsState {
+    PrefsState { open: true, focus: false, tab: 0, settings: Settings::default(), edited: false, queue: Arc::new(Mutex::new(vec![])), recording: None, refused: vec![], height_text: None, confirm_reset: false, #[cfg(not(target_os = "macos"))] drawn: 0, #[cfg(not(target_os = "macos"))] place: None }
 }

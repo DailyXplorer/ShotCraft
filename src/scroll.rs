@@ -11,6 +11,7 @@ pub use crate::stitch::Direction;
 use crate::{system, Action, Queue};
 use eframe::egui::Context;
 use image::RgbaImage;
+#[cfg(target_os = "macos")]
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
@@ -168,7 +169,11 @@ impl Note {
             Note::ScrollSlower => "Scroll a bit slower: part of the page was missed. Press Esc when you are done.",
             Note::LostTrack => "ShotCraft lost track of the page. Scroll by hand, slowly, and press Esc when you are done.",
             Note::SizeChanged => "The captured area changed size. Press Esc to keep what was captured.",
+            #[cfg(target_os = "macos")]
             Note::NeedsAccessibility => "To scroll for you, ShotCraft needs the Accessibility permission (System Settings > Privacy & Security). For now, scroll the page by hand and press Esc when you are done.",
+            // Windows always lets ShotCraft scroll; an X server without XTest doesn't.
+            #[cfg(not(target_os = "macos"))]
+            Note::NeedsAccessibility => "ShotCraft can't scroll this page for you (the X server has no XTest). Scroll it by hand and press Esc when you are done.",
             Note::PageDidNotMove => "The page didn't move. Scroll it by hand and press Esc when you are done.",
             Note::CheckScreenRecording => "Nothing changes in the area. Check the Screen Recording permission in System Settings, then press Esc.",
             _ => return None,
@@ -230,6 +235,10 @@ impl Session {
         let (s, notified) = (stop.clone(), Arc::new(AtomicBool::new(false)));
         let flag = notified.clone();
         std::thread::spawn(move || {
+            // Windows and Linux: the area was drawn on ShotCraft's own frozen screens; they close in the
+            // next frames, and the first look must see the page, not them.
+            #[cfg(not(target_os = "macos"))]
+            std::thread::sleep(Duration::from_millis(300));
             // A panic must not leave the app waiting for ever: report it like any other error.
             let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let mut page = ScreenPage { rect, scroller: autoscroll::Scroller::new(rect), started: Instant::now(), limits };
@@ -237,6 +246,9 @@ impl Session {
                 run_with(&mut page, rect.w, rect.h, mode, dir, &limits, &s, &progress, &notify)
             }))
             .unwrap_or_else(|_| Err("The scrolling capture stopped unexpectedly.".to_string()));
+            // Windows and Linux grab the area in pixels: the picture has the scale of its screen.
+            #[cfg(not(target_os = "macos"))]
+            let res = res.map(|o| o.map(|o| Outcome { scale: crate::capture::scale_at(rect.x + (rect.w / 2) as i32, rect.y + (rect.h / 2) as i32), ..o }));
             queue.lock().unwrap().push(Action::ScrollingFinished(res));
             ctx.request_repaint();
         });
@@ -539,6 +551,7 @@ pub fn run_with(page: &mut dyn Page, area_w: u32, area_h: u32, mode: Mode, dir: 
 }
 
 /// One look at the area, as pixels.
+#[cfg(target_os = "macos")]
 fn grab(rect: &GrabRect) -> Result<RgbaImage, String> {
     let path = system::temp_png("scroll");
     let _ = std::fs::remove_file(&path);
@@ -557,6 +570,7 @@ fn grab(rect: &GrabRect) -> Result<RgbaImage, String> {
 }
 
 /// Lets the user draw the area to capture. `None` when they cancel.
+#[cfg(target_os = "macos")]
 pub fn select_area() -> Result<Option<R>, String> {
     let path = system::temp_png("scroll-area");
     let status = Command::new("/usr/sbin/screencapture").args(["-x", "-i", "-s"]).arg(&path).status().map_err(|e| format!("Can't take a screenshot: {e}"))?;
@@ -569,6 +583,13 @@ pub fn select_area() -> Result<Option<R>, String> {
     let rect = system::capture_rect(&path);
     let _ = std::fs::remove_file(&path);
     rect.map(Some).ok_or_else(|| "Can't tell which area was selected.".to_string())
+}
+
+/// Windows and Linux: the area from the screen (`capture`). The user draws it on the frozen screens
+/// (`picker`), so there is no `select_area` here.
+#[cfg(not(target_os = "macos"))]
+fn grab(rect: &GrabRect) -> Result<RgbaImage, String> {
+    crate::capture::grab_area(rect)
 }
 
 #[cfg(test)]

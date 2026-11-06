@@ -5,6 +5,9 @@
 //! Coordinates are global points with the origin at the top left of the main display. A display
 //! left of or above the main one has negative coordinates, which is what `screencapture -R` expects.
 
+// The helpers that build `screencapture` arguments and flip macOS coordinates are macOS-only.
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+
 use crate::model::Image;
 use crate::system::CaptureMode;
 use std::sync::Arc;

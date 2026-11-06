@@ -1,8 +1,29 @@
+// Windows: a GUI program, so starting it from Explorer or at sign-in opens no console window.
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+
 mod app_mode;
+// Windows and Linux: screen capture and its crosshair, text recognition, links, the menus and the
+// dialogs (macOS: `screencapture`, Vision, the menu bar and the editor's own windows).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // parts wait for the Windows and Linux backends
+#[cfg(not(target_os = "macos"))]
+mod capture;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // the tray parts wait for the Windows and Linux trays
+#[cfg(not(target_os = "macos"))]
+mod commands;
+#[cfg(not(target_os = "macos"))]
+mod dialog;
+#[cfg(not(target_os = "macos"))]
+mod links;
+#[cfg(not(target_os = "macos"))]
+mod picker;
 mod color;
+// Windows and Linux use parts of these (or none yet).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod dragout;
 mod editor;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod frozen;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod frozen_ui;
 #[cfg(test)]
 mod headless;
@@ -23,15 +44,24 @@ mod sizing;
 mod tray_flash;
 #[cfg(test)]
 mod pin_shots;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod stitch;
 mod tiled;
 #[cfg(target_os = "macos")]
+mod shell;
+// Windows and Linux: the tray and the hotkeys (macOS: upstream's shell.rs).
+#[cfg(not(target_os = "macos"))]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // parts wait for the Windows and Linux trays
+#[path = "shell_other.rs"]
 mod shell;
 #[cfg(target_os = "macos")]
 mod updater;
 mod url_scheme;
 mod system;
 mod targets;
+#[cfg(test)]
+mod visual;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod windowbg;
 
 use eframe::egui::{self, Color32, ViewportBuilder, ViewportCommand, ViewportId};
@@ -98,10 +128,17 @@ pub enum Action {
     ScrollingFinished(Result<Option<scroll::Outcome>, String>),
     OcrCaptured(Result<Option<Captured>, String>),
     OcrDone(Result<system::OcrResult, String>),
+    /// Windows and Linux: the screens are frozen; show the crosshair on them.
+    #[cfg(not(target_os = "macos"))]
+    Pick(Box<picker::Picker>),
+    #[cfg(not(target_os = "macos"))]
+    ToggleFullscreen,
     /// The screens are photographed: the frozen area grabber can open its windows.
+    #[cfg(target_os = "macos")]
     FrozenShots(Box<FrozenStart>),
 }
 
+#[cfg(target_os = "macos")]
 /// What the frozen area grabber starts from.
 pub struct FrozenStart {
     shots: Vec<frozen::Shot>,
@@ -110,6 +147,7 @@ pub struct FrozenStart {
     for_ocr: bool,
 }
 
+#[cfg(target_os = "macos")]
 /// A frozen area grab under way.
 struct Frozen {
     shared: frozen_ui::Shared,
@@ -188,8 +226,9 @@ pub struct App {
     pub queue: Queue,
     pub settings: Settings,
     pub fonts: Arc<Fonts>,
-    #[cfg(target_os = "macos")]
     shell: Option<shell::Shell>,
+    #[cfg(not(target_os = "macos"))]
+    picker: Option<picker::Picker>,
     pub doc: Option<Doc>,
     pub ed: editor::Editor,
     pins: Vec<Arc<Mutex<Pin>>>,
@@ -208,6 +247,13 @@ pub struct App {
     keys_suspended: bool,
     /// The editor window is not on screen. True from launch until the user asks for it.
     pub hidden: bool,
+    /// Windows and Linux: hide the editor once the helper window exists (`keep_ui_alive`).
+    #[cfg(not(target_os = "macos"))]
+    hide_pending: bool,
+    /// Windows and Linux: the editor was started out of sight (so it doesn't flash at launch) and
+    /// has not been placed on a screen yet.
+    #[cfg(not(target_os = "macos"))]
+    parked: bool,
     /// The editor is on screen, transparent, and will be hidden again: eframe's first paint shows it.
     startup_hide: bool,
     /// A brief invisible show of the editor is under way, so that eframe runs the pass that
@@ -222,6 +268,7 @@ pub struct App {
     scroll: Option<scroll::Session>,
     /// Esc is registered as a global hotkey: true only for the length of a scrolling capture.
     escape_grabbed: bool,
+    #[cfg(target_os = "macos")]
     frozen: Option<Frozen>,
     /// Which way the scrolling capture being set up goes.
     scroll_dir: scroll::Direction,
@@ -231,6 +278,10 @@ pub struct App {
     appending: bool,
     pub about_open: bool,
     pub shortcuts_open: bool,
+    #[cfg(not(target_os = "macos"))]
+    about_dialog: dialog::Shared,
+    #[cfg(not(target_os = "macos"))]
+    shortcuts_dialog: dialog::Shared,
     ctx: egui::Context,
 }
 
@@ -279,8 +330,9 @@ impl App {
             prefs: prefs::PrefsState::shared(settings.clone(), queue.clone()),
             queue,
             fonts: Arc::new(Fonts::load()),
-            #[cfg(target_os = "macos")]
             shell: None,
+            #[cfg(not(target_os = "macos"))]
+            picker: None,
             doc: None,
             ed: editor::Editor::default(),
             pins: vec![],
@@ -293,6 +345,10 @@ impl App {
             started: true,
             quitting: false,
             keys_suspended: false,
+            #[cfg(not(target_os = "macos"))]
+            hide_pending: false,
+            #[cfg(not(target_os = "macos"))]
+            parked: false,
             hidden: false,
             startup_hide: false,
             waking: false,
@@ -302,6 +358,7 @@ impl App {
             front_focus: true,
             scroll: None,
             escape_grabbed: false,
+            #[cfg(target_os = "macos")]
             frozen: None,
             scroll_dir: scroll::Direction::Down,
             ocr_running: false,
@@ -309,6 +366,10 @@ impl App {
             appending: false,
             about_open: false,
             shortcuts_open: false,
+            #[cfg(not(target_os = "macos"))]
+            about_dialog: dialog::Shared::default(),
+            #[cfg(not(target_os = "macos"))]
+            shortcuts_dialog: dialog::Shared::default(),
             ctx,
             settings,
         }
@@ -318,15 +379,30 @@ impl App {
         setup_fonts(&cc.egui_ctx);
         url_scheme::attach(&cc.egui_ctx);
         url_scheme::install();
+        #[cfg(target_os = "macos")]
         let settings = Settings::load();
+        // Windows and Linux: Ctrl + - = 0 zoom the picture (commands), where egui would also zoom the
+        // whole interface (macOS's menu bar takes those keys first). Screenshots, and the visual tests
+        // that compare them, use the dark theme and the default settings, never the user's.
+        #[cfg(not(target_os = "macos"))]
+        cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        #[cfg(not(target_os = "macos"))]
+        if screenshot.is_some() {
+            cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
+        }
+        #[cfg(not(target_os = "macos"))]
+        let settings = if screenshot.is_some() { settings::for_screenshots() } else { Settings::load() };
         system::refresh_autostart(settings.autostart);
+        #[cfg(not(target_os = "macos"))]
+        links::refresh(settings.allow_links);
         let queue = Queue::default();
         App {
             prefs: prefs::PrefsState::shared(settings.clone(), queue.clone()),
             queue,
             fonts: Arc::new(Fonts::load()),
-            #[cfg(target_os = "macos")]
             shell: None,
+            #[cfg(not(target_os = "macos"))]
+            picker: None,
             doc: None,
             ed: editor::Editor::from_settings(&settings),
             pins: vec![],
@@ -340,6 +416,10 @@ impl App {
             quitting: false,
             keys_suspended: false,
             hidden: !show_at_start,
+            #[cfg(not(target_os = "macos"))]
+            hide_pending: false,
+            #[cfg(not(target_os = "macos"))]
+            parked: !show_at_start,
             startup_hide: false,
             waking: false,
             woke_at: Instant::now(),
@@ -348,6 +428,7 @@ impl App {
             front_focus: true,
             scroll: None,
             escape_grabbed: false,
+            #[cfg(target_os = "macos")]
             frozen: None,
             scroll_dir: scroll::Direction::Down,
             ocr_running: false,
@@ -355,6 +436,10 @@ impl App {
             appending: false,
             about_open: false,
             shortcuts_open: false,
+            #[cfg(not(target_os = "macos"))]
+            about_dialog: dialog::Shared::default(),
+            #[cfg(not(target_os = "macos"))]
+            shortcuts_dialog: dialog::Shared::default(),
             ctx: cc.egui_ctx.clone(),
             settings,
         }
@@ -395,6 +480,14 @@ impl App {
         self.hidden = false;
         self.waking = false;
         self.startup_hide = false;
+        #[cfg(not(target_os = "macos"))]
+        if std::mem::take(&mut self.parked) {
+            system::center_main_window(&self.ctx, |w, h| (1180.0_f32.min(w), 760.0_f32.min(h)));
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.hide_pending = false;
+        }
         app_mode::set_editor_alpha(1.0);
         self.ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Visible(true));
         self.ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Focus);
@@ -403,7 +496,14 @@ impl App {
 
     fn hide_window(&mut self) {
         self.hidden = true;
+        #[cfg(target_os = "macos")]
         self.ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Visible(false));
+        // Windows and Linux first open the helper window that keeps the UI passes running
+        // (`keep_ui_alive`), which then hides the editor.
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.hide_pending = true;
+        }
         self.ctx.request_repaint();
         self.sync_menu_state();
     }
@@ -424,6 +524,11 @@ impl App {
     /// keep the passes running after that.
     fn wake_ui(&mut self) {
         if !self.hidden {
+            return;
+        }
+        // Windows and Linux keep the passes running with `keep_ui_alive` instead, as a window there
+        // can't be made transparent from here.
+        if cfg!(not(target_os = "macos")) {
             return;
         }
         app_mode::set_editor_alpha(0.0);
@@ -455,6 +560,36 @@ impl App {
             } else {
                 self.ctx.request_repaint_after(std::time::Duration::from_millis(30));
             }
+        }
+    }
+
+    /// Windows and Linux: eframe stops running the UI pass once no window is visible, and new
+    /// windows can only be created in that pass. While the editor is hidden, a 1×1 transparent
+    /// window that takes no clicks keeps it running, so Preferences, pins and the thumbnail open by
+    /// themselves; the editor is hidden only once that window exists.
+    #[cfg(not(target_os = "macos"))]
+    fn keep_ui_alive(&mut self, ctx: &egui::Context) {
+        if !self.hidden {
+            return;
+        }
+        let builder = ViewportBuilder::default()
+            .with_title("ShotCraft")
+            .with_inner_size([1.0, 1.0])
+            .with_position([0.0, 0.0])
+            .with_decorations(false)
+            .with_resizable(false)
+            .with_transparent(true)
+            .with_has_shadow(false)
+            .with_mouse_passthrough(true)
+            .with_taskbar(false)
+            .with_active(false);
+        ctx.show_viewport_immediate(
+            ViewportId::from_hash_of("keep-ui-alive"),
+            builder,
+            |_, _| {},
+        );
+        if std::mem::take(&mut self.hide_pending) {
+            ctx.send_viewport_cmd(ViewportCommand::Visible(false));
         }
     }
 
@@ -490,11 +625,23 @@ impl App {
         };
         let q = self.queue.clone();
         let ctx = self.ctx.clone();
+        #[cfg(target_os = "macos")]
         let frozen = mode == CaptureMode::Area && frozen::wanted(self.settings.frozen_area, &opt.snapshot.displays);
         std::thread::spawn(move || {
             if was_visible {
                 std::thread::sleep(std::time::Duration::from_millis(250));
             }
+            // Windows and Linux: freeze the screens for the crosshair, or grab straight away.
+            #[cfg(not(target_os = "macos"))]
+            {
+                let action = match capture::start(mode, &opt) {
+                    capture::Started::Pick(frozen, pick_mode) => Action::Pick(Box::new(picker::Picker::new(frozen, pick_mode, for_ocr, opt.window_look()))),
+                    capture::Started::Done(res) if for_ocr => Action::OcrCaptured(res),
+                    capture::Started::Done(res) => Action::Captured(res),
+                };
+                q.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(action);
+            }
+            #[cfg(target_os = "macos")]
             if frozen {
                 // Photograph every display before any window of ours is up. When that fails the
                 // system selector does the job as it always did.
@@ -507,12 +654,103 @@ impl App {
                     Err(e) => eprintln!("frozen area capture unavailable, using the system selector: {e}"),
                 }
             }
+            #[cfg(target_os = "macos")]
             let res = system::capture(mode, &opt);
+            #[cfg(target_os = "macos")]
             q.lock().unwrap().push(if for_ocr { Action::OcrCaptured(res) } else { Action::Captured(res) });
             ctx.request_repaint();
         });
     }
 
+    /// `SHOTCRAFT_PICKER=area|crosshair|window`: the crosshair as it looks mid-drag, before a drag, or
+    /// over a window, drawn in the main window over the opened picture, which stands for the screen.
+    /// `SHOTCRAFT_PICKER_WINDOW=x,y,w,h,title` places the window it knows about (pixels).
+    #[cfg(not(target_os = "macos"))]
+    fn picker_preview(&mut self, ui: &mut egui::Ui, kind: &str) {
+        let Some(img) = self.doc.as_ref().map(|d| d.base.clone()) else {
+            return;
+        };
+        let (w, h) = (img.w as f32, img.h as f32);
+        if self.picker.is_none() {
+            // The picture fills the window, as a screen fills the crosshair's: same size, no stretching.
+            ui.ctx().send_viewport_cmd(ViewportCommand::InnerSize(
+                egui::vec2(w, h) / ui.ctx().pixels_per_point(),
+            ));
+        }
+        let placed = std::env::var("SHOTCRAFT_PICKER_WINDOW").ok().and_then(|s| {
+            let mut parts = s.splitn(5, ',');
+            let mut num = || parts.next().and_then(|n| n.trim().parse::<i32>().ok());
+            let (x, y, ww, hh) = (num()?, num()?, num()?, num()?);
+            Some(capture::WinInfo {
+                id: 1,
+                title: parts.next().unwrap_or_default().trim().to_string(),
+                x,
+                y,
+                w: ww.max(1) as u32,
+                h: hh.max(1) as u32,
+            })
+        });
+        let p = self.picker.get_or_insert_with(|| {
+            let win = placed.unwrap_or(capture::WinInfo {
+                id: 1,
+                title: "Some window".into(),
+                x: (w * 0.3) as i32,
+                y: (h * 0.25) as i32,
+                w: (w * 0.45) as u32,
+                h: (h * 0.5) as u32,
+            });
+            let frozen = capture::Frozen {
+                shots: vec![capture::Shot {
+                    x: 0,
+                    y: 0,
+                    scale: 1.0,
+                    primary: true,
+                    img,
+                }],
+                windows: vec![win],
+            };
+            let mode = if kind == "window" {
+                CaptureMode::Window
+            } else {
+                CaptureMode::Area
+            };
+            picker::Picker::new(frozen, mode, false, capture::WindowLook::Plain)
+        });
+        match kind {
+            "window" => p.preview(ui, egui::pos2(w * 0.5, h * 0.5), None),
+            "crosshair" => p.preview(ui, egui::pos2(w * 0.55, h * 0.4), None),
+            _ => p.preview(
+                ui,
+                egui::pos2(w * 0.7, h * 0.72),
+                Some(egui::pos2(w * 0.22, h * 0.24)),
+            ),
+        }
+    }
+
+    /// Windows and Linux: draws the crosshair while one is up and hands its result on.
+    #[cfg(not(target_os = "macos"))]
+    fn picker_ui(&mut self, ctx: &egui::Context) {
+        let Some(p) = &mut self.picker else { return };
+        if let Some(res) = p.ui(ctx) {
+            let for_ocr = p.for_ocr;
+            let p_scrolling = p.for_scrolling;
+            self.picker = None;
+            if p_scrolling {
+                // The area the user drew, in desktop pixels; Esc gives none.
+                self.push(Action::ScrollingArea(res.map(|c| c.and_then(|c| c.area))));
+                return;
+            }
+            self.push(if for_ocr {
+                Action::OcrCaptured(res)
+            } else {
+                Action::Captured(res)
+            });
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl App {
     /// The pictures are taken: open one window per display and let the user draw on them.
     fn frozen_start(&mut self, start: FrozenStart) {
         let snap = &start.opt.snapshot;
@@ -574,7 +812,10 @@ impl App {
         };
         self.push(if st.for_ocr { Action::OcrCaptured(res) } else { Action::Captured(res) });
     }
+}
 
+// Scrolling capture: the same on every system but for how the area is chosen (`start_scrolling`).
+impl App {
     /// Starts a scrolling capture, or ends the running one (the hotkey and the menu item act like Esc).
     fn start_scrolling(&mut self, dir: scroll::Direction) {
         if let Some(s) = &self.scroll {
@@ -590,13 +831,25 @@ impl App {
         if was_visible {
             self.hide_window();
         }
+        #[cfg(not(target_os = "macos"))]
+        let scale = self.pixels_per_point();
         let (q, ctx) = (self.queue.clone(), self.ctx.clone());
         std::thread::spawn(move || {
             if was_visible {
                 std::thread::sleep(std::time::Duration::from_millis(250));
             }
+            #[cfg(target_os = "macos")]
             let res = scroll::select_area();
+            #[cfg(target_os = "macos")]
             q.lock().unwrap().push(Action::ScrollingArea(res));
+            // Windows and Linux: the area is drawn on the frozen screens, with the crosshair.
+            #[cfg(not(target_os = "macos"))]
+            let action = match capture::freeze_for_scrolling(scale) {
+                Ok(frozen) => Action::Pick(Box::new(picker::Picker::new(frozen, CaptureMode::Area, false, capture::WindowLook::Plain).for_scrolling())),
+                Err(e) => Action::ScrollingArea(Err(e)),
+            };
+            #[cfg(not(target_os = "macos"))]
+            q.lock().unwrap().push(action);
             ctx.request_repaint();
         });
     }
@@ -669,14 +922,13 @@ impl App {
 
     pub fn grab_escape(&mut self, on: bool) {
         self.escape_grabbed = on;
-        #[cfg(target_os = "macos")]
         if let Some(s) = &mut self.shell {
             s.grab_escape(on);
         }
-        #[cfg(not(target_os = "macos"))]
-        let _ = on;
     }
+}
 
+impl App {
     pub fn open_image(&mut self, img: Image, scale: f32, fullscreen: bool) {
         self.doc = Some(Doc::new(img, scale));
         self.ed.reset_for_new_doc(fullscreen && self.settings.prefer_100);
@@ -685,7 +937,11 @@ impl App {
             let d = self.doc.as_ref().unwrap();
             (d.base.w as f32 / scale.max(1.0), d.base.h as f32 / scale.max(1.0))
         };
+        #[cfg(target_os = "macos")]
         let chrome = editor::TOOLBAR_H + editor::OPTIONS_H + editor::STATUS_H;
+        // Windows and Linux: the editor's own menu bar too.
+        #[cfg(not(target_os = "macos"))]
+        let chrome = editor::MENUBAR_H + editor::TOOLBAR_H + editor::OPTIONS_H + editor::STATUS_H;
         system::center_main_window(&self.ctx, |screen_w, screen_h| {
             sizing::editor_window((w, h), chrome, WINDOW_MARGIN, sizing::full_toolbar_width(), WINDOW_MIN_HEIGHT_RATIO, (screen_w, screen_h))
         });
@@ -909,7 +1165,47 @@ impl App {
         }
     }
 
+    /// The dialog that's open (Preferences, About or Keyboard Shortcuts), its window and its name.
+    /// One at a time, and the editor waits until it's closed, as for a modal dialog.
+    pub fn open_dialog(&self) -> Option<(ViewportId, &'static str)> {
+        if self
+            .prefs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .open
+        {
+            return Some((ViewportId::from_hash_of("prefs"), "Preferences"));
+        }
+        if self.about_open {
+            return Some((ViewportId::from_hash_of("about"), "About ShotCraft"));
+        }
+        if self.shortcuts_open {
+            return Some((ViewportId::from_hash_of("shortcuts"), "Keyboard Shortcuts"));
+        }
+        None
+    }
+
     fn handle(&mut self, a: Action) {
+        // While a dialog is open, asking for another one (or for a file or the clipboard in the
+        // editor) brings the open one to the front instead. Captures still work.
+        if let Some((vid, _)) = self.open_dialog() {
+            match a {
+                Action::Preferences
+                | Action::About
+                | Action::Shortcuts
+                | Action::OpenFile
+                | Action::OpenClipboard => {
+                    self.ctx.send_viewport_cmd_to(vid, ViewportCommand::Focus);
+                    return;
+                }
+                Action::Show => {
+                    self.show_window();
+                    self.ctx.send_viewport_cmd_to(vid, ViewportCommand::Focus);
+                    return;
+                }
+                _ => {}
+            }
+        }
         // These come from the status item menu too. They change the current image, so the editor
         // is shown to make the change visible.
         if self.hidden && self.doc.is_some() && matches!(a, Action::Undo | Action::Redo | Action::ResetCrop | Action::Rasterize | Action::SaveAs) {
@@ -960,6 +1256,7 @@ impl App {
                 }
             }
             Action::OcrDone(result) => self.ocr_done(result),
+            #[cfg(target_os = "macos")]
             Action::FrozenShots(start) => self.frozen_start(*start),
             Action::ScrollingCapture => self.start_scrolling(scroll::Direction::Down),
             Action::ScrollingCaptureUp => self.start_scrolling(scroll::Direction::Up),
@@ -1050,6 +1347,14 @@ impl App {
                 Err(e) => self.error(e),
             },
             Action::ThumbDo(act) => self.thumb_action(act),
+            #[cfg(not(target_os = "macos"))]
+            Action::Pick(p) => self.picker = Some(*p),
+            #[cfg(not(target_os = "macos"))]
+            Action::ToggleFullscreen => {
+                let full = self.ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+                self.ctx
+                    .send_viewport_cmd(ViewportCommand::Fullscreen(!full));
+            }
             other => self.editor_action(other),
         }
     }
@@ -1115,8 +1420,8 @@ impl App {
     }
 
     /// The menu bar icon confirms a copy or a save with a check mark for a moment.
+    /// (Windows and Linux: the tray icon.)
     fn flash_tray(&mut self) {
-        #[cfg(target_os = "macos")]
         if let Some(s) = &mut self.shell {
             s.flash_done();
             self.ctx.request_repaint_after(std::time::Duration::from_millis(650));
@@ -1124,7 +1429,6 @@ impl App {
     }
 
     pub fn sync_shell(&mut self) {
-        #[cfg(target_os = "macos")]
         if let Some(s) = &mut self.shell {
             s.sync(&self.settings);
         }
@@ -1147,7 +1451,6 @@ impl App {
     }
 
     pub fn apply_hotkeys(&mut self) -> Vec<settings::HotkeyAction> {
-        #[cfg(target_os = "macos")]
         if let Some(s) = &mut self.shell {
             return s.apply_hotkeys(&self.settings);
         }
@@ -1182,6 +1485,9 @@ impl App {
                 .with_resizable(false)
                 .with_transparent(true)
                 .with_always_on_top();
+            // Windows and Linux: pins stay off the taskbar.
+            #[cfg(not(target_os = "macos"))]
+            let builder = builder.with_taskbar(false);
             let (shared, queue) = (pin.clone(), self.queue.clone());
             show_window(ctx, ViewportId::from_hash_of(("pin", id)), builder, move |ui| pin_window(ui, &mut shared.lock().unwrap(), &queue));
         }
@@ -1204,6 +1510,7 @@ impl App {
         let pos = egui::Pos2::from(sizing::thumb_origin((monitor.x, monitor.y), window));
         let builder = ViewportBuilder::default()
             .with_title("ShotCraft Preview")
+            .with_taskbar(false)
             .with_inner_size(size)
             .with_position(pos)
             .with_decorations(false)
@@ -1231,6 +1538,21 @@ impl App {
             ThumbAction::Close => {}
         }
         self.thumb = None;
+    }
+
+    /// Test hooks that draw a dialog in the main window: the window first takes the dialog's own
+    /// size, so the shot shows it as it opens.
+    #[cfg(not(target_os = "macos"))]
+    fn screenshot_window_size(&self, ui: &egui::Ui, size: [f32; 2]) {
+        if self
+            .screenshot
+            .as_ref()
+            .is_some_and(|(_, frames)| *frames < 2)
+        {
+            let s = egui::vec2(size[0], size[1]);
+            ui.ctx().send_viewport_cmd(ViewportCommand::MinInnerSize(s));
+            ui.ctx().send_viewport_cmd(ViewportCommand::InnerSize(s));
+        }
     }
 
     fn screenshot_tick(&mut self, ui: &mut egui::Ui) {
@@ -1505,13 +1827,17 @@ impl eframe::App for App {
                 self.ctx.request_repaint_after(again);
             }
         }
+        // Windows and Linux: the tray icon's check mark goes when its time is up.
+        #[cfg(not(target_os = "macos"))]
+        if let Some(again) = self.shell.as_mut().and_then(|s| s.tick_flash()) {
+            self.ctx.request_repaint_after(again);
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         if !self.started {
             self.started = true;
-            #[cfg(target_os = "macos")]
             if self.screenshot.is_none() {
                 self.shell = Some(shell::Shell::start(self.queue.clone(), ctx.clone(), &self.settings));
                 // Warm up: load the text model now, not on the first real OCR.
@@ -1529,7 +1855,11 @@ impl eframe::App for App {
             }
             if let Some(path) = self.open_at_start.take() {
                 match system::load_image_file(&path) {
+                    #[cfg(target_os = "macos")]
                     Ok(img) => self.open_image(img, 2.0, false),
+                    // Windows and Linux: a file opened at launch shows pixel for pixel.
+                    #[cfg(not(target_os = "macos"))]
+                    Ok(img) => self.open_image(img, 1.0, false),
                     Err(e) => self.error(e),
                 }
             }
@@ -1544,8 +1874,27 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             self.hide_window();
         }
+        // Test hook (Windows and Linux): draw the capture crosshair over the opened picture so
+        // --screenshot can show it.
+        #[cfg(not(target_os = "macos"))]
+        if let Some(kind) = self.screenshot.as_ref().and_then(|_| std::env::var("SHOTCRAFT_PICKER").ok()) {
+            self.picker_preview(ui, &kind);
+            self.screenshot_tick(ui);
+            return;
+        }
+        // Test hook (Windows and Linux): draw About or Keyboard Shortcuts in the main window so
+        // --screenshot can show it.
+        #[cfg(not(target_os = "macos"))]
+        if let Some(which) = self.screenshot.as_ref().and_then(|_| std::env::var("SHOTCRAFT_DIALOG").ok()) {
+            self.screenshot_window_size(ui, if which == "shortcuts" { editor::SHORTCUTS_SIZE } else { editor::ABOUT_SIZE });
+            editor::dialog_preview(ui, &which, &self.settings);
+            self.screenshot_tick(ui);
+            return;
+        }
         if let Some(tab) = self.screenshot.as_ref().and_then(|_| std::env::var("SHOTCRAFT_PREFS_TAB").ok()) {
             // Test hook: draw a Preferences tab in the main window so --screenshot can capture it.
+            #[cfg(not(target_os = "macos"))]
+            self.screenshot_window_size(ui, prefs::WINDOW);
             let mut p = self.prefs.lock().unwrap();
             p.tab = tab.parse().unwrap_or(0);
             p.body(ui);
@@ -1557,8 +1906,13 @@ impl eframe::App for App {
         self.sync_menu_state();
         self.pins_ui(&ctx);
         self.thumb_ui(&ctx);
+        #[cfg(target_os = "macos")]
         self.frozen_ui(&ctx);
         self.prefs_ui(&ctx);
+        #[cfg(not(target_os = "macos"))]
+        self.picker_ui(&ctx);
+        #[cfg(not(target_os = "macos"))]
+        self.keep_ui_alive(&ctx);
         self.settle_windows();
         self.screenshot_tick(ui);
     }
@@ -1568,10 +1922,42 @@ impl eframe::App for App {
     }
 }
 
+/// Windows and Linux: a GUI program has no console to print a panic to, so the message and backtrace go to
+/// crash.log next to settings.json (and stderr, when there is one).
+#[cfg(not(target_os = "macos"))]
+fn log_panics() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let text = format!(
+            "[{}] ShotCraft {}: {info}\n{backtrace}\n",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+            env!("CARGO_PKG_VERSION")
+        );
+        let dir = system::settings_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("crash.log"))
+        {
+            let _ = std::io::Write::write_all(&mut f, text.as_bytes());
+        }
+        default(info);
+    }));
+}
+
+// Windows and Linux return from their own block below, before the macOS start.
+#[cfg_attr(not(target_os = "macos"), allow(unreachable_code))]
 fn main() -> eframe::Result {
+    #[cfg(not(target_os = "macos"))]
+    log_panics();
     // Files left in the temporary folder by earlier drags.
     std::thread::spawn(dragout::sweep_stale);
     let args: Vec<String> = std::env::args().collect();
+    // Windows and Linux start the app with the link as its argument; nothing else of that launch is used.
+    #[cfg(not(target_os = "macos"))]
+    let (args, link) = links::split_args(args);
     #[cfg(target_os = "macos")]
     if args.iter().any(|a| a == "--check-updater") {
         match updater::check() {
@@ -1589,8 +1975,51 @@ fn main() -> eframe::Result {
     let launch = app_mode::Launch::parse(&args);
     let show_at_start = launch.shows_window();
     let app_mode::Launch { screenshot, open } = launch;
+    // macOS keeps one copy of an app running; elsewhere a second launch finds the first and quits.
+    // As on macOS, opening the app again while it runs does not open the editor.
+    #[cfg(not(target_os = "macos"))]
+    let instance = if screenshot.is_none() {
+        match single::Instance::claim() {
+            Some(i) => Some(i),
+            // A link goes to the copy that runs. Something else may hold the port: only a ShotCraft
+            // that answers counts.
+            None if link.as_deref().is_some_and(single::send_link) || single::ask_running(false) => return Ok(()),
+            None => None,
+        }
+    } else {
+        None
+    };
+    // This copy is the one that runs: the link waits in the inbox until the app is up.
+    #[cfg(not(target_os = "macos"))]
+    if let Some(link) = &link {
+        url_scheme::submit(link);
+    }
     // Test hook: size the main window like Preferences so --screenshot shows its real layout.
     let (size, min) = if std::env::var_os("SHOTCRAFT_PREFS_TAB").is_some() { (prefs::WINDOW, prefs::WINDOW) } else { ([1180.0, 760.0], [editor::MIN_W, editor::MIN_H]) };
+    // Windows and Linux: the editor starts out of sight when no window is wanted at launch (eframe
+    // shows it for its first frame whatever is asked), and the running copy answers later launches
+    // (`single`).
+    #[cfg(not(target_os = "macos"))]
+    {
+        let viewport = ViewportBuilder::default().with_title(EDITOR_TITLE).with_inner_size(size).with_min_inner_size(min).with_transparent(true);
+        let viewport = if show_at_start { viewport } else { viewport.with_position([-20_000.0, -20_000.0]) };
+        let viewport = match eframe::icon_data::from_png_bytes(include_bytes!("../assets/window-icon.png")) {
+            Ok(icon) => viewport.with_icon(Arc::new(icon)),
+            Err(_) => viewport,
+        };
+        let options = eframe::NativeOptions { viewport, ..Default::default() };
+        return eframe::run_native(
+            "ShotCraft",
+            options,
+            Box::new(move |cc| {
+                let app = App::new(cc, screenshot, show_at_start, open);
+                if let Some(i) = instance {
+                    i.listen(app.queue.clone(), app.ctx.clone(), url_scheme::submit);
+                }
+                Ok(Box::new(app))
+            }),
+        );
+    }
     let options = eframe::NativeOptions {
         viewport: ViewportBuilder::default()
             .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../assets/window-icon.png")).expect("window icon"))
@@ -1606,6 +2035,189 @@ fn main() -> eframe::Result {
     #[cfg(target_os = "macos")]
     let options = eframe::NativeOptions { event_loop_builder: Some(app_mode::event_loop_hook(show_at_start)), ..options };
     eframe::run_native("ShotCraft", options, Box::new(move |cc| Ok(Box::new(App::new(cc, screenshot, show_at_start, open)))))
+}
+
+/// One copy of ShotCraft per user session on Windows and Linux. The first copy listens on a
+/// loopback port; a second launch connects, asks it to show its window (or hands it the
+/// `shotcraft://` link it was started with), and quits.
+#[cfg(not(target_os = "macos"))]
+mod single {
+    use crate::{Action, Queue};
+    use std::io::{Read, Write};
+    use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
+    use std::time::Duration;
+
+    const PORT: u16 = 47_361;
+    const SHOW: &[u8] = b"shotcraft:show\n";
+    const PING: &[u8] = b"shotcraft:ping\n";
+    /// Then the link and a newline: the `shotcraft://` link a second launch was started with.
+    const LINK: &[u8] = b"shotcraft:link ";
+    const OK: &[u8] = b"shotcraft:ok\n";
+    /// The longest message read: a link as long as `url_scheme` takes, with its prefix and newline.
+    const MAX_MSG: usize = 4096 + 64;
+
+    pub struct Instance(TcpListener);
+
+    impl Instance {
+        pub fn claim() -> Option<Instance> {
+            Self::claim_on(PORT)
+        }
+
+        fn claim_on(port: u16) -> Option<Instance> {
+            TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))
+                .ok()
+                .map(Instance)
+        }
+
+        /// Answers later launches. `on_link` gets each link one hands over (the app passes
+        /// `url_scheme::submit`, which checks it like a link from anywhere else).
+        pub fn listen(self, queue: Queue, ctx: eframe::egui::Context, on_link: impl Fn(&str) + Send + 'static) {
+            std::thread::spawn(move || {
+                for stream in self.0.incoming() {
+                    let Ok(mut stream) = stream else { continue };
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                    let msg = read_message(&mut stream);
+                    let link = msg.strip_prefix(LINK).and_then(|l| l.strip_suffix(b"\n")).and_then(|l| std::str::from_utf8(l).ok());
+                    // The link is queued before the answer, so a launch that quits on it loses nothing.
+                    if let Some(link) = link {
+                        on_link(link);
+                    }
+                    if msg == SHOW || msg == PING || link.is_some() {
+                        let _ = stream.write_all(OK);
+                    }
+                    if msg == SHOW {
+                        queue
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .push(Action::Show);
+                        ctx.request_repaint();
+                    }
+                }
+            });
+        }
+    }
+
+    /// One message: up to and including its newline, never more than `MAX_MSG` bytes, and only
+    /// what arrives within the read timeout.
+    fn read_message(s: &mut impl Read) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut buf = [0u8; 512];
+        while out.len() < MAX_MSG && !out.contains(&b'\n') {
+            match s.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => out.extend_from_slice(buf.get(..n).unwrap_or_default()),
+            }
+        }
+        out.truncate(MAX_MSG);
+        out
+    }
+
+    /// True when a ShotCraft answered; `show` also brings its window up.
+    pub fn ask_running(show: bool) -> bool {
+        ask_on(PORT, show)
+    }
+
+    fn ask_on(port: u16, show: bool) -> bool {
+        exchange(port, if show { SHOW } else { PING })
+    }
+
+    /// Hands a link to the ShotCraft that is running; true when it took it.
+    pub fn send_link(link: &str) -> bool {
+        send_link_on(PORT, link)
+    }
+
+    fn send_link_on(port: u16, link: &str) -> bool {
+        if link.contains('\n') || link.len() + LINK.len() + 1 > MAX_MSG {
+            return false;
+        }
+        let mut msg = LINK.to_vec();
+        msg.extend_from_slice(link.as_bytes());
+        msg.push(b'\n');
+        exchange(port, &msg)
+    }
+
+    fn exchange(port: u16, msg: &[u8]) -> bool {
+        let Ok(mut s) = TcpStream::connect_timeout(
+            &SocketAddrV4::new(Ipv4Addr::LOCALHOST, port).into(),
+            Duration::from_secs(2),
+        ) else {
+            return false;
+        };
+        let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+        if s.write_all(msg).is_err() {
+            return false;
+        }
+        let mut buf = [0u8; 32];
+        let n = s.read(&mut buf).unwrap_or(0);
+        buf.get(..n) == Some(OK)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_second_launch_finds_the_first_and_shows_it() {
+            let port = 47_362;
+            let first = Instance::claim_on(port).expect("port free");
+            assert!(
+                Instance::claim_on(port).is_none(),
+                "only one copy holds the port"
+            );
+            let queue = crate::Queue::default();
+            first.listen(queue.clone(), eframe::egui::Context::default(), |_| {});
+            assert!(ask_on(port, false), "a ping is answered");
+            assert!(
+                queue.lock().map(|q| q.is_empty()).unwrap_or(false),
+                "a ping doesn't show the window"
+            );
+            assert!(ask_on(port, true));
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while queue.lock().map(|q| q.is_empty()).unwrap_or(true)
+                && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(matches!(
+                queue.lock().expect("queue").first(),
+                Some(Action::Show)
+            ));
+        }
+
+        #[test]
+        fn a_second_launch_hands_its_link_to_the_first() {
+            let port = 47_365;
+            let first = Instance::claim_on(port).expect("port free");
+            let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+            let sink = got.clone();
+            let queue = crate::Queue::default();
+            first.listen(queue.clone(), eframe::egui::Context::default(), move |l| sink.lock().expect("links").push(l.to_string()));
+            // Longer than one read, so the listener has to put it together.
+            let long = format!("shotcraft://load/file?path=C:%5C{}.png", "a".repeat(1500));
+            assert!(send_link_on(port, "shotcraft://grab/area"));
+            assert!(send_link_on(port, &long));
+            assert_eq!(*got.lock().expect("links"), vec!["shotcraft://grab/area".to_string(), long]);
+            assert!(queue.lock().map(|q| q.is_empty()).unwrap_or(false), "a link doesn't show the window by itself");
+            // A newline would end the message early and start another: such a link is never sent.
+            assert!(!send_link_on(port, "shotcraft://grab/area\nshotcraft:show"));
+            assert!(!send_link_on(port, &format!("shotcraft://{}", "x".repeat(MAX_MSG))), "too long");
+            assert_eq!(got.lock().expect("links").len(), 2);
+        }
+
+        #[test]
+        fn a_port_held_by_something_else_is_not_shotcraft() {
+            let port = 47_363;
+            let other =
+                TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)).expect("port free");
+            std::thread::spawn(move || {
+                if let Ok((mut s, _)) = other.accept() {
+                    let _ = s.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n");
+                }
+            });
+            assert!(!ask_on(port, true));
+            assert!(!ask_on(47_364, true), "nothing listening");
+        }
+    }
 }
 
 #[cfg(test)]

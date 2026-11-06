@@ -254,6 +254,15 @@ impl Tool {
         t.split(" (").next().unwrap_or(t)
     }
 
+    /// The letter that picks the tool, as its tooltip shows it ("Arrow (A)" → 'a'). A test checks that
+    /// `from_key` answers to the same letters.
+    pub fn key(self) -> Option<char> {
+        let (_, k) = self.tooltip().strip_suffix(')')?.rsplit_once(" (")?;
+        let mut chars = k.chars();
+        let c = chars.next().filter(|c| c.is_ascii_alphabetic())?;
+        chars.next().is_none().then(|| c.to_ascii_lowercase())
+    }
+
     pub fn from_key(c: char) -> Option<Tool> {
         Some(match c {
             'a' => Tool::Arrow,
@@ -1153,6 +1162,17 @@ impl Doc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The letter in each tool's tooltip (the Keyboard Shortcuts list reads it) is the one
+    /// `from_key` answers to.
+    #[test]
+    fn tooltip_letters_and_from_key_agree() {
+        for t in Tool::TOOLBAR {
+            if let Some(c) = t.key() {
+                assert_eq!(Tool::from_key(c), Some(t), "{c}");
+            }
+        }
+    }
 
     #[test]
     fn a_hand_edited_backdrop_is_brought_back_in_range() {
