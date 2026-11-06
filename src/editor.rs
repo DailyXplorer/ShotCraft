@@ -3091,6 +3091,14 @@ fn about_body(ui: &mut Ui, t: &Th) {
         .size(11.0)
         .color(t.dim),
     );
+    // The Linux build carries the Ocrs models: their attribution, as their authors word it
+    // (assets/ocr/README.md).
+    #[cfg(target_os = "linux")]
+    ui.label(
+        egui::RichText::new("Text recognition: ocrs (MIT/Apache-2.0) with the Ocrs models (github.com/robertknight/ocrs-models), trained on the HierText dataset by Google Research. Licensed under CC BY-SA 4.0.")
+            .size(11.0)
+            .color(t.dim),
+    );
 }
 
 /// The Keyboard Shortcuts window, from the command table: the menus' keys on the left; the keys of

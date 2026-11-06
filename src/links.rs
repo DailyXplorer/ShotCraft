@@ -1,8 +1,8 @@
 //! Windows and Linux: how `shotcraft://` links reach the app (macOS: Apple events, `url_scheme`).
 //!
 //! The system hands a link to a program by starting it with the link as its argument, so the link
-//! type has to be registered for this user: under `HKCU\Software\Classes\shotcraft` on Windows
-//! (Linux: not yet). macOS registers it in the app bundle;
+//! type has to be registered for this user: under `HKCU\Software\Classes\shotcraft` on Windows, as
+//! a desktop entry for `x-scheme-handler/shotcraft` on Linux. macOS registers it in the app bundle;
 //! a portable exe has no installer to do it, so ShotCraft registers it itself, and only while
 //! Preferences ▸ Advanced ▸ Automation allows links. Switching that off removes the registration.
 //!
@@ -82,9 +82,42 @@ fn is_ours(command: &str) -> bool {
     command.to_ascii_lowercase().contains("shotcraft")
 }
 
-/// Linux: links aren't registered yet.
+/// The desktop entry's file name, which `xdg-mime` takes to make it the handler.
 #[cfg(target_os = "linux")]
-pub fn set_registered(_on: bool) {}
+const DESKTOP_FILE: &str = "shotcraft-links.desktop";
+
+/// Registers the link type for this user (`on`), or removes the registration.
+#[cfg(target_os = "linux")]
+pub fn set_registered(on: bool) {
+    let path = desktop_dir().join(DESKTOP_FILE);
+    if !on {
+        // The default left in mimeapps.list names a file that is gone: desktops skip it.
+        let _ = std::fs::remove_file(path);
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else { return };
+    let written = std::fs::create_dir_all(desktop_dir()).and_then(|()| std::fs::write(&path, desktop_entry(&exe)));
+    if let Err(e) = written {
+        eprintln!("shotcraft:// links: could not register them: {e}");
+        return;
+    }
+    // Make the entry the handler (xdg-utils is on every freedesktop system). Without it, desktops
+    // that read MimeType from the entries still find it.
+    let _ = std::process::Command::new("xdg-mime").args(["default", DESKTOP_FILE, "x-scheme-handler/shotcraft"]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+}
+
+#[cfg(target_os = "linux")]
+fn desktop_dir() -> std::path::PathBuf {
+    dirs::data_dir().or_else(|| dirs::home_dir().map(|h| h.join(".local/share"))).unwrap_or_default().join("applications")
+}
+
+/// A desktop entry that handles `shotcraft://` and shows in no menu (`%u`: the link).
+#[cfg(target_os = "linux")]
+fn desktop_entry(exe: &std::path::Path) -> String {
+    // Exec quoting (freedesktop Desktop Entry spec): backslash, quote, backtick and $ are escaped.
+    let quoted: String = exe.display().to_string().chars().flat_map(|c| if matches!(c, '\\' | '"' | '`' | '$') { vec!['\\', c] } else { vec![c] }).collect();
+    format!("[Desktop Entry]\nType=Application\nName=ShotCraft\nComment=Opens shotcraft:// links\nExec=\"{quoted}\" %u\nMimeType=x-scheme-handler/shotcraft;\nNoDisplay=true\nTerminal=false\n")
+}
 
 #[cfg(test)]
 mod tests {
@@ -150,5 +183,14 @@ mod tests {
         assert!(hkcu.open_subkey(&key).is_ok(), "another program's registration stays");
         let _ = hkcu.delete_subkey_all(&key);
         let _ = hkcu.delete_subkey(r"Software\ShotCraft-tests");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_desktop_entry_handles_the_links_and_quotes_the_path() {
+        let entry = desktop_entry(std::path::Path::new("/opt/Shot \"Craft\"/$bin"));
+        assert!(entry.contains("Exec=\"/opt/Shot \\\"Craft\\\"/\\$bin\" %u\n"), "{entry}");
+        assert!(entry.contains("MimeType=x-scheme-handler/shotcraft;\n"));
+        assert!(entry.contains("NoDisplay=true\n"));
     }
 }

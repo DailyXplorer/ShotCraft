@@ -651,9 +651,47 @@ fn autostart_command(exe: &Path) -> String {
     format!("\"{}\" --background", exe.display())
 }
 
-/// Linux: not yet.
+/// Linux: a desktop entry in ~/.config/autostart, which every freedesktop session starts.
 #[cfg(target_os = "linux")]
-pub fn set_autostart(_on: bool) {}
+pub fn set_autostart(on: bool) {
+    let path = autostart_file();
+    if !on {
+        let _ = std::fs::remove_file(path);
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, autostart_entry(&exe));
+}
+
+#[cfg(target_os = "linux")]
+fn autostart_file() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| home().join(".config"))
+        .join("autostart/shotcraft.desktop")
+}
+
+#[cfg(target_os = "linux")]
+fn autostart_entry(exe: &Path) -> String {
+    // Exec quoting (freedesktop Desktop Entry spec): backslash, quote, backtick and $ are escaped.
+    let quoted: String = exe
+        .display()
+        .to_string()
+        .chars()
+        .flat_map(|c| {
+            if matches!(c, '\\' | '"' | '`' | '$') {
+                vec!['\\', c]
+            } else {
+                vec![c]
+            }
+        })
+        .collect();
+    format!("[Desktop Entry]\nType=Application\nName=ShotCraft\nComment=Screenshots: capture, annotate, blur, measure, read text and pin\nExec=\"{quoted}\" --background\nTerminal=false\nX-GNOME-Autostart-enabled=true\n")
+}
 
 
 /// Windows 11: whether the user put the tray icon of the program at `exe` on the taskbar
@@ -777,6 +815,19 @@ pub fn text_boxes(img: &Image) -> Vec<R> {
 #[cfg(not(target_os = "macos"))]
 pub fn recognize_in(img: &Image, _language: &str) -> Result<OcrResult, String> {
     crate::ocr::recognize(img)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_tests {
+    #[test]
+    fn autostart_entry_quotes_the_path() {
+        let entry = super::autostart_entry(std::path::Path::new("/opt/Shot \"Craft\"/$bin"));
+        assert!(
+            entry.contains("Exec=\"/opt/Shot \\\"Craft\\\"/\\$bin\" --background\n"),
+            "{entry}"
+        );
+        assert!(entry.starts_with("[Desktop Entry]\n"));
+    }
 }
 
 #[cfg(all(test, target_os = "windows"))]

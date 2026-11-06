@@ -4,10 +4,8 @@
 mod app_mode;
 // Windows and Linux: screen capture and its crosshair, text recognition, links, the menus and the
 // dialogs (macOS: `screencapture`, Vision, the menu bar and the editor's own windows).
-#[cfg_attr(target_os = "linux", allow(dead_code))] // Linux: parts wait for its backend
 #[cfg(not(target_os = "macos"))]
 mod capture;
-#[cfg_attr(target_os = "linux", allow(dead_code))] // Linux: the tray parts wait for its tray
 #[cfg(not(target_os = "macos"))]
 mod commands;
 #[cfg(not(target_os = "macos"))]
@@ -53,7 +51,6 @@ mod tiled;
 mod shell;
 // Windows and Linux: the tray and the hotkeys (macOS: upstream's shell.rs).
 #[cfg(not(target_os = "macos"))]
-#[cfg_attr(target_os = "linux", allow(dead_code))] // Linux: parts wait for its tray
 #[path = "shell_other.rs"]
 mod shell;
 #[cfg(target_os = "macos")]

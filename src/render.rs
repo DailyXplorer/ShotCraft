@@ -2077,8 +2077,8 @@ mod tests {
         }
     }
 
-    /// Windows: the same, with Windows' own OCR.
-    #[cfg(target_os = "windows")]
+    /// Windows and Linux: the same, with Windows' own OCR and ocrs.
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn ocr_reads_text_from_a_picture_off_macos() {
         let fonts = Fonts::load();
@@ -2112,8 +2112,8 @@ mod tests {
         assert!(boxes[0].y0 > 220.0 && boxes[0].y1 < 400.0, "box is near the text and counted from the top: {:?}", boxes[0]);
     }
 
-    /// Windows: the same, with Windows' own OCR.
-    #[cfg(target_os = "windows")]
+    /// Windows and Linux: the same, with their recognizers (Windows' own OCR, ocrs).
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn finds_text_for_blur_text_off_macos() {
         let fonts = Fonts::load();

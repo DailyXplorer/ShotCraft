@@ -426,7 +426,7 @@ impl PrefsState {
         });
         // Windows and Linux draw the pointer into every capture but the Wayland desktop's own (its portal decides).
         #[cfg(not(target_os = "macos"))]
-        let pointer_tip = "Every capture, where the pointer was when it began.";
+        let pointer_tip = if cfg!(target_os = "linux") { "Every capture, where the pointer was when it began. Not on Wayland, where the desktop takes the screenshot." } else { "Every capture, where the pointer was when it began." };
         #[cfg(not(target_os = "macos"))]
         tip_row(ui, "Mouse pointer", pointer_tip, |ui| {
             ui.checkbox(&mut s.capture_cursor, "Include it in screenshots");

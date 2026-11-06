@@ -7,35 +7,34 @@ The macOS build runs the author's code. What Windows and Linux need sits beside 
 `#[cfg(not(target_os = "macos"))]`; of the author's lines, only some `#[cfg(target_os = "macos")]` gates went, where
 a feature now works everywhere (scrolling capture, the capture thread), and the non-macOS placeholders the ports
 replace. Everything added is Rust. System features go through Rust bindings (the `windows` crate on
-Windows), as the Mac build does with `objc2`. On Linux the shared parts build and run; its capture, tray, text
-recognition, links and login item are placeholders until the Linux pull request.
+Windows, pure-Rust X11 and D-Bus crates on Linux), as the Mac build does with `objc2`.
 
 ## What replaces what
 
-| On macOS | On Windows |
-|---|---|
-| `screencapture` (full screen, delayed, repeat area) | `xcap` (GDI) |
-| `screencapture -i` crosshair (area, window, Space to switch) | `src/picker.rs`: a borderless full-screen window per screen over the frozen picture, with a magnifier, size readout, Space and Esc |
-| Window capture | the window's own pixels (`PrintWindow` through xcap), even when covered |
-| Vision text recognition | `Windows.Media.Ocr`, every language with its OCR feature installed |
-| Vision barcodes | `rxing` (QR, Aztec, Data Matrix, PDF417, 1D codes) |
-| Menu bar icon | tray icon (`tray-icon`) |
-| App menu bar | the same menus in a menu bar across the top of the editor (ShotCraft, Capture, File, Edit, Draw, Zoom, Help) |
-| ⌘ shortcuts | Ctrl (shown as Ctrl+…) |
-| Global hotkeys (`global-hotkey`) | same crate |
-| `osascript` notification | Windows toast (`notify-rust`) |
-| LaunchAgent login item | `HKCU\…\Run` value |
-| `shotcraft://` links: the bundle declares the scheme, links arrive as Apple events | registered under `HKCU\Software\Classes\shotcraft` while Preferences ▸ Advanced ▸ Automation allows links (removed when switched off); the link is the launch's one argument, and a second launch hands it to the running copy |
-| Mouse pointer in screenshots (`screencapture -C`) | the cursor drawn in by GDI (`DrawIconEx` on black and on white gives its alpha, and the pixels that invert, like the I-beam's) |
-| Scrolling capture: `screencapture -i` for the area, `screencapture -R` per look, wheel events (Accessibility permission) | the area drawn on the frozen screens (`picker`, `for_scrolling`), `xcap` `capture_region` per look, `SendInput` wheel events at 120 per ~100 points (no permission needed); Esc is a global hotkey while it runs |
-| Drag the image out (toolbar handle): an `NSDraggingSession` with the PNG's file URL | the shell's data object for the PNG (what Explorer drags) and `SHDoDragDrop`, which draws the drag picture; the temporary file stays 10 minutes (Explorer may copy it after the drop) |
-| Print (`NSPrintOperation`, the system print panel) | the system print dialog (`PrintDlgW`), then GDI: the picture on one page, laid out by upstream's `print_layout` (on-screen size, shrunk to fit, centred, landscape when wider than tall), see-through parts on white |
-| Window Screenshot Background ▸ Wallpaper (the window capture comes with its shadow; the display's desktop picture behind it) | a shadow drawn like macOS's (`capture::with_shadow`: 30/30/20/46 points, blurred, falling down), then upstream's `windowbg` places it on the desktop picture (`SPI_GETDESKWALLPAPER`) as Windows' Fill lays it out; no picture → the solid colour, with a notice |
-| Menu bar icon flash after a copy or a save (`menubar-done.png` for 0.6 s) | the tray icon's viewfinder with a check mark in place of the dot, for upstream's 0.6 s (`tray_flash`) |
-| `~/Library/Application Support/ShotCraft` | `%APPDATA%\ShotCraft` |
-| Chalkboard / Comic Sans for hand-drawn text | Comic Sans (`C:\Windows\Fonts\comicbd.ttf`) |
-| One copy per user (LaunchServices) | a second launch shows the first copy's window and quits |
-| Dock icon | window and taskbar icon from `AppIcon.icns` (`ic08`) |
+| On macOS | On Windows | On Linux |
+|---|---|---|
+| `screencapture` (full screen, delayed, repeat area) | `xcap` (GDI) | X11: `x11rb` GetImage per RandR monitor. Wayland: the desktop's screenshot portal (`ashpd`) |
+| `screencapture -i` crosshair (area, window, Space to switch) | `src/picker.rs`: a borderless full-screen window per screen over the frozen picture, with a magnifier, size readout, Space and Esc | Same on X11. Wayland: the portal's own picker |
+| Window capture | the window's own pixels (`PrintWindow` through xcap), even when covered | what the frozen screen shows inside the window's frame |
+| Vision text recognition | `Windows.Media.Ocr`, every language with its OCR feature installed | `ocrs` with built-in models (Latin script) |
+| Vision barcodes | `rxing` (QR, Aztec, Data Matrix, PDF417, 1D codes) | `rxing` |
+| Menu bar icon | tray icon (`tray-icon`) | StatusNotifierItem tray (`ksni`) |
+| App menu bar | the same menus in a menu bar across the top of the editor (ShotCraft, Capture, File, Edit, Draw, Zoom, Help) | same |
+| ⌘ shortcuts | Ctrl (shown as Ctrl+…) | Ctrl |
+| Global hotkeys (`global-hotkey`) | same crate | same crate (X11 sessions) |
+| `osascript` notification | Windows toast (`notify-rust`) | desktop notification over D-Bus (`notify-rust`) |
+| LaunchAgent login item | `HKCU\…\Run` value | `~/.config/autostart/shotcraft.desktop` |
+| `shotcraft://` links: the bundle declares the scheme, links arrive as Apple events | registered under `HKCU\Software\Classes\shotcraft` while Preferences ▸ Advanced ▸ Automation allows links (removed when switched off); the link is the launch's one argument, and a second launch hands it to the running copy | a desktop entry `~/.local/share/applications/shotcraft-links.desktop` for `x-scheme-handler/shotcraft`, made the handler with `xdg-mime`, same switch |
+| Mouse pointer in screenshots (`screencapture -C`) | the cursor drawn in by GDI (`DrawIconEx` on black and on white gives its alpha, and the pixels that invert, like the I-beam's) | X11: XFixes `GetCursorImage`. Wayland: not available (the portal takes the screenshot) |
+| Scrolling capture: `screencapture -i` for the area, `screencapture -R` per look, wheel events (Accessibility permission) | the area drawn on the frozen screens (`picker`, `for_scrolling`), `xcap` `capture_region` per look, `SendInput` wheel events at 120 per ~100 points (no permission needed); Esc is a global hotkey while it runs | X11: same picker, `GetImage` of the area, XTest wheel clicks (buttons 4/5, ~50 px each). Wayland: not available (apps can't see the screen) |
+| Drag the image out (toolbar handle): an `NSDraggingSession` with the PNG's file URL | the shell's data object for the PNG (what Explorer drags) and `SHDoDragDrop`, which draws the drag picture; the temporary file stays 10 minutes (Explorer may copy it after the drop) | not yet (needs GTK or the X drag protocol); the handle says so |
+| Print (`NSPrintOperation`, the system print panel) | the system print dialog (`PrintDlgW`), then GDI: the picture on one page, laid out by upstream's `print_layout` (on-screen size, shrunk to fit, centred, landscape when wider than tall), see-through parts on white | not yet (CUPS or a GTK dialog) |
+| Window Screenshot Background ▸ Wallpaper (the window capture comes with its shadow; the display's desktop picture behind it) | a shadow drawn like macOS's (`capture::with_shadow`: 30/30/20/46 points, blurred, falling down), then upstream's `windowbg` places it on the desktop picture (`SPI_GETDESKWALLPAPER`) as Windows' Fill lays it out; no picture → the solid colour, with a notice | the same, the picture from GNOME's settings (`gsettings`, light or dark) |
+| Menu bar icon flash after a copy or a save (`menubar-done.png` for 0.6 s) | the tray icon's viewfinder with a check mark in place of the dot, for upstream's 0.6 s (`tray_flash`) | the same, on the StatusNotifierItem |
+| `~/Library/Application Support/ShotCraft` | `%APPDATA%\ShotCraft` | `~/.config/ShotCraft` |
+| Chalkboard / Comic Sans for hand-drawn text | Comic Sans (`C:\Windows\Fonts\comicbd.ttf`) | Comic Sans or Comic Neue if installed, else DM Sans |
+| One copy per user (LaunchServices) | a second launch shows the first copy's window and quits | same |
+| Dock icon | window and taskbar icon from `AppIcon.icns` (`ic08`) | same |
 
 ## Building
 
@@ -45,11 +44,18 @@ cargo build --release
 
 - **Windows 10/11:** nothing else needed. Text recognition uses the languages installed in Settings → Time &
   language → Language & region (each language's *Optical character recognition* feature).
+- **Linux:** a desktop with a StatusNotifierItem host for the tray (KDE, most others; GNOME needs the AppIndicator
+  extension) and `xdg-desktop-portal` for Wayland screenshots. No C libraries are linked: X11 and Wayland libraries
+  are loaded at run time.
 
 Start it hidden in the tray with `--background`, as the login item does.
 
 ## Known differences
 
+- **Wayland:** apps can't read the screen, so Area and Window use the desktop's own picker, Repeat Area isn't
+  available, and global hotkeys work only in X11 sessions.
+- **Linux text recognition** reads Latin script only (ocrs's models). Windows reads every installed OCR language.
+- **Window capture on Linux** shows what was on screen, so a covered part of the window is whatever covered it.
 - The Mac-only option "Trim shadow" is hidden: Windows and Linux capture a window without a shadow (Wallpaper draws one).
 - **Updates:** Sparkle (Check for Updates…) is macOS-only; Windows and Linux builds have no updater and never
   connect to anything.
@@ -58,9 +64,11 @@ Start it hidden in the tray with `--background`, as the login item does.
   the editor either, and the tray menu now holds every command (Current Image: Undo, Redo, Reset Crop, Rasterize, Save
   As; About; Keyboard Shortcuts), as macOS has no other menu to offer. The tray icon can be hidden only while the Show
   ShotCraft hotkey works.
-- **Active Window and All Displays** (new in the macOS app) work on Windows through the same `targets.rs` the
+- **Active Window and All Displays** (new in the macOS app) work on Windows and X11 through the same `targets.rs` the
   macOS build uses: `capture::snapshot` reads the displays (in pixels), the pointer and the focused window, and
-  `targets::resolve` decides. Fullscreen and Delayed take the screen under the pointer.
+  `targets::resolve` decides. Fullscreen and Delayed take the screen under the pointer. On Wayland the desktop's own
+  screenshot dialog opens instead (it can't be asked for the active window), and All Displays is its full-desktop
+  screenshot.
 - The default hotkeys ⌃⌥⌘W (active window) and ⌃⌥⌘O (text recognition) are Ctrl+Shift+3 and Ctrl+Shift+4 on Windows and Linux, after
   Fullscreen (Ctrl+Shift+1) and Area (Ctrl+Shift+2). Not ⌘ → Ctrl (Ctrl+Alt+O is AltGr+O on many keyboard layouts, which types
   a letter), and not Ctrl+Alt+Win, which is awkward to press.
@@ -85,10 +93,15 @@ shortcut finds its own command.
 
 ## Credits
 
+- [ocrs](https://github.com/robertknight/ocrs) (MIT/Apache-2.0) and its default models
+  ([ocrs-models](https://github.com/robertknight/ocrs-models), CC BY-SA 4.0, trained on HierText by Google Research), in
+  `assets/ocr/`, unchanged: licence text in `assets/ocr/LICENSE.txt`, attribution, sources and checksums in
+  `assets/ocr/README.md` (checked against the published files on 2026-11-06). The Linux About window shows the attribution.
 - [xcap](https://github.com/nashaofu/xcap) (Apache-2.0), [rxing](https://github.com/rxing-core/rxing) (Apache-2.0),
-  [notify-rust](https://github.com/hoodie/notify-rust) (MIT/Apache-2.0), [winreg](https://github.com/gentoo90/winreg-rs)
-  (MIT), [dirs](https://github.com/dirs-dev/dirs-rs) (MIT/Apache-2.0), [windows](https://github.com/microsoft/windows-rs)
-  (MIT/Apache-2.0).
+  [ksni](https://github.com/iovxw/ksni) (Unlicense), [ashpd](https://github.com/bilelmoussaoui/ashpd) (MIT),
+  [x11rb](https://github.com/psychon/x11rb) (MIT/Apache-2.0), [notify-rust](https://github.com/hoodie/notify-rust)
+  (MIT/Apache-2.0), [winreg](https://github.com/gentoo90/winreg-rs) (MIT), [dirs](https://github.com/dirs-dev/dirs-rs)
+  (MIT/Apache-2.0), [windows](https://github.com/microsoft/windows-rs) (MIT/Apache-2.0).
 - Menu icons drawn for this port, in the same 24-px outline style: `assets/icons/folder.svg`, `info.svg`,
   `timer.svg`, `window.svg`, `display.svg`, `undo.svg`, `redo.svg`, `zoom_in.svg`, `zoom_out.svg`.
 
