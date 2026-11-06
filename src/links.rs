@@ -1,8 +1,8 @@
 //! Windows and Linux: how `shotcraft://` links reach the app (macOS: Apple events, `url_scheme`).
 //!
 //! The system hands a link to a program by starting it with the link as its argument, so the link
-//! type has to be registered for this user (not yet: the Windows and Linux backends do it). macOS
-//! registers it in the app bundle;
+//! type has to be registered for this user: under `HKCU\Software\Classes\shotcraft` on Windows
+//! (Linux: not yet). macOS registers it in the app bundle;
 //! a portable exe has no installer to do it, so ShotCraft registers it itself, and only while
 //! Preferences ▸ Advanced ▸ Automation allows links. Switching that off removes the registration.
 //!
@@ -34,8 +34,56 @@ pub fn refresh(allowed: bool) {
     }
 }
 
-/// A placeholder until the Windows and Linux backends arrive: links aren't registered yet.
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+const KEY: &str = r"Software\Classes\shotcraft";
+
+/// Registers the link type for this user (`on`), or removes the registration.
+#[cfg(target_os = "windows")]
+pub fn set_registered(on: bool) {
+    let result = match (on, std::env::current_exe()) {
+        (false, _) => unregister_at(KEY),
+        (true, Ok(exe)) => register_at(KEY, &exe),
+        (true, Err(e)) => Err(e),
+    };
+    if let Err(e) = result {
+        eprintln!("shotcraft:// links: the registration could not be changed: {e}");
+    }
+}
+
+/// Writes the registration under `key` (in HKCU): the scheme, its icon and the command.
+#[cfg(target_os = "windows")]
+fn register_at(key: &str, exe: &std::path::Path) -> std::io::Result<()> {
+    let (k, _) = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER).create_subkey(key)?;
+    k.set_value("", &"URL:ShotCraft link")?;
+    k.set_value("URL Protocol", &"")?;
+    k.create_subkey("DefaultIcon")?.0.set_value("", &format!("\"{}\",0", exe.display()))?;
+    k.create_subkey(r"shell\open\command")?.0.set_value("", &command(exe))
+}
+
+/// Removes the registration under `key`, only when it starts ShotCraft: one another program made stays.
+#[cfg(target_os = "windows")]
+fn unregister_at(key: &str) -> std::io::Result<()> {
+    let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
+    let command: Option<String> = hkcu.open_subkey(format!(r"{key}\shell\open\command")).and_then(|k| k.get_value("")).ok();
+    if command.is_some_and(|c| is_ours(&c)) {
+        hkcu.delete_subkey_all(key)?;
+    }
+    Ok(())
+}
+
+/// What Windows runs for a link: ShotCraft with the link as its one argument.
+#[cfg(target_os = "windows")]
+fn command(exe: &std::path::Path) -> String {
+    format!("\"{}\" \"%1\"", exe.display())
+}
+
+#[cfg(target_os = "windows")]
+fn is_ours(command: &str) -> bool {
+    command.to_ascii_lowercase().contains("shotcraft")
+}
+
+/// Linux: links aren't registered yet.
+#[cfg(target_os = "linux")]
 pub fn set_registered(_on: bool) {}
 
 #[cfg(test)]
@@ -66,5 +114,41 @@ mod tests {
         assert_eq!((rest, link.as_deref()), (args(&["shotcraft"]), Some("shotcraft://show")));
         // The program's own name is never taken for a link.
         assert_eq!(split_args(args(&["shotcraft:"])).1, None);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_runs_shotcraft_with_the_link_as_its_one_argument() {
+        let exe = std::path::Path::new(r"C:\Program Files\ShotCraft\shotcraft.exe");
+        assert_eq!(command(exe), r#""C:\Program Files\ShotCraft\shotcraft.exe" "%1""#);
+        assert!(is_ours(&command(exe)));
+        assert!(!is_ours(r#""C:\Tools\other.exe" "%1""#), "another program's registration stays");
+    }
+
+    /// Writes and removes a registration under a key of its own (not under Classes, so it
+    /// registers nothing), and leaves another program's registration alone.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_registration_is_written_read_back_and_removed() {
+        use winreg::enums::HKEY_CURRENT_USER;
+        let hkcu = winreg::RegKey::predef(HKEY_CURRENT_USER);
+        let key = format!(r"Software\ShotCraft-tests\links-{}", std::process::id());
+        let exe = std::path::Path::new(r"C:\Tools\ShotCraft\shotcraft.exe");
+        register_at(&key, exe).expect("written");
+        let k = hkcu.open_subkey(&key).expect("key");
+        assert_eq!(k.get_value::<String, _>("URL Protocol").expect("marker"), "");
+        let cmd: String = k.open_subkey(r"shell\open\command").and_then(|c| c.get_value("")).expect("command");
+        assert_eq!(cmd, command(exe));
+        drop(k);
+        unregister_at(&key).expect("removed");
+        assert!(hkcu.open_subkey(&key).is_err(), "the registration is gone");
+        // Someone else's: kept.
+        let (other, _) = hkcu.create_subkey(format!(r"{key}\shell\open\command")).expect("other");
+        other.set_value("", &r#""C:\Tools\other.exe" "%1""#).expect("other command");
+        drop(other);
+        unregister_at(&key).expect("nothing to do");
+        assert!(hkcu.open_subkey(&key).is_ok(), "another program's registration stays");
+        let _ = hkcu.delete_subkey_all(&key);
+        let _ = hkcu.delete_subkey(r"Software\ShotCraft-tests");
     }
 }

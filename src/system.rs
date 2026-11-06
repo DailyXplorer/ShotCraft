@@ -71,7 +71,8 @@ pub struct CaptureOptions {
     pub window_bg: WindowBg,
     /// The colour of `WindowBg::Solid`, and what Wallpaper falls back to.
     pub solid_color: [u8; 3],
-    /// The editor's pixels per point.
+    /// The editor's pixels per point. Windows reads each screen's own scale instead.
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub scale: f32,
     /// The mouse pointer is in the picture of captures that take no selection.
     pub cursor: bool,
@@ -625,10 +626,53 @@ pub fn refresh_autostart(on: bool) {
     }
 }
 
-/// A placeholder until the Windows and Linux backends arrive: no login item yet.
-#[cfg(not(target_os = "macos"))]
+/// Windows: a value under HKCU\…\Run, which starts ShotCraft hidden when the user signs in.
+#[cfg(target_os = "windows")]
+pub fn set_autostart(on: bool) {
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_SET_VALUE};
+    let Ok(run) = winreg::RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(
+        r"Software\Microsoft\Windows\CurrentVersion\Run",
+        KEY_SET_VALUE,
+    ) else {
+        return;
+    };
+    if !on {
+        let _ = run.delete_value("ShotCraft");
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let _ = run.set_value("ShotCraft", &autostart_command(&exe));
+}
+
+#[cfg(target_os = "windows")]
+fn autostart_command(exe: &Path) -> String {
+    format!("\"{}\" --background", exe.display())
+}
+
+/// Linux: not yet.
+#[cfg(target_os = "linux")]
 pub fn set_autostart(_on: bool) {}
 
+
+/// Windows 11: whether the user put the tray icon of the program at `exe` on the taskbar
+/// (Settings > Personalization > Taskbar > Other system tray icons). None when Windows keeps no
+/// record of it yet (Windows 10, or an icon it hasn't seen). Only reads the registry.
+#[cfg(target_os = "windows")]
+pub fn tray_icon_promoted(exe: &Path) -> Option<bool> {
+    use winreg::enums::HKEY_CURRENT_USER;
+    let root = winreg::RegKey::predef(HKEY_CURRENT_USER).open_subkey(r"Control Panel\NotifyIconSettings").ok()?;
+    let want = exe.to_string_lossy().to_lowercase();
+    for name in root.enum_keys().flatten() {
+        let Ok(key) = root.open_subkey(&name) else { continue };
+        let path: String = key.get_value("ExecutablePath").unwrap_or_default();
+        if path.to_lowercase() == want {
+            return Some(key.get_value::<u32, _>("IsPromoted").unwrap_or(0) == 1);
+        }
+    }
+    None
+}
 /// Keeps the login item pointing at this copy of ShotCraft, wherever it was first switched on from.
 /// A copy run from cargo's target folder (a development build) leaves the login item alone.
 #[cfg(not(target_os = "macos"))]
@@ -725,13 +769,27 @@ pub fn text_boxes(img: &Image) -> Vec<R> {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn text_boxes(_img: &Image) -> Vec<R> {
-    vec![]
+pub fn text_boxes(img: &Image) -> Vec<R> {
+    crate::ocr::text_boxes(img)
 }
 
+/// The language is Vision's choice on macOS; the recognizers here read what they can.
 #[cfg(not(target_os = "macos"))]
-pub fn recognize_in(_img: &Image, _language: &str) -> Result<OcrResult, String> {
-    Err("Text recognition needs macOS".into())
+pub fn recognize_in(img: &Image, _language: &str) -> Result<OcrResult, String> {
+    crate::ocr::recognize(img)
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_tests {
+    #[test]
+    fn autostart_command_quotes_the_path() {
+        assert_eq!(
+            super::autostart_command(std::path::Path::new(
+                r"C:\Program Files\ShotCraft\shotcraft.exe"
+            )),
+            r#""C:\Program Files\ShotCraft\shotcraft.exe" --background"#
+        );
+    }
 }
 
 /// The languages text recognition can read, as (Vision code, name in the user's language), by name.
@@ -815,9 +873,132 @@ pub fn print_image(img: &Image, scale: f32, title: &str) -> Result<(), String> {
     })
 }
 
+/// The margin kept on every side of the page when printing (Windows), in points: half an inch, more
+/// than any printer's unprintable band.
 #[cfg(not(target_os = "macos"))]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub const PRINT_MARGIN_PT: f64 = 36.0;
+
+/// Where the picture goes on a printer's page, in its device pixels from the printable area's
+/// origin: `menu_model::print_layout` (on-screen size, shrunk to fit, never enlarged), checked
+/// against this page as it is (a printer may ignore the orientation asked for), and centred on the
+/// sheet. `page_px` and `offset_px` are the physical page and its unprintable offset; `dpi` the
+/// printer's pixels per inch.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg(not(target_os = "macos"))]
+pub fn print_placement(page_px: (i32, i32), offset_px: (i32, i32), dpi: (i32, i32), img: (u32, u32), scale: f32, margin_pt: f64) -> (i32, i32, i32, i32) {
+    let (dx, dy) = (f64::from(dpi.0.max(1)), f64::from(dpi.1.max(1)));
+    let page = (f64::from(page_px.0) * 72.0 / dx, f64::from(page_px.1) * 72.0 / dy);
+    let layout = crate::menu_model::print_layout(img, scale, page, margin_pt);
+    let fit = ((page.0 - 2.0 * margin_pt).max(1.0) / layout.width).min((page.1 - 2.0 * margin_pt).max(1.0) / layout.height).min(1.0);
+    let w = ((layout.width * fit * dx / 72.0).round() as i32).max(1);
+    let h = ((layout.height * fit * dy / 72.0).round() as i32).max(1);
+    ((page_px.0 - w) / 2 - offset_px.0, (page_px.1 - h) / 2 - offset_px.1, w, h)
+}
+
+/// Windows: the system's print dialog, then the picture on one page, laid out as on macOS (see
+/// `print_placement`), in landscape when it is wider than tall. The dialog is modal, like the file
+/// dialogs; Cancel is no error.
+#[cfg(target_os = "windows")]
+pub fn print_image(img: &Image, scale: f32, title: &str) -> Result<(), String> {
+    use windows::Win32::Graphics::Gdi::DeleteDC;
+    use windows::Win32::Foundation::GlobalFree;
+    use windows::Win32::UI::Controls::Dialogs::{CommDlgExtendedError, PrintDlgW, PD_NOPAGENUMS, PD_NOSELECTION, PD_RETURNDC, PD_USEDEVMODECOPIESANDCOLLATE, PRINTDLGW};
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
+    // SAFETY: reads which of this thread's windows is active, to own the dialog.
+    let owner = unsafe { GetActiveWindow() };
+    let mut pd = PRINTDLGW { lStructSize: std::mem::size_of::<PRINTDLGW>() as u32, hwndOwner: owner, Flags: PD_RETURNDC | PD_NOPAGENUMS | PD_NOSELECTION | PD_USEDEVMODECOPIESANDCOLLATE, nCopies: 1, ..Default::default() };
+    // SAFETY: the struct is filled in and its size given; the dialog writes back handles we free below.
+    if !unsafe { PrintDlgW(&mut pd) }.as_bool() {
+        // SAFETY: reads the dialog's last error code.
+        let code = unsafe { CommDlgExtendedError() }.0;
+        return if code == 0 { Ok(()) } else { Err(format!("the print dialog failed (error {code:#x})")) };
+    }
+    let result = print_on(pd.hDC, pd.hDevMode, img, scale, title, None);
+    // SAFETY: the DC and the two blocks the dialog made are ours, and no longer used.
+    unsafe {
+        let _ = DeleteDC(pd.hDC);
+        for h in [pd.hDevMode, pd.hDevNames] {
+            if !h.is_invalid() {
+                let _ = GlobalFree(Some(h));
+            }
+        }
+    }
+    result
+}
+
+#[cfg(target_os = "windows")]
+/// Prints on `hdc`; `output` sends the job to a file instead (a PDF printer's, in tests).
+fn print_on(hdc: windows::Win32::Graphics::Gdi::HDC, devmode: windows::Win32::Foundation::HGLOBAL, img: &Image, scale: f32, title: &str, output: Option<&Path>) -> Result<(), String> {
+    use windows::core::{HSTRING, PCWSTR};
+    use windows::Win32::Graphics::Gdi::{GetDeviceCaps, ResetDCW, SetBrushOrgEx, SetStretchBltMode, StretchDIBits, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DEVMODEW, DIB_RGB_COLORS, DMORIENT_LANDSCAPE, DMORIENT_PORTRAIT, DM_ORIENTATION, HALFTONE, LOGPIXELSX, LOGPIXELSY, PHYSICALHEIGHT, PHYSICALOFFSETX, PHYSICALOFFSETY, PHYSICALWIDTH, SRCCOPY};
+    use windows::Win32::Storage::Xps::{AbortDoc, EndDoc, EndPage, StartDocW, StartPage, DOCINFOW};
+    use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+    if hdc.is_invalid() {
+        return Err("no printer was chosen".into());
+    }
+    // Landscape when wider than tall, as on macOS.
+    if !devmode.is_invalid() {
+        // SAFETY: the dialog's DEVMODE block, locked for the length of the change and unlocked after.
+        unsafe {
+            let dm = GlobalLock(devmode) as *mut DEVMODEW;
+            if !dm.is_null() {
+                let landscape = crate::menu_model::print_landscape((img.w, img.h));
+                (*dm).Anonymous1.Anonymous1.dmOrientation = (if landscape { DMORIENT_LANDSCAPE } else { DMORIENT_PORTRAIT }) as i16;
+                (*dm).dmFields |= DM_ORIENTATION;
+                let _ = ResetDCW(hdc, dm);
+                let _ = GlobalUnlock(devmode);
+            }
+        }
+    }
+    // SAFETY: reads the printer's page metrics.
+    let cap = |i| unsafe { GetDeviceCaps(Some(hdc), i) };
+    let (page, offset, dpi) = ((cap(PHYSICALWIDTH), cap(PHYSICALHEIGHT)), (cap(PHYSICALOFFSETX), cap(PHYSICALOFFSETY)), (cap(LOGPIXELSX), cap(LOGPIXELSY)));
+    if page.0 <= 0 || page.1 <= 0 || dpi.0 <= 0 || dpi.1 <= 0 {
+        return Err("the printer doesn't say how big its page is".into());
+    }
+    let (x, y, w, h) = print_placement(page, offset, dpi, (img.w, img.h), scale, PRINT_MARGIN_PT);
+    // Paper is white: see-through pixels print as white, and GDI wants BGRA.
+    let mut bgra = flatten_on(img, [255, 255, 255, 255]).px.to_vec();
+    for p in bgra.chunks_exact_mut(4) {
+        p.swap(0, 2);
+    }
+    let name = HSTRING::from(title);
+    let out = output.map(|p| HSTRING::from(p.as_os_str()));
+    let doc = DOCINFOW { cbSize: std::mem::size_of::<DOCINFOW>() as i32, lpszDocName: PCWSTR(name.as_ptr()), lpszOutput: out.as_ref().map_or(PCWSTR::null(), |o| PCWSTR(o.as_ptr())), ..Default::default() };
+    // SAFETY: `doc` and the name it points to live through the call.
+    if unsafe { StartDocW(hdc, &doc) } <= 0 {
+        return Err("the printer didn't take the job".into());
+    }
+    let bmi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: img.w as i32, biHeight: -(img.h as i32), biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() },
+        ..Default::default()
+    };
+    // SAFETY: one page; `bgra` holds img.w × img.h 32-bit pixels, as `bmi` says, for the whole call.
+    let printed = unsafe {
+        StartPage(hdc) > 0 && {
+            SetStretchBltMode(hdc, HALFTONE);
+            let _ = SetBrushOrgEx(hdc, 0, 0, None);
+            let lines = StretchDIBits(hdc, x, y, w, h, 0, 0, img.w as i32, img.h as i32, Some(bgra.as_ptr() as *const std::ffi::c_void), &bmi, DIB_RGB_COLORS, SRCCOPY);
+            lines > 0 && EndPage(hdc) > 0
+        }
+    };
+    if !printed {
+        // SAFETY: ends the job this function started.
+        unsafe { AbortDoc(hdc) };
+        return Err("the printer didn't take the picture".into());
+    }
+    // SAFETY: ends the job this function started.
+    if unsafe { EndDoc(hdc) } <= 0 {
+        return Err("the printer didn't finish the job".into());
+    }
+    Ok(())
+}
+
+/// Linux has no printing here yet (it needs CUPS or a GTK print dialog).
+#[cfg(target_os = "linux")]
 pub fn print_image(_img: &Image, _scale: f32, _title: &str) -> Result<(), String> {
-    Err("Printing needs macOS".into())
+    Err("Printing is only available on Windows and macOS for now".into())
 }
 
 #[cfg(test)]
@@ -1080,5 +1261,92 @@ mod capture_option_tests {
     fn extra_args_are_what_screencapture_takes() {
         assert_eq!(targets::extra_args(true, 5), ["-C", "-T", "5"]);
         assert!(targets::extra_args(false, 0).is_empty());
+    }
+}
+
+#[cfg(all(test, not(target_os = "macos")))]
+mod print_tests {
+    use super::*;
+
+    /// Reads Windows' record of tray icons: nothing for a program it never saw.
+    /// `SHOTCRAFT_TRAY_EXE=<path>` also prints what it says for that program.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_knows_which_tray_icons_are_on_the_taskbar() {
+        assert_eq!(tray_icon_promoted(Path::new(r"C:\nowhere\not-a-program.exe")), None);
+        if let Ok(exe) = std::env::var("SHOTCRAFT_TRAY_EXE") {
+            eprintln!("on the taskbar: {:?}", tray_icon_promoted(Path::new(&exe)));
+        }
+    }
+
+    /// US Letter at 600 dpi, turned to landscape, with a 100 px unprintable band.
+    const LANDSCAPE: (i32, i32) = (6600, 5100);
+    const DPI: (i32, i32) = (600, 600);
+
+    #[test]
+    fn a_wide_picture_is_shrunk_to_the_page_and_centred() {
+        // 1000 × 800 points on screen: 13.9 inches wide, shrunk to the 10 × 7.5 inches inside the margins.
+        let (x, y, w, h) = print_placement(LANDSCAPE, (100, 100), DPI, (1000, 800), 1.0, PRINT_MARGIN_PT);
+        assert_eq!((w, h), (5625, 4500));
+        assert_eq!((x, y), ((6600 - 5625) / 2 - 100, (5100 - 4500) / 2 - 100));
+    }
+
+    #[test]
+    fn a_small_picture_prints_at_its_on_screen_size() {
+        // 200 × 100 pixels at 2× is 100 × 50 points: 1.39 inches, never enlarged.
+        let (_, _, w, h) = print_placement(LANDSCAPE, (0, 0), DPI, (200, 100), 2.0, PRINT_MARGIN_PT);
+        assert_eq!((w, h), (833, 417));
+    }
+
+    #[test]
+    fn a_printer_that_kept_portrait_still_gets_the_whole_picture() {
+        let page = (5100, 6600);
+        let (x, y, w, h) = print_placement(page, (0, 0), DPI, (3000, 1000), 1.0, PRINT_MARGIN_PT);
+        assert!(w <= 5100 - 2 * 300 && h <= 6600 - 2 * 300, "{w} × {h} inside the margins");
+        assert!(x >= 300 && y >= 300);
+        assert!((w as f32 / h as f32 - 3.0).abs() < 0.01, "the shape is kept");
+    }
+}
+
+/// The whole print path on Windows, into a file through "Microsoft Print to PDF" (part of Windows):
+/// no dialog, no paper. Skips where that printer was removed.
+#[cfg(all(test, target_os = "windows"))]
+mod print_to_pdf_tests {
+    use super::*;
+
+    #[test]
+    fn a_picture_prints_to_a_pdf_file() {
+        use windows::core::HSTRING;
+        use windows::Win32::Foundation::HGLOBAL;
+        use windows::Win32::Graphics::Gdi::{CreateDCW, DeleteDC};
+        let (driver, device) = (HSTRING::from("WINSPOOL"), HSTRING::from("Microsoft Print to PDF"));
+        // SAFETY: both names live through the call; the DC is deleted below.
+        let dc = unsafe { CreateDCW(&driver, &device, None, None) };
+        if dc.is_invalid() {
+            eprintln!("no Microsoft Print to PDF printer: skipped");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("shotcraft-print-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let pdf = dir.join("print.pdf");
+        // Half see-through, so the white paper shows through.
+        let img = Image { w: 300, h: 200, px: std::sync::Arc::new([20u8, 60, 200, 128].repeat(300 * 200)) };
+        let res = print_on(dc, HGLOBAL::default(), &img, 1.0, "ShotCraft test", Some(&pdf));
+        // SAFETY: the DC made above.
+        let _ = unsafe { DeleteDC(dc) };
+        res.expect("printed");
+        // The PDF printer writes the file as the job finishes.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while std::fs::metadata(&pdf).map(|m| m.len()).unwrap_or(0) == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let bytes = std::fs::read(&pdf).unwrap_or_default();
+        // To look at it: SHOTCRAFT_SHOTS=<dir> keeps a copy.
+        if let Ok(keep) = std::env::var("SHOTCRAFT_SHOTS") {
+            let _ = std::fs::write(std::path::Path::new(&keep).join("print.pdf"), &bytes);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(bytes.starts_with(b"%PDF"), "a PDF came out ({} bytes)", bytes.len());
+        assert!(bytes.len() > 1000, "with the picture in it ({} bytes)", bytes.len());
     }
 }

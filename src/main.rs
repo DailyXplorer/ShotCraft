@@ -4,16 +4,18 @@
 mod app_mode;
 // Windows and Linux: screen capture and its crosshair, text recognition, links, the menus and the
 // dialogs (macOS: `screencapture`, Vision, the menu bar and the editor's own windows).
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // parts wait for the Windows and Linux backends
+#[cfg_attr(target_os = "linux", allow(dead_code))] // Linux: parts wait for its backend
 #[cfg(not(target_os = "macos"))]
 mod capture;
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // the tray parts wait for the Windows and Linux trays
+#[cfg_attr(target_os = "linux", allow(dead_code))] // Linux: the tray parts wait for its tray
 #[cfg(not(target_os = "macos"))]
 mod commands;
 #[cfg(not(target_os = "macos"))]
 mod dialog;
 #[cfg(not(target_os = "macos"))]
 mod links;
+#[cfg(not(target_os = "macos"))]
+mod ocr;
 #[cfg(not(target_os = "macos"))]
 mod picker;
 mod color;
@@ -51,7 +53,7 @@ mod tiled;
 mod shell;
 // Windows and Linux: the tray and the hotkeys (macOS: upstream's shell.rs).
 #[cfg(not(target_os = "macos"))]
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // parts wait for the Windows and Linux trays
+#[cfg_attr(target_os = "linux", allow(dead_code))] // Linux: parts wait for its tray
 #[path = "shell_other.rs"]
 mod shell;
 #[cfg(target_os = "macos")]
@@ -1807,6 +1809,12 @@ impl eframe::App for App {
                 raw_input.events.extend(dragout::release_events(pos, egui::Modifiers::NONE));
             }
         }
+        // Windows and Linux: screenshot runs ignore the real mouse, so their pictures don't depend on
+        // where it happens to be (the colour readout follows the pointer).
+        #[cfg(not(target_os = "macos"))]
+        if self.screenshot.is_some() {
+            raw_input.events.retain(|e| !matches!(e, egui::Event::PointerMoved(_) | egui::Event::PointerButton { .. }));
+        }
     }
 
     fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -1840,6 +1848,8 @@ impl eframe::App for App {
             self.started = true;
             if self.screenshot.is_none() {
                 self.shell = Some(shell::Shell::start(self.queue.clone(), ctx.clone(), &self.settings));
+                #[cfg(target_os = "windows")]
+                self.tray_tip();
                 // Warm up: load the text model now, not on the first real OCR.
                 std::thread::spawn(|| {
                     let _ = system::recognize(&Image { w: 64, h: 64, px: Arc::new(vec![255; 64 * 64 * 4]) });
@@ -2037,6 +2047,49 @@ fn main() -> eframe::Result {
     eframe::run_native("ShotCraft", options, Box::new(move |cc| Ok(Box::new(App::new(cc, screenshot, show_at_start, open)))))
 }
 
+
+
+/// What the first-start tip says (Windows hides new tray icons under ^ and lets no app pin itself).
+#[cfg(target_os = "windows")]
+const TRAY_TIP: &str = "ShotCraft is running in the tray. If its icon is hidden under ^ next to the clock, drag it onto the taskbar, or turn it on in Settings > Personalization > Taskbar.";
+
+/// Whether the first-start tip is shown: once, while the tray icon is visible to ShotCraft (not
+/// hidden in Preferences), unless Windows says the user already put it on the taskbar.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn tray_tip_wanted(shown_before: bool, icon_hidden: bool, on_taskbar: Option<bool>) -> bool {
+    !shown_before && !icon_hidden && on_taskbar != Some(true)
+}
+
+impl App {
+    /// Windows: once, a notification on where the tray icon went. Marked as done either way, so it
+    /// never comes back.
+    #[cfg(target_os = "windows")]
+    fn tray_tip(&mut self) {
+        if self.settings.tray_tip_shown {
+            return;
+        }
+        let on_taskbar = std::env::current_exe().ok().and_then(|e| system::tray_icon_promoted(&e));
+        if tray_tip_wanted(false, self.settings.hide_menubar_icon, on_taskbar) {
+            system::notify("ShotCraft", TRAY_TIP);
+        }
+        self.settings.tray_tip_shown = true;
+        self.settings.save();
+    }
+}
+
+#[cfg(test)]
+mod tray_tip_tests {
+    use super::tray_tip_wanted;
+
+    #[test]
+    fn the_tray_tip_comes_once_and_only_when_it_helps() {
+        assert!(tray_tip_wanted(false, false, None), "first start, Windows knows nothing yet");
+        assert!(tray_tip_wanted(false, false, Some(false)), "first start, the icon is under ^");
+        assert!(!tray_tip_wanted(false, false, Some(true)), "already on the taskbar");
+        assert!(!tray_tip_wanted(true, false, None), "shown before");
+        assert!(!tray_tip_wanted(false, true, None), "the icon is hidden on purpose (Preferences)");
+    }
+}
 /// One copy of ShotCraft per user session on Windows and Linux. The first copy listens on a
 /// loopback port; a second launch connects, asks it to show its window (or hands it the
 /// `shotcraft://` link it was started with), and quits.

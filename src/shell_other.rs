@@ -1,14 +1,28 @@
 //! Menu bar icon and native menus (macOS), tray icon (Windows, Linux) and the global hotkeys. The
 //! menus' items come from the command table (`commands`).
 use crate::commands;
+#[cfg(not(target_os = "linux"))]
+use crate::commands::Item;
 use crate::settings::{HotkeyAction, Settings};
 use crate::Queue;
 use global_hotkey::{hotkey::HotKey, GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+#[cfg(not(target_os = "linux"))]
+use tray_icon::menu::{CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
+#[cfg(not(target_os = "linux"))]
+use tray_icon::{TrayIcon, TrayIconBuilder};
+
+/// An on/off item of the tray menu and how to read its state from the settings.
+#[cfg(not(target_os = "linux"))]
+type CheckItem = (fn(&Settings) -> bool, CheckMenuItem);
 
 pub struct Shell {
+    #[cfg(not(target_os = "linux"))]
+    tray: Option<TrayIcon>,
+    #[cfg(not(target_os = "linux"))]
+    checks: Vec<CheckItem>,
     hotkeys: Option<GlobalHotKeyManager>,
     registered: Vec<HotKey>,
     /// Whether the Show ShotCraft hotkey works: the tray icon can be hidden only then.
@@ -99,8 +113,84 @@ fn tray_icon_rgba(done: bool) -> (Vec<u8>, u32) {
     (px, n)
 }
 
+/// Turns command-table items into native menu items: the tray's, and the macOS menu bar's (with
+/// the editor's shortcuts shown next to them). Collects the on/off items to keep their check marks
+/// current, and Sparkle's check item on macOS.
+#[cfg(not(target_os = "linux"))]
+struct Native<'a> {
+    settings: &'a Settings,
+    accelerators: bool,
+    checks: Vec<CheckItem>,
+}
+
+#[cfg(not(target_os = "linux"))]
+impl Native<'_> {
+    fn items(&mut self, items: &[Item]) -> Vec<Box<dyn IsMenuItem>> {
+        let mut out: Vec<Box<dyn IsMenuItem>> = vec![];
+        for item in items {
+            match item {
+                Item::Cmd(c) => match c.checked {
+                    Some(on) => {
+                        let check = CheckMenuItem::with_id(c.id, c.label, true, on(self.settings), None);
+                        self.checks.push((on, check.clone()));
+                        out.push(Box::new(check));
+                    }
+                    None => {
+                        let keys = None;
+                        out.push(Box::new(MenuItem::with_id(c.id, c.label, true, keys)));
+                    }
+                },
+                Item::Separator => out.push(Box::new(PredefinedMenuItem::separator())),
+                Item::Tools => {
+                    for t in commands::DRAW {
+                        out.push(Box::new(MenuItem::with_id(format!("tool:{}", t.name()), t.tooltip(), true, None)));
+                    }
+                }
+                Item::Sub(name, sub) => {
+                    let menu = Submenu::new(*name, true);
+                    for i in self.items(sub) {
+                        let _ = menu.append(i.as_ref());
+                    }
+                    out.push(Box::new(menu));
+                } // Sparkle's two items work only when it loaded (packaged releases).
+            }
+        }
+        out
+    }
+
+    fn menu(&mut self, items: &[Item]) -> Menu {
+        let menu = Menu::new();
+        for i in self.items(items) {
+            let _ = menu.append(i.as_ref());
+        }
+        menu
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn build_tray(menu: Menu) -> Option<TrayIcon> {
+    // macOS: the author's black menu bar glyph, tinted by the system. Elsewhere the viewfinder.
+    let icon = {
+        let (px, n) = tray_icon_rgba(false);
+        tray_icon::Icon::from_rgba(px, n, n).ok()?
+    };
+    TrayIconBuilder::new().with_menu(Box::new(menu)).with_icon(icon).with_tooltip("ShotCraft").build().ok()
+}
+
 impl Shell {
     pub fn start(queue: Queue, ctx: eframe::egui::Context, settings: &Settings) -> Shell {
+        #[cfg(not(target_os = "linux"))]
+        let mut native = Native { settings, accelerators: true, checks: vec![] };
+        #[cfg(not(target_os = "linux"))]
+        let tray = {
+            native.accelerators = false;
+            let menu = native.menu(commands::TRAY);
+            let (q, c) = (queue.clone(), ctx.clone());
+            MenuEvent::set_event_handler(Some(move |e: MenuEvent| run_id(&q, &c, e.id.0.as_str())));
+            build_tray(menu)
+        };
+        #[cfg(not(target_os = "linux"))]
+        let checks = std::mem::take(&mut native.checks);
 
         let hotkey_map: Arc<Mutex<HashMap<u32, HotkeyAction>>> = Arc::default();
         let map = hotkey_map.clone();
@@ -122,6 +212,10 @@ impl Shell {
         }));
 
         let mut shell = Shell {
+            #[cfg(not(target_os = "linux"))]
+            tray,
+            #[cfg(not(target_os = "linux"))]
+            checks,
             hotkeys: GlobalHotKeyManager::new().ok(),
             registered: vec![],
             show_hotkey_works: false,
@@ -175,8 +269,18 @@ impl Shell {
     /// called again, while a confirmation is on.
     pub fn tick_flash(&mut self) -> Option<std::time::Duration> {
         let now = self.clock.elapsed().as_secs_f64();
-        // No tray icon to swap yet: the Windows and Linux trays do it.
-        let _ = self.flash.tick(now);
+        if let Some(image) = self.flash.tick(now) {
+            let done = image == crate::tray_flash::TrayImage::Done;
+            #[cfg(not(target_os = "linux"))]
+            if let Some(t) = &self.tray {
+                let (px, n) = tray_icon_rgba(done);
+                if let Ok(icon) = tray_icon::Icon::from_rgba(px, n, n) {
+                    let _ = t.set_icon(Some(icon));
+                }
+            }
+            #[cfg(target_os = "linux")]
+            let _ = done; // no tray icon on Linux yet
+        }
         self.flash.next_check(now).map(|s| std::time::Duration::from_secs_f64(s + 0.02))
     }
 
@@ -196,7 +300,18 @@ impl Shell {
         }
     }
 
-    /// A placeholder until the Windows and Linux trays arrive.
+    #[cfg(not(target_os = "linux"))]
+    pub fn sync(&mut self, settings: &Settings) {
+        for (on, item) in &self.checks {
+            item.set_checked(on(settings));
+        }
+        if let Some(t) = &self.tray {
+            let _ = t.set_visible(settings.menubar_icon_visible(self.show_hotkey_works));
+        }
+    }
+
+    /// Linux: no tray icon yet.
+    #[cfg(target_os = "linux")]
     pub fn sync(&mut self, _settings: &Settings) {}
 }
 

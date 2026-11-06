@@ -2077,6 +2077,26 @@ mod tests {
         }
     }
 
+    /// Windows: the same, with Windows' own OCR.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn ocr_reads_text_from_a_picture_off_macos() {
+        let fonts = Fonts::load();
+        let mut doc = Doc::new(sample(), 2.0);
+        let mut st = Style::default();
+        st.size = 6;
+        st.fill = Fill::HandDrawn;
+        st.color = [0, 0, 0, 255];
+        doc.objs = vec![Obj { kind: Kind::Text { at: p(40.0, 280.0), text: "Hello ShotCraft".into() }, style: st }];
+        let res = crate::system::recognize(&export(&doc, &fonts)).expect("OCR runs");
+        assert!(res.lines.join(" ").contains("ShotCraft"), "read: {:?}", res.lines);
+        for (w, h) in [(1u32, 1u32), (3, 3), (2000, 2), (2, 2000)] {
+            let tiny = Image { w, h, px: Arc::new(vec![255; (w * h * 4) as usize]) };
+            let _ = crate::system::recognize(&tiny);
+            let _ = crate::system::text_boxes(&tiny);
+        }
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn finds_text_for_blur_text() {
@@ -2089,6 +2109,22 @@ mod tests {
         doc.objs = vec![Obj { kind: Kind::Text { at: p(40.0, 280.0), text: "Hello ShotCraft".into() }, style: st }];
         let boxes = crate::system::text_boxes(&export(&doc, &fonts));
         assert!(!boxes.is_empty(), "the Vision framework sees the text");
+        assert!(boxes[0].y0 > 220.0 && boxes[0].y1 < 400.0, "box is near the text and counted from the top: {:?}", boxes[0]);
+    }
+
+    /// Windows: the same, with Windows' own OCR.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn finds_text_for_blur_text_off_macos() {
+        let fonts = Fonts::load();
+        let mut doc = Doc::new(sample(), 2.0);
+        let mut st = Style::default();
+        st.size = 6;
+        st.fill = Fill::HandDrawn;
+        st.color = [0, 0, 0, 255];
+        doc.objs = vec![Obj { kind: Kind::Text { at: p(40.0, 280.0), text: "Hello ShotCraft".into() }, style: st }];
+        let boxes = crate::system::text_boxes(&export(&doc, &fonts));
+        assert!(!boxes.is_empty(), "the system's text recognizer sees the text");
         assert!(boxes[0].y0 > 220.0 && boxes[0].y1 < 400.0, "box is near the text and counted from the top: {:?}", boxes[0]);
     }
 
