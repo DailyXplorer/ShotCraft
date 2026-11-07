@@ -8,9 +8,11 @@ use crate::scroll::GrabRect;
 
 /// One wheel event moves the page by at most this many points; a longer scroll is sent as several
 /// events, the way a trackpad or a wheel delivers it, so that pages with smooth scrolling follow.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 pub const CHUNK: i32 = 48;
 
 /// Splits a scroll of `dy` points into wheel events of at most `CHUNK` points, same sign, same total.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 pub fn chunks(dy: i32) -> Vec<i32> {
     let mut left = dy;
     let mut out = Vec::new();
@@ -266,33 +268,91 @@ pub fn wheel_units(dy: i32, scale: f32) -> i32 {
     -((dy as f32 / scale.max(0.5)) * 1.2).round() as i32
 }
 
-/// Linux: a placeholder until the Linux backend arrives; the user scrolls.
+/// Linux (X11): wheel clicks through XTest, to the window under the parked pointer. Wayland lets no
+/// app scroll another one; there the user scrolls (`trusted` is false).
 #[cfg(target_os = "linux")]
-pub fn trusted(_prompt: bool) -> bool {
-    false
-}
+mod x11 {
+    use super::*;
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{ConnectionExt as _, BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT};
+    use x11rb::protocol::xtest::ConnectionExt as _;
+    use x11rb::rust_connection::RustConnection;
 
-#[cfg(target_os = "linux")]
-pub fn screen_recording_ok() -> bool {
-    true
-}
-
-#[cfg(target_os = "linux")]
-pub struct Scroller;
-
-#[cfg(target_os = "linux")]
-impl Scroller {
-    pub fn new(_rect: GrabRect) -> Scroller {
-        Scroller
+    pub fn trusted(_prompt: bool) -> bool {
+        !crate::capture::wayland() && connect().is_some_and(|(c, _)| c.xtest_get_version(2, 2).ok().and_then(|v| v.reply().ok()).is_some())
     }
 
-    pub fn scroll(&mut self, _dy: i32) -> Result<(), String> {
-        Err("Scrolling for you isn't available on Linux yet.".into())
+    pub fn screen_recording_ok() -> bool {
+        true
     }
+
+    fn connect() -> Option<(RustConnection, u32)> {
+        let (conn, n) = x11rb::connect(None).ok()?;
+        let root = conn.setup().roots.get(n)?.root;
+        Some((conn, root))
+    }
+
+    pub struct Scroller {
+        rect: GrabRect,
+        x: Option<(RustConnection, u32)>,
+        saved: Option<(i16, i16)>,
+        /// Pixels scrolled but not yet sent: X wheel clicks have a fixed size.
+        rest: i32,
+    }
+
+    impl Scroller {
+        pub fn new(rect: GrabRect) -> Scroller {
+            Scroller { rect, x: connect(), saved: None, rest: 0 }
+        }
+
+        pub fn scroll(&mut self, dy: i32) -> Result<(), String> {
+            let Some((conn, root)) = &self.x else { return Err("Can't scroll: no X11 display.".into()) };
+            let p = conn.query_pointer(*root).ok().and_then(|c| c.reply().ok());
+            let (px, py) = p.map_or((i16::MIN, i16::MIN), |p| (p.root_x, p.root_y));
+            if !pointer_inside(&self.rect, px as f64, py as f64) {
+                self.saved.get_or_insert((px, py));
+                let (cx, cy) = park_point(&self.rect);
+                let _ = conn.warp_pointer(x11rb::NONE, *root, 0, 0, 0, 0, cx.round() as i16, cy.round() as i16);
+                let _ = conn.flush();
+                std::thread::sleep(std::time::Duration::from_millis(30));
+            }
+            let (clicks, rest) = wheel_clicks(self.rest + dy);
+            self.rest = rest;
+            // Button 5 scrolls down, 4 up.
+            let button = if clicks > 0 { 5 } else { 4 };
+            for _ in 0..clicks.unsigned_abs() {
+                for ty in [BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT] {
+                    conn.xtest_fake_input(ty, button, 0, *root, 0, 0, 0).map_err(|e| format!("Can't scroll: {e}"))?;
+                }
+                conn.flush().map_err(|e| format!("Can't scroll: {e}"))?;
+                std::thread::sleep(std::time::Duration::from_millis(8));
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for Scroller {
+        fn drop(&mut self) {
+            if let (Some((x, y)), Some((conn, root))) = (self.saved.filter(|&(x, _)| x != i16::MIN), &self.x) {
+                let _ = conn.warp_pointer(x11rb::NONE, *root, 0, 0, 0, 0, x, y);
+                let _ = conn.flush();
+            }
+        }
+    }
+}
+
+/// Wheel clicks for a scroll of `dy` pixels, and what is left over for the next scroll. Most X
+/// apps move three lines, about 50 pixels, a click.
+#[cfg(target_os = "linux")]
+pub fn wheel_clicks(dy: i32) -> (i32, i32) {
+    const PER_CLICK: i32 = 50;
+    (dy / PER_CLICK, dy % PER_CLICK)
 }
 
 #[cfg(target_os = "windows")]
 pub use win::{screen_recording_ok, trusted, Scroller};
+#[cfg(target_os = "linux")]
+pub use x11::{screen_recording_ok, trusted, Scroller};
 
 #[cfg(test)]
 mod tests {
@@ -331,5 +391,16 @@ mod tests {
         // Every chunk of a long scroll is sent, and they add up to about the whole.
         let total: i32 = chunks(700).iter().map(|&c| wheel_units(c, 1.0)).sum();
         assert!((total + 840).abs() <= chunks(700).len() as i32, "{total}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn x11_wheel_clicks_carry_what_is_left_over() {
+        assert_eq!(wheel_clicks(120), (2, 20));
+        assert_eq!(wheel_clicks(-120), (-2, -20));
+        assert_eq!(wheel_clicks(49), (0, 49));
+        // Two small scrolls add up to a click.
+        let (c, rest) = wheel_clicks(30);
+        assert_eq!((c, wheel_clicks(rest + 30).0), (0, 1));
     }
 }

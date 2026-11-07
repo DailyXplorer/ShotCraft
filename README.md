@@ -180,15 +180,17 @@ ShotCraft is signed with its own certificate, not an Apple Developer ID, and it 
 
 You only need to do this the first time.
 
-## Windows
+## Windows and Linux
 
-ShotCraft also runs on Windows 10 and 11. It lives in the system tray instead of the menu bar: start `shotcraft.exe` and its icon appears there, with every command in its menu. Starting it again while it runs changes nothing, as on macOS.
+ShotCraft also runs on Windows 10 and 11 and on Linux (X11; Wayland with limits, below). It lives in the system tray instead of the menu bar: start `shotcraft.exe` (Windows) or `shotcraft` (Linux) and its icon appears there, with every command in its menu. Starting it again while it runs changes nothing, as on macOS.
 
 **Keep the tray icon in sight (Windows 11).** Windows puts every new tray icon in the hidden overflow, the ^ next to the clock, and lets no app pin itself. To see ShotCraft's icon, and the check mark it shows for a moment after a copy or a save, turn it on in Settings > Personalization > Taskbar > Other system tray icons > ShotCraft ("Taskbar corner overflow" on older versions of Windows 11), or drag the icon from the ^ panel onto the taskbar. On Windows 10 the setting is Settings > Personalization > Taskbar > Select which icons appear on the taskbar.
 
+**Linux tray.** The icon is a StatusNotifierItem: KDE, Cinnamon, Xfce and most other desktops show it. GNOME shows it only with the AppIndicator and KStatusNotifierItem Support extension (installed by default on Ubuntu).
+
 **Shortcuts.** ⌘ is Ctrl: Ctrl+Shift+1 takes a fullscreen screenshot, Ctrl+Shift+2 an area, Ctrl+Shift+3 the active window and Ctrl+Shift+4 reads text or a QR code. Change them in Preferences > Hotkeys. In the editor the mouse wheel scrolls the picture and Ctrl+wheel zooms.
 
-**What differs.** Area and window captures freeze the screen and show ShotCraft's own crosshair. Text recognition uses Windows' built-in OCR. `shotcraft://` links work once Preferences > Advanced > Automation allows them; ShotCraft then registers the link type for your user, and removes it when you switch that off.
+**What differs.** Area and window captures freeze the screen and show ShotCraft's own crosshair. Text recognition uses Windows' built-in OCR on Windows, and built-in models that read Latin script on Linux. Drag-out and Print work on Windows, not yet on Linux. On Wayland the desktop takes the screenshots (its own picker appears), and the mouse pointer, scrolling capture and Repeat Area are not available there. `shotcraft://` links work once Preferences > Advanced > Automation allows them; ShotCraft then registers the link type for your user, and removes it when you switch that off.
 
 ## Build from source
 
@@ -225,7 +227,10 @@ Set the version in `Cargo.toml`, then push a tag such as `v0.2.2`. The Release w
 * [Noto Sans Symbols, Symbols 2 and Math](https://github.com/notofonts/symbols) (a few key glyphs only), SIL Open Font License: `assets/fonts/OFL-Noto.txt`
 * [Sparkle](https://sparkle-project.org), MIT License, included in releases
 * [Hugeicons](https://hugeicons.com) free icons, MIT License: `assets/icons/LICENSE-hugeicons.md`
+* [Ocrs models](https://github.com/robertknight/ocrs-models) (text recognition on Linux), trained on the HierText dataset by Google Research, CC BY-SA 4.0: `assets/ocr/LICENSE.txt`, attribution and sources in `assets/ocr/README.md`; read by [ocrs](https://github.com/robertknight/ocrs), MIT or Apache-2.0
 
 ## License
 
-ShotCraft is released under the [MIT License](LICENSE). The fonts and icons listed in Credits keep their own licenses.
+ShotCraft is released under the [MIT License](LICENSE). The fonts, icons and models listed in Credits keep their own licenses.
+
+**The Linux build includes CC BY-SA 4.0 models.** The two Ocrs text-recognition files in `assets/ocr/` are compiled into the Linux executable (the macOS and Windows builds don't contain them: they use Vision and Windows' own OCR). They are unchanged and stay under CC BY-SA 4.0, not MIT: anyone who passes them on, on their own or inside a build, must credit the authors, link the licence and share any changed copy of them under the same licence. The licence text travels with them in `assets/ocr/LICENSE.txt` (a Linux package should ship that file), and ShotCraft's own code stays MIT.

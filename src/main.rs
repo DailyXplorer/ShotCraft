@@ -4,10 +4,8 @@
 mod app_mode;
 // Windows and Linux: screen capture and its crosshair, text recognition, links, the menus and the
 // dialogs (macOS: `screencapture`, Vision, the menu bar and the editor's own windows).
-#[cfg_attr(target_os = "linux", allow(dead_code))] // Linux: parts wait for its backend
 #[cfg(not(target_os = "macos"))]
 mod capture;
-#[cfg_attr(target_os = "linux", allow(dead_code))] // Linux: the tray parts wait for its tray
 #[cfg(not(target_os = "macos"))]
 mod commands;
 #[cfg(not(target_os = "macos"))]
@@ -53,7 +51,6 @@ mod tiled;
 mod shell;
 // Windows and Linux: the tray and the hotkeys (macOS: upstream's shell.rs).
 #[cfg(not(target_os = "macos"))]
-#[cfg_attr(target_os = "linux", allow(dead_code))] // Linux: parts wait for its tray
 #[path = "shell_other.rs"]
 mod shell;
 #[cfg(target_os = "macos")]
@@ -191,6 +188,21 @@ pub const EDITOR_TITLE: &str = "ShotCraft";
 
 /// How long the editor stays on screen, transparent, before it is hidden again.
 const HIDE_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Windows and Linux: whether `keep_ui_alive` opens its helper window. Not on Wayland (see there).
+#[cfg(not(target_os = "macos"))]
+fn helper_window_wanted(wayland: bool) -> bool {
+    !wayland
+}
+
+#[cfg(all(test, not(target_os = "macos")))]
+mod helper_window_tests {
+    #[test]
+    fn wayland_gets_no_helper_window_and_everything_else_does() {
+        assert!(!super::helper_window_wanted(true), "a window there froze the app");
+        assert!(super::helper_window_wanted(false));
+    }
+}
 
 const WINDOW_MARGIN: f32 = 48.0;
 const WINDOW_MIN_HEIGHT_RATIO: f32 = 0.9;
@@ -572,6 +584,19 @@ impl App {
     #[cfg(not(target_os = "macos"))]
     fn keep_ui_alive(&mut self, ctx: &egui::Context) {
         if !self.hidden {
+            return;
+        }
+        // Not on Wayland: winit can't hide a window there, so the editor is never hidden and the
+        // UI passes keep running. The helper window only hurt: GNOME never sends the frame
+        // callback of such a tiny transparent surface, the renderer blocks in `present` for good,
+        // and the app froze ("ShotCraft is not responding"). A 1x1 non-resizable window also broke
+        // Wayland's 2x1 minimum at start-up.
+        #[cfg(target_os = "linux")]
+        let wayland = capture::wayland();
+        #[cfg(not(target_os = "linux"))]
+        let wayland = false;
+        if !helper_window_wanted(wayland) {
+            self.hide_pending = false;
             return;
         }
         let builder = ViewportBuilder::default()
@@ -1850,7 +1875,10 @@ impl eframe::App for App {
                 self.shell = Some(shell::Shell::start(self.queue.clone(), ctx.clone(), &self.settings));
                 #[cfg(target_os = "windows")]
                 self.tray_tip();
-                // Warm up: load the text model now, not on the first real OCR.
+                // Warm up: load the text model now, not on the first real OCR. Not on Linux: its
+                // models are compiled into the app and load on the first OCR, so the tray app
+                // doesn't hold them (or spend a start-up thread) for text nobody reads.
+                #[cfg(not(target_os = "linux"))]
                 std::thread::spawn(|| {
                     let _ = system::recognize(&Image { w: 64, h: 64, px: Arc::new(vec![255; 64 * 64 * 4]) });
                 });

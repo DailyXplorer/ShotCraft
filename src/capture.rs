@@ -135,6 +135,10 @@ pub enum Started {
 
 /// Runs off the UI thread.
 pub fn start(mode: CaptureMode, opt: &CaptureOptions) -> Started {
+    #[cfg(target_os = "linux")]
+    if backend::wayland() {
+        return Started::Done(backend::portal(mode, opt));
+    }
     match mode {
         CaptureMode::Area | CaptureMode::Window => match freeze(mode == CaptureMode::Window, opt) {
             Ok(f) => Started::Pick(f, mode),
@@ -401,6 +405,10 @@ pub fn on_wallpaper(shadowed: &Image, win: (i32, i32, u32, u32), wall: &Image, s
 
 /// The screens frozen for choosing the area of a scrolling capture: no windows, no pointer.
 pub fn freeze_for_scrolling(scale: f32) -> Result<Frozen, String> {
+    #[cfg(target_os = "linux")]
+    if backend::wayland() {
+        return Err("Scrolling capture needs an X11 session: on Wayland, apps can't look at the screen.".into());
+    }
     let opt = CaptureOptions { last_area: None, window_bg: crate::settings::WindowBg::Transparent, solid_color: [0, 0, 0], scale, cursor: false, delay_secs: 0, snapshot: Snapshot::default() };
     freeze(false, &opt)
 }
@@ -416,6 +424,11 @@ pub fn scale_at(x: i32, y: i32) -> f32 {
     backend::scale_at(x, y).clamp(0.5, 8.0)
 }
 
+/// A Wayland session, where apps can neither look at the screen nor scroll other apps.
+#[cfg(target_os = "linux")]
+pub fn wayland() -> bool {
+    backend::wayland()
+}
 fn rgba(w: u32, h: u32, px: Vec<u8>) -> Image {
     Image { w, h, px: Arc::new(px) }
 }
@@ -656,43 +669,278 @@ mod backend {
     }
 }
 
-/// Linux: a placeholder until the Linux backend arrives; every capture says it isn't available yet.
 #[cfg(target_os = "linux")]
 mod backend {
-    use super::{Pointer, Shot, WinInfo};
+    use super::{rgba, Shot, WinInfo};
     use crate::model::Image;
-    use crate::system::CaptureOptions;
-    use crate::targets::WindowInfo;
+    use crate::system::{CaptureMode, CaptureOptions, Captured};
+    use crate::targets::{Rect, WindowInfo};
+    use x11rb::connection::Connection;
+    use x11rb::protocol::randr::ConnectionExt as _;
+    use x11rb::protocol::xfixes::ConnectionExt as _;
+    use x11rb::protocol::xproto::{Atom, AtomEnum, ConnectionExt as _, ImageFormat, ImageOrder, Window};
+    use x11rb::rust_connection::RustConnection;
 
-    const NOT_YET: &str = "Screen capture isn't available on Linux yet.";
+    /// On Wayland, apps can't read the screen or other windows themselves; the desktop's
+    /// screenshot portal does it and shows its own picker.
+    pub fn wayland() -> bool {
+        std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty()) || std::env::var("XDG_SESSION_TYPE").is_ok_and(|v| v == "wayland")
+    }
 
-    pub fn monitors(_opt: &CaptureOptions) -> Result<Vec<Shot>, String> {
-        Err(NOT_YET.into())
+    pub fn portal(mode: CaptureMode, opt: &CaptureOptions) -> Result<Option<Captured>, String> {
+        use ashpd::desktop::screenshot::Screenshot;
+        if mode == CaptureMode::RepeatArea {
+            return Err("Repeat Area Capture isn't available on Wayland: the desktop doesn't tell apps where an area was.".into());
+        }
+        if mode == CaptureMode::Delayed {
+            std::thread::sleep(std::time::Duration::from_secs(u64::from(opt.delay_secs)));
+        }
+        // The desktop has no "active window" for apps to read, so it asks; All Displays is its
+        // plain full-desktop screenshot.
+        let interactive = matches!(mode, CaptureMode::Area | CaptureMode::Window | CaptureMode::ActiveWindow);
+        let result = async_io::block_on(async { Screenshot::request().interactive(interactive).modal(true).send().await?.response() });
+        let shot = match result {
+            Ok(shot) => shot,
+            Err(ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled)) => return Ok(None),
+            Err(e) => return Err(format!("Can't take a screenshot: {e}")),
+        };
+        let Some(path) = file_path(shot.uri().as_str()) else {
+            return Err(format!("Can't take a screenshot: the desktop returned {}", shot.uri().as_str()));
+        };
+        let img = read_and_remove(&path)?;
+        Ok(Some(Captured { img, scale: opt.scale, area: None, mode }))
     }
-    pub fn grab_region(_x: i32, _y: i32, _w: u32, _h: u32) -> Result<image::RgbaImage, String> {
-        Err(NOT_YET.into())
+
+    /// Read the screenshot the desktop saved for this request, then delete that file. The desktop
+    /// leaves a copy of every shot in ~/Pictures, and ShotCraft keeps the picture in its own
+    /// window (the user saves what they want). The file goes whether or not it could be read, so
+    /// an unreadable one doesn't pile up either.
+    pub fn read_and_remove(path: &std::path::Path) -> Result<Image, String> {
+        let img = crate::system::load_image_file(path);
+        let _ = std::fs::remove_file(path);
+        img
     }
+
+    /// `file:///home/me/Pictures/Screenshot%20from%20….png` → a path.
+    pub fn file_path(uri: &str) -> Option<std::path::PathBuf> {
+        let rest = uri.strip_prefix("file://")?;
+        let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+        let bytes = rest.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' && i + 2 < bytes.len() {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?;
+                out.push(u8::from_str_radix(hex, 16).ok()?);
+                i += 3;
+            } else {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+        use std::os::unix::ffi::OsStringExt;
+        Some(std::path::PathBuf::from(std::ffi::OsString::from_vec(out)))
+    }
+
+    fn connect() -> Result<(RustConnection, usize), String> {
+        x11rb::connect(None).map_err(|e| format!("Can't take a screenshot: no X11 display ({e})"))
+    }
+
+    pub fn monitors(opt: &CaptureOptions) -> Result<Vec<Shot>, String> {
+        let (conn, screen_num) = connect()?;
+        let screen = conn.setup().roots.get(screen_num).ok_or("Can't take a screenshot: no X11 screen")?.clone();
+        let full = get_image(&conn, screen.root, 0, 0, screen.width_in_pixels, screen.height_in_pixels)?;
+        let monitors = conn.randr_get_monitors(screen.root, true).ok().and_then(|c| c.reply().ok()).map(|r| r.monitors).unwrap_or_default();
+        let mut out = vec![];
+        for m in &monitors {
+            let r = crate::model::R { x0: m.x as f32, y0: m.y as f32, x1: m.x as f32 + m.width as f32, y1: m.y as f32 + m.height as f32 };
+            if let Some(img) = super::crop(&full, r) {
+                out.push(Shot { x: m.x as i32, y: m.y as i32, scale: opt.scale, primary: m.primary, img });
+            }
+        }
+        if out.is_empty() {
+            out.push(Shot { x: 0, y: 0, scale: opt.scale, primary: true, img: full });
+        } else if !out.iter().any(|s| s.primary) {
+            out[0].primary = true;
+        }
+        Ok(out)
+    }
+
+    /// The pixels of a desktop rectangle (scrolling capture), cut to the X screen.
+    pub fn grab_region(x: i32, y: i32, w: u32, h: u32) -> Result<image::RgbaImage, String> {
+        let (conn, screen_num) = connect()?;
+        let screen = conn.setup().roots.get(screen_num).ok_or("Can't take a screenshot: no X11 screen")?.clone();
+        let (x0, y0) = (x.clamp(0, screen.width_in_pixels as i32), y.clamp(0, screen.height_in_pixels as i32));
+        let w = (x + w as i32).min(screen.width_in_pixels as i32) - x0;
+        let h = (y + h as i32).min(screen.height_in_pixels as i32) - y0;
+        if w <= 0 || h <= 0 {
+            return Err("The scrolling area is no longer on a screen.".into());
+        }
+        let img = get_image(&conn, screen.root, x0 as i16, y0 as i16, w as u16, h as u16)?;
+        image::RgbaImage::from_raw(img.w, img.h, img.px.to_vec()).ok_or_else(|| "Can't read the screen.".to_string())
+    }
+
+    /// The desktop picture's file, from GNOME's settings (also used by Cinnamon, Budgie and others);
+    /// other desktops keep theirs elsewhere.
+    pub fn wallpaper(_x: i32, _y: i32) -> Result<std::path::PathBuf, String> {
+        let get = |schema: &str, key: &str| {
+            let out = std::process::Command::new("gsettings").args(["get", schema, key]).output().ok()?;
+            Some(String::from_utf8_lossy(&out.stdout).trim().trim_matches('\'').to_string())
+        };
+        let read = |key: &str| get("org.gnome.desktop.background", key).and_then(|uri| file_path(&uri)).filter(|p| p.is_file());
+        // GNOME keeps a light and a dark picture and shows the one of the current style.
+        let dark = get("org.gnome.desktop.interface", "color-scheme").is_some_and(|s| s == "prefer-dark");
+        let (first, second) = if dark { ("picture-uri-dark", "picture-uri") } else { ("picture-uri", "picture-uri-dark") };
+        read(first).or_else(|| read(second)).ok_or_else(|| "the desktop picture isn't one ShotCraft can find here".to_string())
+    }
+    /// X11 reports pixels: one per point.
     pub fn scale_at(_x: i32, _y: i32) -> f32 {
         1.0
     }
-    pub fn wallpaper(_x: i32, _y: i32) -> Result<std::path::PathBuf, String> {
-        Err(NOT_YET.into())
-    }
+    /// Screen rectangles from RandR; none on Wayland, where windows can't place themselves.
     pub fn screens() -> Vec<(i32, i32, u32, u32)> {
-        vec![]
+        if wayland() {
+            return vec![];
+        }
+        let Ok((conn, screen_num)) = connect() else { return vec![] };
+        let Some(root) = conn.setup().roots.get(screen_num).map(|s| s.root) else { return vec![] };
+        conn.randr_get_monitors(root, true)
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .map(|r| r.monitors.iter().map(|m| (m.x as i32, m.y as i32, m.width as u32, m.height as u32)).collect())
+            .unwrap_or_default()
     }
+
+    fn get_image(conn: &RustConnection, drawable: Window, x: i16, y: i16, w: u16, h: u16) -> Result<Image, String> {
+        let fail = |e: String| format!("Can't take a screenshot: {e}");
+        let reply = conn.get_image(ImageFormat::Z_PIXMAP, drawable, x, y, w, h, !0).map_err(|e| fail(e.to_string()))?.reply().map_err(|e| fail(e.to_string()))?;
+        let bpp = conn.setup().pixmap_formats.iter().find(|f| f.depth == reply.depth).map(|f| f.bits_per_pixel).unwrap_or(0);
+        let n = w as usize * h as usize;
+        if bpp != 32 || reply.data.len() < n * 4 {
+            return Err(fail(format!("the screen uses {} bits per pixel at depth {}; only 24- and 32-bit screens are supported", bpp, reply.depth)));
+        }
+        let lsb = conn.setup().image_byte_order == ImageOrder::LSB_FIRST;
+        let mut px = Vec::with_capacity(n * 4);
+        for p in reply.data.chunks_exact(4).take(n) {
+            let (r, g, b) = if lsb { (p[2], p[1], p[0]) } else { (p[1], p[2], p[3]) };
+            px.extend_from_slice(&[r, g, b, 255]);
+        }
+        Ok(rgba(w as u32, h as u32, px))
+    }
+
+    fn atom(conn: &RustConnection, name: &str) -> Option<Atom> {
+        conn.intern_atom(false, name.as_bytes()).ok()?.reply().ok().map(|r| r.atom)
+    }
+
+    fn prop32(conn: &RustConnection, win: Window, prop: Atom, ty: impl Into<Atom>, len: u32) -> Vec<u32> {
+        conn.get_property(false, win, prop, ty.into(), 0, len).ok().and_then(|c| c.reply().ok()).and_then(|r| r.value32().map(|v| v.collect())).unwrap_or_default()
+    }
+
+    fn title(conn: &RustConnection, win: Window, net_wm_name: Option<Atom>, utf8: Option<Atom>) -> String {
+        if let (Some(name), Some(utf8)) = (net_wm_name, utf8) {
+            if let Some(r) = conn.get_property(false, win, name, utf8, 0, 1024).ok().and_then(|c| c.reply().ok()) {
+                if !r.value.is_empty() {
+                    return String::from_utf8_lossy(&r.value).into_owned();
+                }
+            }
+        }
+        conn.get_property(false, win, AtomEnum::WM_NAME, AtomEnum::STRING, 0, 1024).ok().and_then(|c| c.reply().ok()).map(|r| String::from_utf8_lossy(&r.value).into_owned()).unwrap_or_default()
+    }
+
+    /// The desktop's windows, topmost first, with their frames (title bar and borders).
     pub fn windows() -> Vec<WinInfo> {
-        vec![]
+        let Ok((conn, screen_num)) = connect() else { return vec![] };
+        let Some(root) = conn.setup().roots.get(screen_num).map(|s| s.root) else { return vec![] };
+        let (Some(stacking), Some(frame), Some(state), Some(hidden), Some(pid), Some(desktop), Some(current)) = (
+            atom(&conn, "_NET_CLIENT_LIST_STACKING"),
+            atom(&conn, "_NET_FRAME_EXTENTS"),
+            atom(&conn, "_NET_WM_STATE"),
+            atom(&conn, "_NET_WM_STATE_HIDDEN"),
+            atom(&conn, "_NET_WM_PID"),
+            atom(&conn, "_NET_WM_DESKTOP"),
+            atom(&conn, "_NET_CURRENT_DESKTOP"),
+        ) else {
+            return vec![];
+        };
+        let (net_wm_name, utf8) = (atom(&conn, "_NET_WM_NAME"), atom(&conn, "UTF8_STRING"));
+        let me = std::process::id();
+        let current_desktop = prop32(&conn, root, current, AtomEnum::CARDINAL, 1).first().copied();
+        let mut out = vec![];
+        for win in prop32(&conn, root, stacking, AtomEnum::WINDOW, 4096).into_iter().rev() {
+            if prop32(&conn, win, pid, AtomEnum::CARDINAL, 1).first() == Some(&me) {
+                continue;
+            }
+            if prop32(&conn, win, state, AtomEnum::ATOM, 64).contains(&hidden) {
+                continue;
+            }
+            let on = prop32(&conn, win, desktop, AtomEnum::CARDINAL, 1).first().copied();
+            if let (Some(on), Some(cur)) = (on, current_desktop) {
+                if on != cur && on != u32::MAX {
+                    continue;
+                }
+            }
+            let Some(geo) = conn.get_geometry(win).ok().and_then(|c| c.reply().ok()) else { continue };
+            let Some(pos) = conn.translate_coordinates(win, root, 0, 0).ok().and_then(|c| c.reply().ok()) else { continue };
+            let ext = prop32(&conn, win, frame, AtomEnum::CARDINAL, 4);
+            let [l, r, t, b] = <[u32; 4]>::try_from(ext.as_slice()).unwrap_or([0; 4]);
+            let (w, h) = (geo.width as u32 + l + r, geo.height as u32 + t + b);
+            if w < 4 || h < 4 {
+                continue;
+            }
+            out.push(WinInfo { id: win as u64, title: title(&conn, win, net_wm_name, utf8), x: pos.dst_x as i32 - l as i32, y: pos.dst_y as i32 - t as i32, w, h });
+        }
+        out
     }
+
+    /// The mouse pointer, in desktop pixels; unknown on Wayland.
     pub fn cursor() -> Option<(i32, i32)> {
-        None
+        if wayland() {
+            return None;
+        }
+        let (conn, screen_num) = connect().ok()?;
+        let root = conn.setup().roots.get(screen_num)?.root;
+        let p = conn.query_pointer(root).ok()?.reply().ok()?;
+        Some((p.root_x as i32, p.root_y as i32))
     }
-    pub fn pointer() -> Option<Pointer> {
-        None
+
+    /// The mouse pointer as it is drawn now (XFixes); unknown on Wayland, whose portal draws it or not.
+    pub fn pointer() -> Option<super::Pointer> {
+        if wayland() {
+            return None;
+        }
+        let (conn, _) = connect().ok()?;
+        // XFixes answers only a client that said which version it speaks.
+        conn.xfixes_query_version(5, 0).ok()?.reply().ok()?;
+        let c = conn.xfixes_get_cursor_image().ok()?.reply().ok()?;
+        let (w, h) = (c.width as u32, c.height as u32);
+        if w == 0 || h == 0 || w > 512 || h > 512 || c.cursor_image.len() < (w * h) as usize {
+            return None;
+        }
+        // Premultiplied ARGB, one u32 per pixel: divide the colour back out.
+        let mut px = Vec::with_capacity((w * h * 4) as usize);
+        for &argb in c.cursor_image.iter().take((w * h) as usize) {
+            let a = argb >> 24;
+            let un = |c: u32| if a == 0 { 0 } else { ((c * 255 + a / 2) / a).min(255) as u8 };
+            px.extend_from_slice(&[un((argb >> 16) & 0xff), un((argb >> 8) & 0xff), un(argb & 0xff), a as u8]);
+        }
+        let invert = vec![false; (w * h) as usize];
+        Some(super::Pointer { x: c.x as i32 - c.xhot as i32, y: c.y as i32 - c.yhot as i32, w, h, px, invert })
     }
+    /// The window the window manager says is active. `windows()` leaves out ShotCraft's own, so
+    /// when ShotCraft has the focus nothing is found and the user picks a window instead.
     pub fn focused_window() -> (Option<i32>, Vec<WindowInfo>) {
-        (None, vec![])
+        let Ok((conn, screen_num)) = connect() else { return (None, vec![]) };
+        let Some(root) = conn.setup().roots.get(screen_num).map(|s| s.root) else { return (None, vec![]) };
+        let (Some(active), Some(pid)) = (atom(&conn, "_NET_ACTIVE_WINDOW"), atom(&conn, "_NET_WM_PID")) else { return (None, vec![]) };
+        let Some(id) = prop32(&conn, root, active, AtomEnum::WINDOW, 1).first().copied().filter(|id| *id != 0) else { return (None, vec![]) };
+        let Some(w) = windows().into_iter().find(|w| w.id == id as u64) else { return (None, vec![]) };
+        // Without a process id the window's own id stands in: it only has to differ from ShotCraft's.
+        let pid = prop32(&conn, id, pid, AtomEnum::CARDINAL, 1).first().map_or(id as i32, |p| *p as i32);
+        let info = WindowInfo { id, pid, layer: 0, alpha: 1.0, bounds: Rect::new(w.x as f64, w.y as f64, w.w as f64, w.h as f64) };
+        (Some(pid), vec![info])
     }
+
+    /// X11 has no picture of a covered window without a compositor's help; the frozen screen is used.
     pub fn window_image(_win: &WinInfo) -> Option<Image> {
         None
     }
@@ -851,6 +1099,31 @@ mod tests {
         }
     }
 
+    /// The real X11 code under a display (CI runs the tests under Xvfb): the screens, a frozen
+    /// picture of them, an 8×8 grab and the pointer. Skips without an X11 display.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn x11_reads_the_screens_grabs_an_area_and_the_pointer() {
+        if backend::wayland() || std::env::var_os("DISPLAY").is_none() {
+            eprintln!("no X11 display: skipped");
+            return;
+        }
+        let screens = backend::screens();
+        assert!(!screens.is_empty(), "RandR names at least one screen");
+        let frozen = freeze_for_scrolling(1.0).expect("the screens are photographed");
+        assert!(!frozen.shots.is_empty() && frozen.shots.iter().all(|s| s.img.w > 0 && s.img.h > 0));
+        let img = grab_area(&crate::scroll::GrabRect { x: 0, y: 0, w: 8, h: 8 }).expect("grab");
+        assert_eq!(img.dimensions(), (8, 8));
+        assert!(img.pixels().all(|p| p.0[3] == 255), "opaque");
+        assert!(grab_area(&crate::scroll::GrabRect { x: 1_000_000, y: 0, w: 8, h: 8 }).is_err(), "off the screen");
+        match backend::pointer() {
+            Some(p) => {
+                assert!(p.w > 0 && p.h > 0 && p.px.len() == (p.w * p.h * 4) as usize);
+                eprintln!("pointer {}x{} at ({}, {}), {} screens", p.w, p.h, p.x, p.y, screens.len());
+            }
+            None => eprintln!("XFixes gave no pointer, {} screens", screens.len()),
+        }
+    }
     #[test]
     fn crop_takes_the_pixels_inside() {
         let src = img(10, 8);
@@ -924,6 +1197,33 @@ mod tests {
     fn blank_spots_black_and_transparent_pictures() {
         assert!(blank(&Image { w: 2, h: 1, px: Arc::new(vec![0, 0, 0, 255, 0, 0, 0, 0]) }));
         assert!(!blank(&img(20, 20)));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn portal_uris_become_paths() {
+        assert_eq!(backend::file_path("file:///home/a/Pictures/Screenshot%20from%202026.png"), Some("/home/a/Pictures/Screenshot from 2026.png".into()));
+        assert_eq!(backend::file_path("https://example.com/x.png"), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_desktops_copy_of_a_screenshot_is_deleted_after_reading() {
+        let dir = std::env::temp_dir().join(format!("shotcraft-portal-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let good = dir.join("Screenshot from 2026.png");
+        image::RgbaImage::from_pixel(3, 2, image::Rgba([10, 20, 30, 255])).save(&good).expect("write a png");
+        let img = backend::read_and_remove(&good).expect("a readable picture");
+        assert_eq!((img.w, img.h), (3, 2));
+        assert!(!good.exists(), "the copy in Pictures is gone");
+
+        let bad = dir.join("not-a-picture.png");
+        std::fs::write(&bad, b"not a png").expect("write a file");
+        assert!(backend::read_and_remove(&bad).is_err());
+        assert!(!bad.exists(), "an unreadable file doesn't pile up either");
+
+        assert!(backend::read_and_remove(&dir.join("missing.png")).is_err(), "a missing file is an error, not a panic");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

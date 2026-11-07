@@ -23,6 +23,10 @@ pub struct Shell {
     tray: Option<TrayIcon>,
     #[cfg(not(target_os = "linux"))]
     checks: Vec<CheckItem>,
+    #[cfg(target_os = "linux")]
+    tray: Option<ksni::blocking::Handle<linux::Tray>>,
+    #[cfg(target_os = "linux")]
+    events: (Queue, eframe::egui::Context),
     hotkeys: Option<GlobalHotKeyManager>,
     registered: Vec<HotKey>,
     /// Whether the Show ShotCraft hotkey works: the tray icon can be hidden only then.
@@ -216,6 +220,10 @@ impl Shell {
             tray,
             #[cfg(not(target_os = "linux"))]
             checks,
+            #[cfg(target_os = "linux")]
+            tray: None,
+            #[cfg(target_os = "linux")]
+            events: (queue.clone(), ctx.clone()),
             hotkeys: GlobalHotKeyManager::new().ok(),
             registered: vec![],
             show_hotkey_works: false,
@@ -279,7 +287,9 @@ impl Shell {
                 }
             }
             #[cfg(target_os = "linux")]
-            let _ = done; // no tray icon on Linux yet
+            if let Some(t) = &self.tray {
+                t.update(|tray| tray.done = done);
+            }
         }
         self.flash.next_check(now).map(|s| std::time::Duration::from_secs_f64(s + 0.02))
     }
@@ -289,7 +299,7 @@ impl Shell {
         let Some(mgr) = &self.hotkeys else { return };
         if let Some(hk) = self.escape.take() {
             self.escape_id.store(0, Ordering::SeqCst);
-            let _ = mgr.unregister(hk);
+            release_hotkey(mgr, hk);
         }
         if on {
             let Ok(hk) = "Escape".parse::<HotKey>() else { return };
@@ -310,14 +320,168 @@ impl Shell {
         }
     }
 
-    /// Linux: no tray icon yet.
+    /// A StatusNotifierItem can't be hidden, so hiding stops it and showing starts a new one.
     #[cfg(target_os = "linux")]
-    pub fn sync(&mut self, _settings: &Settings) {}
+    pub fn sync(&mut self, settings: &Settings) {
+        if !settings.menubar_icon_visible(self.show_hotkey_works) {
+            if let Some(t) = self.tray.take() {
+                let _ = t.shutdown();
+            }
+            return;
+        }
+        let checked = linux::checked(settings);
+        match &self.tray {
+            Some(t) if !t.is_closed() => {
+                t.update(|tray| tray.checked = checked);
+            }
+            _ => {
+                let (queue, ctx) = self.events.clone();
+                self.tray = linux::start(linux::Tray { queue, ctx, checked, done: false });
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod linux {
+    use super::{run_id, tray_icon_rgba};
+    use crate::commands::{Item, TRAY};
+    use crate::settings::Settings;
+    use crate::Queue;
+    use ksni::blocking::TrayMethods;
+    use ksni::menu::{CheckmarkItem, MenuItem, StandardItem, SubMenu};
+
+    pub struct Tray {
+        pub queue: Queue,
+        pub ctx: eframe::egui::Context,
+        /// Ids of the on/off items that are on.
+        pub checked: Vec<&'static str>,
+        /// The check mark of a copy or a save is showing (`Shell::tick_flash`).
+        pub done: bool,
+    }
+
+    pub fn checked(settings: &Settings) -> Vec<&'static str> {
+        fn walk(items: &[Item], settings: &Settings, out: &mut Vec<&'static str>) {
+            for i in items {
+                match i {
+                    Item::Cmd(c) if c.checked.is_some_and(|on| on(settings)) => out.push(c.id),
+                    Item::Sub(_, sub) => walk(sub, settings, out),
+                    _ => {}
+                }
+            }
+        }
+        let mut out = vec![];
+        walk(TRAY, settings, &mut out);
+        out
+    }
+
+    pub fn start(tray: Tray) -> Option<ksni::blocking::Handle<Tray>> {
+        tray.spawn().ok()
+    }
+
+    impl Tray {
+        fn items(&self, items: &[Item]) -> Vec<MenuItem<Self>> {
+            let mut out = vec![];
+            for item in items {
+                match item {
+                    Item::Cmd(c) => {
+                        let id = c.id;
+                        let activate = Box::new(move |t: &mut Tray| run_id(&t.queue, &t.ctx, id));
+                        out.push(match c.checked {
+                            Some(_) => CheckmarkItem { label: c.label.into(), checked: self.checked.contains(&id), activate, ..Default::default() }.into(),
+                            None => StandardItem { label: c.label.into(), activate, ..Default::default() }.into(),
+                        });
+                    }
+                    Item::Sub(name, sub) => out.push(SubMenu { label: (*name).into(), submenu: self.items(sub), ..Default::default() }.into()),
+                    Item::Separator => out.push(MenuItem::Separator),
+                    // The drawing tools are the editor's menu bar's only.
+                    Item::Tools => {}
+                }
+            }
+            out
+        }
+    }
+
+    impl ksni::Tray for Tray {
+        // A click opens the menu, as the menu bar icon does on macOS.
+        const MENU_ON_ACTIVATE: bool = true;
+
+        fn id(&self) -> String {
+            "shotcraft".into()
+        }
+
+        fn title(&self) -> String {
+            "ShotCraft".into()
+        }
+
+        fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+            let (rgba, n) = tray_icon_rgba(self.done);
+            // ARGB32 in network byte order.
+            let data = rgba.chunks_exact(4).flat_map(|p| [p[3], p[0], p[1], p[2]]).collect();
+            vec![ksni::Icon { width: n as i32, height: n as i32, data }]
+        }
+
+        fn tool_tip(&self) -> ksni::ToolTip {
+            ksni::ToolTip { title: "ShotCraft".into(), ..Default::default() }
+        }
+
+        fn menu(&self) -> Vec<MenuItem<Self>> {
+            self.items(TRAY)
+        }
+    }
+}
+
+/// Gives a hotkey back to the other programs.
+fn release_hotkey(mgr: &GlobalHotKeyManager, hk: HotKey) {
+    let _ = mgr.unregister(hk);
+    #[cfg(target_os = "linux")]
+    flush_ungrab(mgr);
+}
+
+/// Linux (X11): `global-hotkey` (0.8 and 0.9) sends the ungrab of an unregistered key but never
+/// flushes its connection, so the key stays grabbed, and a program asking for it gets BadAccess
+/// (ShotCraft's own capture picker could no longer be cancelled with Esc after a scrolling
+/// capture). Registering a key waits for the server's reply, which sends everything queued before
+/// it. So register a key combination nobody types, then release that one too; its own ungrab
+/// goes out with the next call. Drop this once the crate flushes.
+#[cfg(target_os = "linux")]
+fn flush_ungrab(mgr: &GlobalHotKeyManager) {
+    use global_hotkey::hotkey::{Code, Modifiers};
+    let nobody_types_this = HotKey::new(Some(Modifiers::CONTROL | Modifiers::ALT | Modifiers::SHIFT | Modifiers::SUPER), Code::F24);
+    if mgr.register(nobody_types_this).is_ok() {
+        let _ = mgr.unregister(nobody_types_this);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Needs an X server (the suite runs under `xvfb-run`); without one there is nothing to grab.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn escape_is_free_for_other_programs_right_after_it_is_released() {
+        use x11rb::connection::Connection;
+        use x11rb::protocol::xproto::{ConnectionExt, GrabMode, ModMask};
+        let Ok((conn, screen)) = x11rb::connect(None) else { return };
+        let setup = conn.setup();
+        let root = setup.roots[screen].root;
+        let (first, last) = (setup.min_keycode, setup.max_keycode);
+        let map = conn.get_keyboard_mapping(first, last - first + 1).expect("ask").reply().expect("keyboard map");
+        let per = usize::from(map.keysyms_per_keycode).max(1);
+        let index = map.keysyms.chunks(per).position(|syms| syms.contains(&0xff1b)).expect("a key for Escape");
+        let escape = first + index as u8;
+
+        let mgr = GlobalHotKeyManager::new().expect("hotkey manager");
+        let hk: HotKey = "Escape".parse().expect("Escape parses");
+        mgr.register(hk).expect("ShotCraft takes Esc");
+        let held = conn.grab_key(false, root, ModMask::ANY, escape, GrabMode::ASYNC, GrabMode::ASYNC).expect("ask").check();
+        assert!(held.is_err(), "while ShotCraft holds Esc, another program can't have it");
+
+        release_hotkey(&mgr, hk);
+        let freed = conn.grab_key(false, root, ModMask::ANY, escape, GrabMode::ASYNC, GrabMode::ASYNC).expect("ask").check();
+        assert!(freed.is_ok(), "Esc must be free the moment it is released: {freed:?}");
+    }
 
     #[test]
     fn every_tray_item_has_an_action() {
