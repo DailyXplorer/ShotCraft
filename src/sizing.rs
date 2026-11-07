@@ -240,7 +240,13 @@ pub const OPTIONS_H: f32 = 48.0;
 pub const STATUS_H: f32 = 34.0;
 /// The editor window never gets smaller than this.
 pub const EDITOR_MIN_SIZE: Size = (480.0, 270.0);
+/// What the toolbar leaves free before its first group: macOS keeps it for the window buttons.
+#[cfg(target_os = "macos")]
 pub const TRAFFIC_LIGHTS_W: f32 = 78.0;
+/// Windows and Linux have no buttons there, but the groups are centred, so the margin must be as
+/// wide as the one that holds the Preferences button on the right.
+#[cfg(not(target_os = "macos"))]
+pub const TRAFFIC_LIGHTS_W: f32 = 56.0;
 pub const TOOLBAR_SEG_W: f32 = 30.0;
 pub const TOOLBAR_GROUP_GAP: f32 = 10.0;
 pub const TOOLBAR_EDGE: f32 = 12.0;

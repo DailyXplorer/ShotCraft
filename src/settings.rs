@@ -1,5 +1,17 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+
+/// Set for `--screenshot` runs, which start from the default settings so their pictures don't
+/// depend on this computer, and so must never write over the user's own settings.
+static READ_ONLY: AtomicBool = AtomicBool::new(false);
+
+/// The settings for a `--screenshot` run: the defaults, never saved.
+#[cfg(not(target_os = "macos"))]
+pub fn for_screenshots() -> Settings {
+    READ_ONLY.store(true, std::sync::atomic::Ordering::Relaxed);
+    Settings::default()
+}
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AfterShow {
@@ -188,7 +200,10 @@ impl Default for Settings {
             after_save: false,
             thumbnail_auto_close: false,
             autostart: false,
+            #[cfg(target_os = "macos")]
             folder: crate::system::home().join("Desktop").display().to_string(),
+            #[cfg(not(target_os = "macos"))]
+            folder: crate::system::default_folder().display().to_string(),
             save_auto_format: false,
             downscale_retina: false,
             window_bg: WindowBg::Transparent,
@@ -218,10 +233,24 @@ impl Default for Settings {
             default_tool: String::new(),
             tool_styles: Default::default(),
             hotkeys: vec![
+                #[cfg(target_os = "macos")]
                 (HotkeyAction::Fullscreen, "super+shift+Digit1".into()),
+                #[cfg(target_os = "macos")]
                 (HotkeyAction::Area, "super+shift+Digit2".into()),
+                #[cfg(target_os = "macos")]
                 (HotkeyAction::ActiveWindow, "control+alt+super+KeyW".into()),
+                #[cfg(target_os = "macos")]
                 (HotkeyAction::Ocr, "control+alt+super+KeyO".into()),
+                // Windows and Linux: Ctrl+Shift+1 to 4. Not Ctrl+Alt+<letter>, which is AltGr+<letter> on many
+                // keyboard layouts and types a letter there.
+                #[cfg(not(target_os = "macos"))]
+                (HotkeyAction::Fullscreen, "ctrl+shift+Digit1".into()),
+                #[cfg(not(target_os = "macos"))]
+                (HotkeyAction::Area, "ctrl+shift+Digit2".into()),
+                #[cfg(not(target_os = "macos"))]
+                (HotkeyAction::ActiveWindow, "ctrl+shift+Digit3".into()),
+                #[cfg(not(target_os = "macos"))]
+                (HotkeyAction::Ocr, "ctrl+shift+Digit4".into()),
             ],
             last_area: None,
             snap_objects: true,
@@ -238,8 +267,14 @@ fn bad_copy_path(p: &std::path::Path) -> PathBuf {
     p.with_file_name(name)
 }
 
+#[cfg(target_os = "macos")]
 fn path() -> PathBuf {
     crate::system::home().join("Library/Application Support/ShotCraft/settings.json")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn path() -> PathBuf {
+    crate::system::settings_dir().join("settings.json")
 }
 
 impl Settings {
@@ -283,6 +318,9 @@ impl Settings {
     }
 
     pub fn save(&self) {
+        if READ_ONLY.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
         let p = path();
         if let Some(d) = p.parent() {
             let _ = std::fs::create_dir_all(d);
@@ -325,6 +363,7 @@ impl Settings {
 }
 
 /// "super+shift+Digit1" → "⌘⇧1"
+#[cfg(target_os = "macos")]
 pub fn pretty_hotkey(s: &str) -> String {
     let mut out = String::new();
     for part in s.split('+') {
@@ -337,6 +376,65 @@ pub fn pretty_hotkey(s: &str) -> String {
         });
     }
     out
+}
+
+/// "ctrl+shift+Digit1" → "Ctrl+Shift+1"
+#[cfg(not(target_os = "macos"))]
+pub fn pretty_hotkey(s: &str) -> String {
+    s.split('+')
+        .map(|part| match part {
+            "ctrl" | "control" => "Ctrl",
+            "alt" | "option" => "Alt",
+            "shift" => "Shift",
+            "super" | "cmd" | "command" => {
+                if cfg!(target_os = "windows") {
+                    "Win"
+                } else {
+                    "Super"
+                }
+            }
+            k => k
+                .strip_prefix("Digit")
+                .or_else(|| k.strip_prefix("Key"))
+                .unwrap_or(k),
+        })
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
+/// Shortcut text as the system writes it. The texts are written the macOS way ("Save (⌘S)",
+/// "⌘⇧Z", "⇧+]"); on Windows and Linux ⌘ becomes Ctrl+, ⇧ Shift+, ⌥ Alt+ and ⌃ Ctrl+.
+#[cfg(not(target_os = "macos"))]
+pub fn keys(s: &str) -> std::borrow::Cow<'_, str> {
+    if cfg!(target_os = "macos") || !s.contains(['⌘', '⇧', '⌥', '⌃']) {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len() + 16);
+    let mut i = 0;
+    while i < chars.len() {
+        let name = match chars[i] {
+            '⌘' | '⌃' => Some("Ctrl"),
+            '⇧' => Some("Shift"),
+            '⌥' => Some("Alt"),
+            _ => None,
+        };
+        match name {
+            Some(name) => {
+                out.push_str(name);
+                out.push('+');
+                // "⇧+]" already has its plus; "⌘+  ⌘-" means the plus key, which stays.
+                if chars.get(i + 1) == Some(&'+')
+                    && chars.get(i + 2).is_some_and(|c| !c.is_whitespace())
+                {
+                    i += 1;
+                }
+            }
+            None => out.push(chars[i]),
+        }
+        i += 1;
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 /// A date and time on the clock, for names.
@@ -580,6 +678,67 @@ mod capture_option_tests {
         assert_eq!(delayed_label(3), "Delayed Screenshot (3s)");
         assert_eq!(delayed_label(10), "Delayed Screenshot (10s)");
         assert!(DELAYS.contains(&DEFAULT_DELAY));
+    }
+}
+
+// Windows and Linux: the same checks with their defaults, and their own (macOS has `tests` below).
+#[cfg(all(test, not(target_os = "macos")))]
+mod tests_off_macos {
+    use super::*;
+
+    #[test]
+    fn hidden_menubar_icon_needs_the_show_hotkey() {
+        let mut s = Settings::default();
+        s.hide_menubar_icon = true;
+        assert!(s.menubar_icon_visible(false), "no working Show hotkey: the icon stays");
+        assert!(!s.menubar_icon_visible(true));
+        s.hide_menubar_icon = false;
+        assert!(s.menubar_icon_visible(true));
+    }
+
+    #[test]
+    fn default_hotkeys_parse() {
+        let settings = Settings::default();
+        for (_, keys) in &settings.hotkeys {
+            assert!(keys.parse::<global_hotkey::hotkey::HotKey>().is_ok(), "{keys}");
+        }
+        let ocr = pretty_hotkey(settings.hotkey(HotkeyAction::Ocr).unwrap());
+        #[cfg(target_os = "macos")]
+        assert_eq!(ocr, "⌃⌥⌘O");
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(ocr, "Ctrl+Shift+4");
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn shortcut_texts_use_the_system_names() {
+        assert_eq!(keys("Save (⌘S)"), "Save (Ctrl+S)");
+        assert_eq!(keys("⌘⇧Z"), "Ctrl+Shift+Z");
+        assert_eq!(keys("Resize ( ⇧+] )"), "Resize ( Shift+] )");
+        assert_eq!(keys("⌘+  ⌘-  ⌘0  ⌘1"), "Ctrl++  Ctrl+-  Ctrl+0  Ctrl+1");
+        assert_eq!(keys("Tab / ⇧Tab"), "Tab / Shift+Tab");
+        assert_eq!(keys("Space + drag"), "Space + drag");
+        assert_eq!(pretty_hotkey("ctrl+shift+Digit1"), "Ctrl+Shift+1");
+        assert_eq!(pretty_hotkey("alt+KeyO"), "Alt+O");
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn the_wheel_keys_read_the_windows_way() {
+        assert_eq!(keys("Wheel  ⇧Wheel  ⌘Wheel"), "Wheel  Shift+Wheel  Ctrl+Wheel");
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn default_hotkeys_use_ctrl() {
+        let s = Settings::default();
+        assert_eq!(
+            s.hotkey(HotkeyAction::Fullscreen),
+            Some("ctrl+shift+Digit1")
+        );
+        assert_eq!(s.hotkey(HotkeyAction::Area), Some("ctrl+shift+Digit2"));
+        assert_eq!(s.hotkey(HotkeyAction::ActiveWindow), Some("ctrl+shift+Digit3"));
+        assert_eq!(s.hotkey(HotkeyAction::Ocr), Some("ctrl+shift+Digit4"));
     }
 }
 

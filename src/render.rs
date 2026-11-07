@@ -17,12 +17,31 @@ fn load_font(path: &str, index: u32) -> Option<FontVec> {
     FontVec::try_from_vec_and_index(data, index).ok()
 }
 
+/// Windows and Linux: hand-drawn text faces to try, with the face index inside a collection.
+#[cfg(target_os = "windows")]
+const GOOFY: &[(&str, u32)] = &[(r"C:\Windows\Fonts\comicbd.ttf", 0), (r"C:\Windows\Fonts\comic.ttf", 0)];
+#[cfg(target_os = "linux")]
+const GOOFY: &[(&str, u32)] = &[
+    ("/usr/share/fonts/truetype/msttcorefonts/Comic_Sans_MS_Bold.ttf", 0),
+    ("/usr/share/fonts/truetype/msttcorefonts/comicbd.ttf", 0),
+    ("/usr/share/fonts/TTF/comicbd.ttf", 0),
+    ("/usr/share/fonts/truetype/comic-neue/ComicNeue-Bold.ttf", 0),
+    ("/usr/share/fonts/opentype/comic-neue/ComicNeue-Bold.otf", 0),
+    ("/usr/share/fonts/comic-neue/ComicNeue-Bold.otf", 0),
+    ("/usr/share/fonts/truetype/comic-neue/ComicNeue_Bold.ttf", 0),
+];
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+const GOOFY: &[(&str, u32)] = &[];
+
 impl Fonts {
     pub fn load() -> Fonts {
         let dm = || FontVec::try_from_vec(include_bytes!("../assets/fonts/DMSans-Bold.ttf").to_vec()).expect("bundled DM Sans");
+        #[cfg(target_os = "macos")]
         let goofy = load_font("/System/Library/Fonts/Supplemental/ChalkboardSE.ttc", 2)
             .or_else(|| load_font("/System/Library/Fonts/Supplemental/Comic Sans MS Bold.ttf", 0))
             .unwrap_or_else(dm);
+        #[cfg(not(target_os = "macos"))]
+        let goofy = GOOFY.iter().find_map(|(path, index)| load_font(path, *index)).unwrap_or_else(dm);
         let face = |bytes: &[u8]| FontVec::try_from_vec(bytes.to_vec()).expect("bundled font");
         Fonts {
             sans: dm(),
@@ -2376,6 +2395,158 @@ mod tests {
         }
     }
 
+    /// Every tool once, on the 900 x 560 sample picture; what the export tests draw.
+    #[cfg(not(target_os = "macos"))]
+    fn tour_objects() -> Vec<Obj> {
+        let st = Style::default();
+        let mut hl = st;
+        hl.color = hex(HIGHLIGHT_DEFAULT);
+        let mut filled = st;
+        filled.fill = Fill::Translucent;
+        filled.color = hex("#00AFEE");
+        let mut text = st;
+        text.size = 4;
+        let mut blur = st;
+        let sketch = Style { fill: Fill::HandDrawn, scale: 2.0, ..st };
+        let mut hand = st;
+        hand.arrow = ArrowStyle::HandDrawn;
+        hand.color = hex("#7758EF");
+        let mut dashed = st;
+        dashed.dashed = true;
+        dashed.color = hex("#00A490");
+        vec![
+            Obj {
+                kind: Kind::Highlighter {
+                    a: p(40.0, 100.0),
+                    b: p(300.0, 100.0),
+                },
+                style: hl,
+            },
+            Obj {
+                kind: Kind::Arrow {
+                    a: p(60.0, 300.0),
+                    b: p(240.0, 180.0),
+                    seed: 9,
+                },
+                style: st,
+            },
+            Obj {
+                kind: Kind::Arrow {
+                    a: p(300.0, 320.0),
+                    b: p(440.0, 200.0),
+                    seed: 10,
+                },
+                style: hand,
+            },
+            Obj {
+                kind: Kind::Rect {
+                    r: R {
+                        x0: 520.0,
+                        y0: 300.0,
+                        x1: 760.0,
+                        y1: 420.0,
+                    },
+                    seed: 11,
+                },
+                style: filled,
+            },
+            Obj {
+                kind: Kind::Oval {
+                    r: R {
+                        x0: 60.0,
+                        y0: 360.0,
+                        x1: 240.0,
+                        y1: 480.0,
+                    },
+                    seed: 12,
+                },
+                style: dashed,
+            },
+            Obj {
+                kind: Kind::Rect {
+                    r: R {
+                        x0: 640.0,
+                        y0: 30.0,
+                        x1: 880.0,
+                        y1: 190.0,
+                    },
+                    seed: 13,
+                },
+                style: sketch,
+            },
+            Obj {
+                kind: Kind::Oval {
+                    r: R {
+                        x0: 640.0,
+                        y0: 375.0,
+                        x1: 880.0,
+                        y1: 535.0,
+                    },
+                    seed: 14,
+                },
+                style: sketch,
+            },
+            Obj {
+                kind: Kind::Text {
+                    at: p(300.0, 400.0),
+                    text: "Hello ShotCraft".into(),
+                },
+                style: text,
+            },
+            Obj {
+                kind: Kind::Counter {
+                    at: p(800.0, 470.0),
+                    n: 1,
+                },
+                style: st,
+            },
+            Obj {
+                kind: Kind::Blur {
+                    r: R {
+                        x0: 540.0,
+                        y0: 80.0,
+                        x1: 860.0,
+                        y1: 140.0,
+                    },
+                    text: None,
+                },
+                style: blur,
+            },
+            Obj {
+                kind: Kind::Magnifier {
+                    r: R {
+                        x0: 430.0,
+                        y0: 240.0,
+                        x1: 490.0,
+                        y1: 300.0,
+                    },
+                    lens: MAGNIFIER_LENS,
+                },
+                style: st,
+            },
+            Obj {
+                kind: Kind::Ruler {
+                    a: p(40.0, 520.0),
+                    b: p(480.0, 520.0),
+                },
+                style: st,
+            },
+            Obj {
+                kind: Kind::Freehand {
+                    pts: (0..40)
+                        .map(|i| {
+                            p(
+                                320.0 + i as f32 * 5.0,
+                                470.0 + (i as f32 * 0.5).sin() * 20.0,
+                            )
+                        })
+                        .collect(),
+                },
+                style: st,
+            },
+        ]
+    }
+
     #[test]
     fn renders_every_tool() {
         let fonts = Fonts::load();
@@ -2424,6 +2595,109 @@ mod tests {
         for (name, img) in [("render-tools.png", &flat), ("render-backdrop.png", &framed)] {
             image::RgbaImage::from_raw(img.w, img.h, img.px.to_vec()).unwrap().save(out.join(name)).unwrap();
         }
+    }
+
+    /// Visual regression: what the renderer draws is compared with the pictures in
+    /// `tests/reference/export` (see `visual.rs`; `SHOTCRAFT_UPDATE_REFERENCES=1` rewrites them).
+    /// Only parts that draw the same on every system are in them: no hand-drawn text, whose font is
+    /// each system's own.
+    // Not on macOS until its references are checked there (they are drawn on Windows).
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn exports_match_the_reference_pictures() {
+        use image::RgbaImage;
+        let fonts = Fonts::load();
+        let st = Style::default();
+        let picture = |img: &Image| RgbaImage::from_raw(img.w, img.h, img.px.to_vec()).unwrap();
+
+        let mut tour = Doc::new(sample(), 2.0);
+        tour.objs = tour_objects();
+        let flat = export(&tour, &fonts);
+        tour.objs.push(Obj {
+            kind: Kind::Spotlight {
+                r: R {
+                    x0: 500.0,
+                    y0: 280.0,
+                    x1: 780.0,
+                    y1: 440.0,
+                },
+            },
+            style: st,
+        });
+        tour.backdrop = Some(Backdrop::default());
+        let framed = export(&tour, &fonts);
+
+        // The arrow styles, and text in a dark and a light colour (the editor draws them in different weights).
+        let mut close = Doc::new(sample(), 2.0);
+        let arrow = |a, b, seed, style: ArrowStyle, color: &str| {
+            let mut s = st;
+            s.arrow = style;
+            s.color = hex(color);
+            Obj {
+                kind: Kind::Arrow { a, b, seed },
+                style: s,
+            }
+        };
+        let words = |at, color: &str| {
+            let mut s = st;
+            s.size = 4;
+            s.color = hex(color);
+            Obj {
+                kind: Kind::Text {
+                    at,
+                    text: "Weights".into(),
+                },
+                style: s,
+            }
+        };
+        close.objs = vec![
+            arrow(
+                p(60.0, 120.0),
+                p(300.0, 60.0),
+                1,
+                ArrowStyle::Shape,
+                "#FF0000",
+            ),
+            arrow(
+                p(60.0, 220.0),
+                p(300.0, 160.0),
+                2,
+                ArrowStyle::HandDrawn,
+                "#7758EF",
+            ),
+            arrow(
+                p(60.0, 320.0),
+                p(300.0, 260.0),
+                3,
+                ArrowStyle::Line,
+                "#00A490",
+            ),
+            arrow(
+                p(60.0, 420.0),
+                p(300.0, 360.0),
+                4,
+                ArrowStyle::Double,
+                "#FF8800",
+            ),
+            words(p(400.0, 100.0), "#000000"),
+            words(p(400.0, 220.0), "#FFFFFF"),
+            words(p(400.0, 340.0), "#00AFEE"),
+        ];
+        let arrows_and_text = export(&close, &fonts);
+
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("reference")
+            .join("export");
+        let results: Vec<String> = [
+            ("tour", &flat),
+            ("tour-backdrop", &framed),
+            ("arrows-and-text", &arrows_and_text),
+        ]
+        .into_iter()
+        .filter_map(|(name, img)| crate::visual::check(name, &picture(img), &dir, 4, 0.0005).err())
+        .collect();
+        assert!(results.is_empty(), "\n{}", results.join("\n"));
     }
 
     fn doc_of(w: u32, h: u32, c: [u8; 4]) -> Doc {
