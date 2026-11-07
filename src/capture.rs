@@ -707,8 +707,18 @@ mod backend {
         let Some(path) = file_path(shot.uri().as_str()) else {
             return Err(format!("Can't take a screenshot: the desktop returned {}", shot.uri().as_str()));
         };
-        let img = crate::system::load_image_file(&path)?;
+        let img = read_and_remove(&path)?;
         Ok(Some(Captured { img, scale: opt.scale, area: None, mode }))
+    }
+
+    /// Read the screenshot the desktop saved for this request, then delete that file. The desktop
+    /// leaves a copy of every shot in ~/Pictures, and ShotCraft keeps the picture in its own
+    /// window (the user saves what they want). The file goes whether or not it could be read, so
+    /// an unreadable one doesn't pile up either.
+    pub fn read_and_remove(path: &std::path::Path) -> Result<Image, String> {
+        let img = crate::system::load_image_file(path);
+        let _ = std::fs::remove_file(path);
+        img
     }
 
     /// `file:///home/me/Pictures/Screenshot%20from%20….png` → a path.
@@ -1194,6 +1204,26 @@ mod tests {
     fn portal_uris_become_paths() {
         assert_eq!(backend::file_path("file:///home/a/Pictures/Screenshot%20from%202026.png"), Some("/home/a/Pictures/Screenshot from 2026.png".into()));
         assert_eq!(backend::file_path("https://example.com/x.png"), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_desktops_copy_of_a_screenshot_is_deleted_after_reading() {
+        let dir = std::env::temp_dir().join(format!("shotcraft-portal-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let good = dir.join("Screenshot from 2026.png");
+        image::RgbaImage::from_pixel(3, 2, image::Rgba([10, 20, 30, 255])).save(&good).expect("write a png");
+        let img = backend::read_and_remove(&good).expect("a readable picture");
+        assert_eq!((img.w, img.h), (3, 2));
+        assert!(!good.exists(), "the copy in Pictures is gone");
+
+        let bad = dir.join("not-a-picture.png");
+        std::fs::write(&bad, b"not a png").expect("write a file");
+        assert!(backend::read_and_remove(&bad).is_err());
+        assert!(!bad.exists(), "an unreadable file doesn't pile up either");
+
+        assert!(backend::read_and_remove(&dir.join("missing.png")).is_err(), "a missing file is an error, not a panic");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
