@@ -1847,7 +1847,10 @@ impl eframe::App for App {
                 self.shell = Some(shell::Shell::start(self.queue.clone(), ctx.clone(), &self.settings));
                 #[cfg(target_os = "windows")]
                 self.tray_tip();
-                // Warm up: load the text model now, not on the first real OCR.
+                // Warm up: load the text model now, not on the first real OCR. Not on Linux: its
+                // models are compiled into the app and load on the first OCR, so the tray app
+                // doesn't hold them (or spend a start-up thread) for text nobody reads.
+                #[cfg(not(target_os = "linux"))]
                 std::thread::spawn(|| {
                     let _ = system::recognize(&Image { w: 64, h: 64, px: Arc::new(vec![255; 64 * 64 * 4]) });
                 });
