@@ -180,6 +180,16 @@ ShotCraft is signed with its own certificate, not an Apple Developer ID, and it 
 
 You only need to do this the first time.
 
+## Windows
+
+ShotCraft also runs on Windows 10 and 11. It lives in the system tray instead of the menu bar: start `shotcraft.exe` and its icon appears there, with every command in its menu. Starting it again while it runs changes nothing, as on macOS.
+
+**Keep the tray icon in sight (Windows 11).** Windows puts every new tray icon in the hidden overflow, the ^ next to the clock, and lets no app pin itself. To see ShotCraft's icon, and the check mark it shows for a moment after a copy or a save, turn it on in Settings > Personalization > Taskbar > Other system tray icons > ShotCraft ("Taskbar corner overflow" on older versions of Windows 11), or drag the icon from the ^ panel onto the taskbar. On Windows 10 the setting is Settings > Personalization > Taskbar > Select which icons appear on the taskbar.
+
+**Shortcuts.** ⌘ is Ctrl: Ctrl+Shift+1 takes a fullscreen screenshot, Ctrl+Shift+2 an area, Ctrl+Shift+3 the active window and Ctrl+Shift+4 reads text or a QR code. Change them in Preferences > Hotkeys. In the editor the mouse wheel scrolls the picture and Ctrl+wheel zooms.
+
+**What differs.** Area and window captures freeze the screen and show ShotCraft's own crosshair. Text recognition uses Windows' built-in OCR. `shotcraft://` links work once Preferences > Advanced > Automation allows them; ShotCraft then registers the link type for your user, and removes it when you switch that off.
+
 ## Build from source
 
 ```sh

@@ -151,6 +151,8 @@ pub struct Settings {
     /// Other apps may drive ShotCraft with `shotcraft://` links (see `url_scheme.rs`). Off until
     /// the user allows it, in Preferences or when the first link asks.
     pub allow_links: bool,
+    /// Windows: the first-start tip on keeping the tray icon in sight was shown (or wasn't needed).
+    pub tray_tip_shown: bool,
     /// Settings files written before `WindowBg::Trimmed` kept "Trim shadow" as its own checkbox.
     /// Only read, to carry an old choice over; never written.
     #[serde(skip_serializing)]
@@ -212,6 +214,7 @@ impl Default for Settings {
             delay_secs: DEFAULT_DELAY,
             frozen_area: false,
             allow_links: false,
+            tray_tip_shown: false,
             trim_shadow: false,
             always_on_top: false,
             reverse_zoom: false,
@@ -599,6 +602,15 @@ mod preference_tests {
         assert_eq!(SCROLL_SPEED_LABELS.len(), SCROLL_SPEED_MAX as usize + 1);
     }
 
+
+    #[test]
+    fn the_tray_tip_is_remembered_and_old_files_have_not_seen_it() {
+        assert!(!Settings::default().tray_tip_shown);
+        let old: Settings = serde_json::from_str(r#"{"after_show":"Editor"}"#).unwrap();
+        assert!(!old.tray_tip_shown, "a file from before the tip shows it once");
+        let seen: Settings = serde_json::from_str(r#"{"tray_tip_shown":true}"#).unwrap();
+        assert!(seen.tray_tip_shown);
+    }
     #[test]
     fn hotkey_rows_follow_the_original_order() {
         use HotkeyAction::*;

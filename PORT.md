@@ -5,12 +5,37 @@ same features.
 
 The macOS build runs the author's code. What Windows and Linux need sits beside it, behind
 `#[cfg(not(target_os = "macos"))]`; of the author's lines, only some `#[cfg(target_os = "macos")]` gates went, where
-a feature now works everywhere (scrolling capture, the capture thread). Everything added is Rust.
+a feature now works everywhere (scrolling capture, the capture thread), and the non-macOS placeholders the ports
+replace. Everything added is Rust. System features go through Rust bindings (the `windows` crate on
+Windows), as the Mac build does with `objc2`. On Linux the shared parts build and run; its capture, tray, text
+recognition, links and login item are placeholders until the Linux pull request.
 
-This is the groundwork both systems share: the command table, the editor's menu bar and dialogs, the crosshair
-picker, the capture and scrolling-capture glue, settings and folders, hotkeys, one copy per session. Screen capture,
-the tray, text recognition, link registration, the login item and printing are placeholders (they say "not
-available yet") until the Windows and Linux backends arrive.
+## What replaces what
+
+| On macOS | On Windows |
+|---|---|
+| `screencapture` (full screen, delayed, repeat area) | `xcap` (GDI) |
+| `screencapture -i` crosshair (area, window, Space to switch) | `src/picker.rs`: a borderless full-screen window per screen over the frozen picture, with a magnifier, size readout, Space and Esc |
+| Window capture | the window's own pixels (`PrintWindow` through xcap), even when covered |
+| Vision text recognition | `Windows.Media.Ocr`, every language with its OCR feature installed |
+| Vision barcodes | `rxing` (QR, Aztec, Data Matrix, PDF417, 1D codes) |
+| Menu bar icon | tray icon (`tray-icon`) |
+| App menu bar | the same menus in a menu bar across the top of the editor (ShotCraft, Capture, File, Edit, Draw, Zoom, Help) |
+| ⌘ shortcuts | Ctrl (shown as Ctrl+…) |
+| Global hotkeys (`global-hotkey`) | same crate |
+| `osascript` notification | Windows toast (`notify-rust`) |
+| LaunchAgent login item | `HKCU\…\Run` value |
+| `shotcraft://` links: the bundle declares the scheme, links arrive as Apple events | registered under `HKCU\Software\Classes\shotcraft` while Preferences ▸ Advanced ▸ Automation allows links (removed when switched off); the link is the launch's one argument, and a second launch hands it to the running copy |
+| Mouse pointer in screenshots (`screencapture -C`) | the cursor drawn in by GDI (`DrawIconEx` on black and on white gives its alpha, and the pixels that invert, like the I-beam's) |
+| Scrolling capture: `screencapture -i` for the area, `screencapture -R` per look, wheel events (Accessibility permission) | the area drawn on the frozen screens (`picker`, `for_scrolling`), `xcap` `capture_region` per look, `SendInput` wheel events at 120 per ~100 points (no permission needed); Esc is a global hotkey while it runs |
+| Drag the image out (toolbar handle): an `NSDraggingSession` with the PNG's file URL | the shell's data object for the PNG (what Explorer drags) and `SHDoDragDrop`, which draws the drag picture; the temporary file stays 10 minutes (Explorer may copy it after the drop) |
+| Print (`NSPrintOperation`, the system print panel) | the system print dialog (`PrintDlgW`), then GDI: the picture on one page, laid out by upstream's `print_layout` (on-screen size, shrunk to fit, centred, landscape when wider than tall), see-through parts on white |
+| Window Screenshot Background ▸ Wallpaper (the window capture comes with its shadow; the display's desktop picture behind it) | a shadow drawn like macOS's (`capture::with_shadow`: 30/30/20/46 points, blurred, falling down), then upstream's `windowbg` places it on the desktop picture (`SPI_GETDESKWALLPAPER`) as Windows' Fill lays it out; no picture → the solid colour, with a notice |
+| Menu bar icon flash after a copy or a save (`menubar-done.png` for 0.6 s) | the tray icon's viewfinder with a check mark in place of the dot, for upstream's 0.6 s (`tray_flash`) |
+| `~/Library/Application Support/ShotCraft` | `%APPDATA%\ShotCraft` |
+| Chalkboard / Comic Sans for hand-drawn text | Comic Sans (`C:\Windows\Fonts\comicbd.ttf`) |
+| One copy per user (LaunchServices) | a second launch shows the first copy's window and quits |
+| Dock icon | window and taskbar icon from `AppIcon.icns` (`ic08`) |
 
 ## Building
 
@@ -18,11 +43,24 @@ available yet") until the Windows and Linux backends arrive.
 cargo build --release
 ```
 
+- **Windows 10/11:** nothing else needed. Text recognition uses the languages installed in Settings → Time &
+  language → Language & region (each language's *Optical character recognition* feature).
+
+Start it hidden in the tray with `--background`, as the login item does.
+
 ## Known differences
 
 - The Mac-only option "Trim shadow" is hidden: Windows and Linux capture a window without a shadow (Wallpaper draws one).
 - **Updates:** Sparkle (Check for Updates…) is macOS-only; Windows and Linux builds have no updater and never
   connect to anything.
+- **Menu bar only (DECISIONS.md):** like macOS, starting ShotCraft on Windows or Linux shows the tray icon and no
+  window; a window appears when you act (a capture, Open, Preferences…). Starting it again while it runs does not open
+  the editor either, and the tray menu now holds every command (Current Image: Undo, Redo, Reset Crop, Rasterize, Save
+  As; About; Keyboard Shortcuts), as macOS has no other menu to offer. The tray icon can be hidden only while the Show
+  ShotCraft hotkey works.
+- **Active Window and All Displays** (new in the macOS app) work on Windows through the same `targets.rs` the
+  macOS build uses: `capture::snapshot` reads the displays (in pixels), the pointer and the focused window, and
+  `targets::resolve` decides. Fullscreen and Delayed take the screen under the pointer.
 - The default hotkeys ⌃⌥⌘W (active window) and ⌃⌥⌘O (text recognition) are Ctrl+Shift+3 and Ctrl+Shift+4 on Windows and Linux, after
   Fullscreen (Ctrl+Shift+1) and Area (Ctrl+Shift+2). Not ⌘ → Ctrl (Ctrl+Alt+O is AltGr+O on many keyboard layouts, which types
   a letter), and not Ctrl+Alt+Win, which is awkward to press.
@@ -47,7 +85,9 @@ shortcut finds its own command.
 
 ## Credits
 
-- [notify-rust](https://github.com/hoodie/notify-rust) (MIT/Apache-2.0), [dirs](https://github.com/dirs-dev/dirs-rs)
+- [xcap](https://github.com/nashaofu/xcap) (Apache-2.0), [rxing](https://github.com/rxing-core/rxing) (Apache-2.0),
+  [notify-rust](https://github.com/hoodie/notify-rust) (MIT/Apache-2.0), [winreg](https://github.com/gentoo90/winreg-rs)
+  (MIT), [dirs](https://github.com/dirs-dev/dirs-rs) (MIT/Apache-2.0), [windows](https://github.com/microsoft/windows-rs)
   (MIT/Apache-2.0).
 - Menu icons drawn for this port, in the same 24-px outline style: `assets/icons/folder.svg`, `info.svg`,
   `timer.svg`, `window.svg`, `display.svg`, `undo.svg`, `redo.svg`, `zoom_in.svg`, `zoom_out.svg`.
@@ -57,12 +97,18 @@ shortcut finds its own command.
 Pictures the app draws are compared with saved references, so a change that moves, recolours or drops
 something shows up as a failing test with a picture of the difference.
 
-- `cargo test`: `render::tests::exports_match_the_reference_pictures` renders a document with every tool, the same
-  with a backdrop, and the four arrow styles with dark and light text, and compares them with
+- `cargo test` (always): `render::tests::exports_match_the_reference_pictures` renders a document with every
+  tool, the same with a backdrop, and the four arrow styles with dark and light text, and compares them with
   `tests/reference/export/`. Pure CPU, the same on every system. Colour steps of a few levels are ignored.
+- `cargo test --test ui_snapshots -- --ignored` (on request): runs the app's `--screenshot` hooks for the
+  menus, Preferences tabs, About, Keyboard Shortcuts, the empty editor and the capture crosshair, and compares
+  them with `tests/reference/ui-<system>/` (only Windows has references so far). It opens windows for about a
+  minute and the references are for 100% display scaling; screenshot runs always use the dark theme and the
+  default settings, whatever the computer uses.
 - A failure leaves the new picture and a red-marked difference in `visual-diffs` (named in the message).
   After a change on purpose, `SHOTCRAFT_UPDATE_REFERENCES=1` rewrites the references; look at them first.
-- Not covered: the hand-drawn text (each system's own font) and anything that needs real input.
+- Not covered: the hand-drawn text (each system's own font), the tray icon's menu (Windows draws it) and
+  anything that needs real input.
 
 ## Links (`shotcraft://`)
 
@@ -70,12 +116,14 @@ something shows up as a failing test with a picture of the difference.
 Linux: the system starts ShotCraft with the link as its argument, and `links::split_args` keeps only the link (Windows
 builds the command line from `"%1"`, so a link holding a quote could otherwise add `--screenshot` or a file). A copy
 that is already running gets it over the single-instance port (`shotcraft:link <url>`), so a link never starts a second
-copy. Registering the link type is each system's part (a placeholder here).
+copy. With no installer to declare the scheme, ShotCraft registers it itself, for the current user only, and only while
+links are allowed; switching them off removes it (a registration another program made is left alone).
 
 ## Scrolling capture
 
 The loop is upstream's (`scroll::run_with` behind the `Page` trait: grab, scroll, wait, stitch), the same on every
 system. Windows and Linux supply the rest: the area is drawn with the crosshair on the frozen screens, then those windows
 close (a 300 ms wait) before the first look, so it sees the page and not them. Looks are taken in pixels and the
-picture keeps the scale of its screen, as a Retina capture does on macOS. Esc, taken from every app while the capture
-runs, finishes it and keeps what was stitched. Grabbing the screen and scrolling the page are each system's part.
+picture keeps the scale of its screen, as a Retina capture does on macOS. The pointer is parked in the area for the
+wheel events and put back at the end. Esc, taken from every app while the capture runs, finishes it and keeps what
+was stitched.

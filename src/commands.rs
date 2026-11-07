@@ -89,6 +89,9 @@ pub const OPEN_FILE: Command = Command { id: "open", label: "Open File…", icon
 pub const OPEN_CLIPBOARD: Command = Command { id: "clipboard", label: "Open From Clipboard", keys: &[key(CMD_SHIFT, Key::V)], action: || Action::OpenClipboard, ..BASE };
 pub const CLOSE: Command = Command { id: "close", label: "Close", keys: &[key(CMD, Key::W)], action: || Action::Close, ..BASE };
 pub const CLOSE_ALL: Command = Command { id: "closeall", label: "Close All", keys: &[key(CMD_ALT, Key::W)], action: || Action::CloseAll, ..BASE };
+/// The system's print dialog; Linux has no printing here yet.
+#[cfg(not(target_os = "linux"))]
+pub const PRINT: Command = Command { id: "print", label: "Print…", keys: &[key(CMD_SHIFT, Key::P)], action: || Action::Print, enabled: picture, ..BASE };
 
 // Edit.
 /// The clipboard picture goes over the screenshot as a movable object.
@@ -150,6 +153,8 @@ pub const ALL: &[&Command] = &[
     &OPEN_CLIPBOARD,
     &CLOSE,
     &CLOSE_ALL,
+    #[cfg(not(target_os = "linux"))]
+    &PRINT,
     &PASTE,
     &UNDO,
     &REDO,
@@ -204,6 +209,8 @@ const FILE_MENU: &[Item] = &[
     C(&SAVE),
     C(&SAVE_AS),
     C(&PIN),
+    #[cfg(target_os = "windows")]
+    C(&PRINT),
     Sep,
     C(&OPEN_FILE),
     C(&OPEN_CLIPBOARD),

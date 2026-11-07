@@ -4,7 +4,8 @@
 //! The picture goes through the normal export path and is written to a temporary PNG named by the
 //! file name template; the drag carries that file's URL. Temporary files are removed when a drag
 //! is cancelled, and swept once they are old enough that no drop target can still want them. The
-//! naming, sweeping and preview sizing are plain code (tested); the drag session is macOS only.
+//! naming, sweeping and preview sizing are plain code (tested); the drag session is native (macOS:
+//! AppKit; Windows: the shell's data object and `SHDoDragDrop`; not on Linux yet).
 
 use crate::model::Image;
 use std::path::{Path, PathBuf};
@@ -143,9 +144,42 @@ pub fn begin(path: &Path, preview_png: &[u8], preview: (f32, f32)) -> Result<(),
     native::begin(path, preview_png, preview)
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Windows: the shell's own data object for the file (what Explorer drags), dragged with
+/// `SHDoDragDrop`, which also draws the drag picture. The call returns when the drag ends.
+#[cfg(all(target_os = "windows", not(test)))]
+pub fn begin(path: &Path, _preview_png: &[u8], _preview: (f32, f32)) -> Result<(), String> {
+    use windows::Win32::System::Ole::{IDropSource, DROPEFFECT_COPY};
+    use windows::Win32::UI::Shell::SHDoDragDrop;
+    let data = shell_data_object(path)?;
+    // SAFETY: runs the drag loop on this (the UI, OLE-initialised) thread; no drop source of our own,
+    // so the shell's default one decides when the drag ends.
+    unsafe { SHDoDragDrop(None, &data, None::<&IDropSource>, DROPEFFECT_COPY) }.map_err(|e| e.message())?;
+    // Explorer may copy the file after the drop returns, and the result doesn't tell a cancel from
+    // such a drop: keep the file for a while either way (the sweep removes it later).
+    finish(path, true);
+    Ok(())
+}
+
+/// The shell's data object for a file: what Explorer hands to a drop target (the file itself,
+/// `CF_HDROP`, and the shell's own formats).
+#[cfg(target_os = "windows")]
+fn shell_data_object(path: &Path) -> Result<windows::Win32::System::Com::IDataObject, String> {
+    use windows::core::HSTRING;
+    use windows::Win32::System::Com::{IBindCtx, IDataObject};
+    use windows::Win32::UI::Shell::{IShellItem, SHCreateItemFromParsingName, BHID_DataObject};
+    let wide = HSTRING::from(path.as_os_str());
+    // SAFETY: the path is a valid wide string for the length of the call; the shell item is COM-counted.
+    let item: IShellItem = unsafe { SHCreateItemFromParsingName(&wide, None::<&IBindCtx>) }.map_err(|e| e.message())?;
+    // SAFETY: asks the item for its data object; BHID_DataObject is a static GUID.
+    let data: IDataObject = unsafe { item.BindToHandler(None::<&IBindCtx>, &BHID_DataObject) }.map_err(|e| e.message())?;
+    Ok(data)
+}
+
+/// Linux has no drag here yet (it needs GTK or the X drag protocol), and tests never start a real
+/// drag: with no button held it could drop the file on whatever window is under the pointer.
+#[cfg(not(any(target_os = "macos", all(target_os = "windows", not(test)))))]
 pub fn begin(_path: &Path, _preview_png: &[u8], _preview: (f32, f32)) -> Result<(), String> {
-    Err("Dragging the image out is only available on macOS".into())
+    Err(if cfg!(test) { "not in tests".into() } else { "Dragging the image out is only available on Windows and macOS".into() })
 }
 
 #[cfg(target_os = "macos")]
@@ -236,6 +270,27 @@ mod native {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a drop target gets on Windows: the shell's data object for the exported PNG offers the
+    /// file the way Explorer does (CF_HDROP). No drag is started.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_offers_the_exported_png_as_a_file() {
+        use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED, DVASPECT_CONTENT, FORMATETC, TYMED_HGLOBAL};
+        // SAFETY: COM for this test thread (a second call on the same thread is harmless).
+        let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        let dir = std::env::temp_dir().join(format!("shotcraft-dragout-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let img = Image { w: 4, h: 3, px: std::sync::Arc::new(vec![200; 4 * 3 * 4]) };
+        let path = export_in(&dir, &img, "Drag test").expect("exported");
+        let data = super::shell_data_object(&path).expect("the shell made a data object");
+        let hdrop = FORMATETC { cfFormat: 15, ptd: std::ptr::null_mut(), dwAspect: DVASPECT_CONTENT.0, lindex: -1, tymed: TYMED_HGLOBAL.0 as u32 };
+        // SAFETY: asks whether the object has that format; nothing is read.
+        assert!(unsafe { data.QueryGetData(&hdrop) }.is_ok(), "the file is offered as CF_HDROP");
+        drop(data);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(super::shell_data_object(&dir.join("gone.png")).is_err(), "no object for a missing file");
+    }
     use std::sync::Arc;
 
     fn scratch(name: &str) -> PathBuf {
