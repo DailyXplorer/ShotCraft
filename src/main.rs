@@ -189,6 +189,21 @@ pub const EDITOR_TITLE: &str = "ShotCraft";
 /// How long the editor stays on screen, transparent, before it is hidden again.
 const HIDE_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// Windows and Linux: whether `keep_ui_alive` opens its helper window. Not on Wayland (see there).
+#[cfg(not(target_os = "macos"))]
+fn helper_window_wanted(wayland: bool) -> bool {
+    !wayland
+}
+
+#[cfg(all(test, not(target_os = "macos")))]
+mod helper_window_tests {
+    #[test]
+    fn wayland_gets_no_helper_window_and_everything_else_does() {
+        assert!(!super::helper_window_wanted(true), "a window there froze the app");
+        assert!(super::helper_window_wanted(false));
+    }
+}
+
 const WINDOW_MARGIN: f32 = 48.0;
 const WINDOW_MIN_HEIGHT_RATIO: f32 = 0.9;
 
@@ -569,6 +584,19 @@ impl App {
     #[cfg(not(target_os = "macos"))]
     fn keep_ui_alive(&mut self, ctx: &egui::Context) {
         if !self.hidden {
+            return;
+        }
+        // Not on Wayland: winit can't hide a window there, so the editor is never hidden and the
+        // UI passes keep running. The helper window only hurt: GNOME never sends the frame
+        // callback of such a tiny transparent surface, the renderer blocks in `present` for good,
+        // and the app froze ("ShotCraft is not responding"). A 1x1 non-resizable window also broke
+        // Wayland's 2x1 minimum at start-up.
+        #[cfg(target_os = "linux")]
+        let wayland = capture::wayland();
+        #[cfg(not(target_os = "linux"))]
+        let wayland = false;
+        if !helper_window_wanted(wayland) {
+            self.hide_pending = false;
             return;
         }
         let builder = ViewportBuilder::default()
