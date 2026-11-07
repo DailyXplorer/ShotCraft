@@ -63,7 +63,12 @@ impl Picker {
     /// Borderless full screen on the i-th monitor. No size or position: egui applies those after
     /// creating the window, which would shrink it back out of full screen.
     fn builder(i: usize) -> ViewportBuilder {
-        ViewportBuilder::default().with_title("ShotCraft Capture").with_decorations(false).with_resizable(false).with_always_on_top().with_taskbar(false).with_fullscreen(true).with_monitor(i)
+        let builder = ViewportBuilder::default().with_title("ShotCraft Capture").with_decorations(false).with_always_on_top().with_taskbar(false).with_fullscreen(true).with_monitor(i);
+        // Not on Linux: there winit pins a non-resizable window's size hints (min = max = 800x600),
+        // and GNOME's mutter then refuses to make it full screen, leaving a small window.
+        #[cfg(not(target_os = "linux"))]
+        let builder = builder.with_resizable(false);
+        builder
     }
 
     /// Test hook: see `State::preview`.
@@ -324,4 +329,18 @@ fn loupe(painter: &egui::Painter, all: Rect, tex: egui::TextureId, p: Pos2, q: (
     let centre = Rect::from_center_size(r.center(), vec2(cell, cell));
     painter.rect_stroke(centre, 0.0, Stroke::new(1.0, Color32::from_rgb(255, 59, 48)), StrokeKind::Outside);
     painter.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::from_white_alpha(220)), StrokeKind::Outside);
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    /// GNOME (mutter) won't make a window full screen once winit has pinned its size hints, which
+    /// a non-resizable window gets: the picker stayed an 800x600 window.
+    #[test]
+    fn the_picker_stays_resizable_so_that_it_can_go_full_screen() {
+        let builder = Picker::builder(0);
+        assert_ne!(builder.resizable, Some(false));
+        assert_eq!(builder.fullscreen, Some(true));
+    }
 }
