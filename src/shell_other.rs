@@ -299,7 +299,7 @@ impl Shell {
         let Some(mgr) = &self.hotkeys else { return };
         if let Some(hk) = self.escape.take() {
             self.escape_id.store(0, Ordering::SeqCst);
-            let _ = mgr.unregister(hk);
+            release_hotkey(mgr, hk);
         }
         if on {
             let Ok(hk) = "Escape".parse::<HotKey>() else { return };
@@ -431,9 +431,57 @@ mod linux {
     }
 }
 
+/// Gives a hotkey back to the other programs.
+fn release_hotkey(mgr: &GlobalHotKeyManager, hk: HotKey) {
+    let _ = mgr.unregister(hk);
+    #[cfg(target_os = "linux")]
+    flush_ungrab(mgr);
+}
+
+/// Linux (X11): `global-hotkey` (0.8 and 0.9) sends the ungrab of an unregistered key but never
+/// flushes its connection, so the key stays grabbed, and a program asking for it gets BadAccess
+/// (ShotCraft's own capture picker could no longer be cancelled with Esc after a scrolling
+/// capture). Registering a key waits for the server's reply, which sends everything queued before
+/// it. So register a key combination nobody types, then release that one too; its own ungrab
+/// goes out with the next call. Drop this once the crate flushes.
+#[cfg(target_os = "linux")]
+fn flush_ungrab(mgr: &GlobalHotKeyManager) {
+    use global_hotkey::hotkey::{Code, Modifiers};
+    let nobody_types_this = HotKey::new(Some(Modifiers::CONTROL | Modifiers::ALT | Modifiers::SHIFT | Modifiers::SUPER), Code::F24);
+    if mgr.register(nobody_types_this).is_ok() {
+        let _ = mgr.unregister(nobody_types_this);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Needs an X server (the suite runs under `xvfb-run`); without one there is nothing to grab.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn escape_is_free_for_other_programs_right_after_it_is_released() {
+        use x11rb::connection::Connection;
+        use x11rb::protocol::xproto::{ConnectionExt, GrabMode, ModMask};
+        let Ok((conn, screen)) = x11rb::connect(None) else { return };
+        let setup = conn.setup();
+        let root = setup.roots[screen].root;
+        let (first, last) = (setup.min_keycode, setup.max_keycode);
+        let map = conn.get_keyboard_mapping(first, last - first + 1).expect("ask").reply().expect("keyboard map");
+        let per = usize::from(map.keysyms_per_keycode).max(1);
+        let index = map.keysyms.chunks(per).position(|syms| syms.contains(&0xff1b)).expect("a key for Escape");
+        let escape = first + index as u8;
+
+        let mgr = GlobalHotKeyManager::new().expect("hotkey manager");
+        let hk: HotKey = "Escape".parse().expect("Escape parses");
+        mgr.register(hk).expect("ShotCraft takes Esc");
+        let held = conn.grab_key(false, root, ModMask::ANY, escape, GrabMode::ASYNC, GrabMode::ASYNC).expect("ask").check();
+        assert!(held.is_err(), "while ShotCraft holds Esc, another program can't have it");
+
+        release_hotkey(&mgr, hk);
+        let freed = conn.grab_key(false, root, ModMask::ANY, escape, GrabMode::ASYNC, GrabMode::ASYNC).expect("ask").check();
+        assert!(freed.is_ok(), "Esc must be free the moment it is released: {freed:?}");
+    }
 
     #[test]
     fn every_tray_item_has_an_action() {
