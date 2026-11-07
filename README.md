@@ -232,3 +232,5 @@ Set the version in `Cargo.toml`, then push a tag such as `v0.2.2`. The Release w
 ## License
 
 ShotCraft is released under the [MIT License](LICENSE). The fonts, icons and models listed in Credits keep their own licenses.
+
+**The Linux build includes CC BY-SA 4.0 models.** The two Ocrs text-recognition files in `assets/ocr/` are compiled into the Linux executable (the macOS and Windows builds don't contain them: they use Vision and Windows' own OCR). They are unchanged and stay under CC BY-SA 4.0, not MIT: anyone who passes them on, on their own or inside a build, must credit the authors, link the licence and share any changed copy of them under the same licence. The licence text travels with them in `assets/ocr/LICENSE.txt` (a Linux package should ship that file), and ShotCraft's own code stays MIT.
