@@ -44,10 +44,6 @@ pub struct Shell {
     clock: std::time::Instant,
 }
 
-/// How long a hotkey's action may wait for a UI pass before the editor is brought back.
-#[cfg(target_os = "linux")]
-const STALL_MS: u64 = 400;
-
 /// A Wayland session, where hotkeys go through the portal instead (`Shell::portal_keys`).
 fn wayland_session() -> bool {
     #[cfg(target_os = "linux")]
@@ -268,18 +264,11 @@ impl Shell {
             let (q, c) = self.events.clone();
             portal.apply(bindings, move |a, token| {
                 let Some(cmd) = commands::for_hotkey(a) else { return };
-                let queued = crate::wayland_bridge::now_ms();
                 push(&q, &c, (cmd.action)());
                 // A minimized editor gets no frame callbacks, so the action would wait for good:
                 // when no UI pass has run soon after, bring the editor back with this press's token.
                 if let Some(token) = token {
-                    std::thread::spawn(move || {
-                        std::thread::sleep(std::time::Duration::from_millis(STALL_MS));
-                        let waited = crate::wayland_bridge::now_ms().saturating_sub(queued);
-                        if crate::wayland_bridge::stalled(queued, crate::wayland_bridge::last_pass_ms(), waited, STALL_MS) {
-                            crate::wayland_bridge::activate_editor(&token);
-                        }
-                    });
+                    crate::wayland_bridge::rescue_if_stalled(token);
                 }
             });
             self.show_hotkey_works = settings.hotkey(HotkeyAction::Show).is_some() && !failed.contains(&HotkeyAction::Show);
@@ -424,6 +413,15 @@ mod linux {
         tray.spawn().ok()
     }
 
+    /// The activation token of the tray click being handled, when the host provides one. It may
+    /// arrive a moment after the click (ksni's note), so one retry.
+    fn tray_click_token() -> Option<String> {
+        ksni::current_xdg_activation_token().or_else(|| {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            ksni::current_xdg_activation_token()
+        })
+    }
+
     impl Tray {
         fn items(&self, items: &[Item]) -> Vec<MenuItem<Self>> {
             let mut out = vec![];
@@ -431,7 +429,16 @@ mod linux {
                 match item {
                     Item::Cmd(c) => {
                         let id = c.id;
-                        let activate = Box::new(move |t: &mut Tray| run_id(&t.queue, &t.ctx, id));
+                        let activate = Box::new(move |t: &mut Tray| {
+                            run_id(&t.queue, &t.ctx, id);
+                            // Wayland: a minimized editor gets no UI pass. A tray host that gives the click's
+                            // activation token (KDE does) lets the editor be brought back (`wayland_bridge`).
+                            if crate::capture::wayland() {
+                                if let Some(token) = tray_click_token() {
+                                    crate::wayland_bridge::rescue_if_stalled(token);
+                                }
+                            }
+                        });
                         out.push(match c.checked {
                             Some(_) => CheckmarkItem { label: c.label.into(), checked: self.checked.contains(&id), activate, ..Default::default() }.into(),
                             None => StandardItem {

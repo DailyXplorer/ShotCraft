@@ -2299,6 +2299,9 @@ mod single {
     const PING: &[u8] = b"shotcraft:ping\n";
     /// Then the link and a newline: the `shotcraft://` link a second launch was started with.
     const LINK: &[u8] = b"shotcraft:link ";
+    /// Linux (Wayland): the launcher's activation token, sent just before its link, so that a
+    /// minimized editor can be brought back for it (`wayland_bridge`).
+    const TOKEN: &[u8] = b"shotcraft:token ";
     const OK: &[u8] = b"shotcraft:ok\n";
     /// The longest message read: a link as long as `url_scheme` takes, with its prefix and newline.
     const MAX_MSG: usize = 4096 + 64;
@@ -2325,11 +2328,24 @@ mod single {
                     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
                     let msg = read_message(&mut stream);
                     let link = msg.strip_prefix(LINK).and_then(|l| l.strip_suffix(b"\n")).and_then(|l| std::str::from_utf8(l).ok());
+                    #[cfg(target_os = "linux")]
+                    let token = msg.strip_prefix(TOKEN).and_then(|t| t.strip_suffix(b"\n")).and_then(|t| std::str::from_utf8(t).ok());
+                    #[cfg(not(target_os = "linux"))]
+                    let token: Option<&str> = None;
                     // The link is queued before the answer, so a launch that quits on it loses nothing.
                     if let Some(link) = link {
                         on_link(link);
+                        // Wayland: the token that came with the launch brings a minimized editor back.
+                        #[cfg(target_os = "linux")]
+                        if let Some(t) = crate::wayland_bridge::take_offered_token() {
+                            crate::wayland_bridge::rescue_if_stalled(t);
+                        }
                     }
-                    if msg == SHOW || msg == PING || link.is_some() {
+                    #[cfg(target_os = "linux")]
+                    if let Some(t) = token {
+                        crate::wayland_bridge::offer_token(t);
+                    }
+                    if msg == SHOW || msg == PING || link.is_some() || token.is_some() {
                         let _ = stream.write_all(OK);
                     }
                     if msg == SHOW {
@@ -2370,6 +2386,15 @@ mod single {
 
     /// Hands a link to the ShotCraft that is running; true when it took it.
     pub fn send_link(link: &str) -> bool {
+        // Linux: the desktop gives a launch the token of the user action behind it. Passing it on
+        // first lets the running copy bring a minimized editor back for this link.
+        #[cfg(target_os = "linux")]
+        if let Some(t) = std::env::var("XDG_ACTIVATION_TOKEN").ok().filter(|t| !t.is_empty() && !t.contains('\n') && t.len() < 400) {
+            let mut msg = TOKEN.to_vec();
+            msg.extend_from_slice(t.as_bytes());
+            msg.push(b'\n');
+            exchange(PORT, &msg);
+        }
         send_link_on(PORT, link)
     }
 

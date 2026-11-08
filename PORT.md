@@ -56,8 +56,10 @@ Start it hidden in the tray with `--background`, as the login item does.
 - **Wayland:** apps can't read the screen, so captures start from a portal screenshot. Window and Active Window use
   the desktop's own picker. Scrolling capture is greyed out (a screen-recording version is possible). Pins can't stay
   on top of other windows and the thumbnail is placed by the desktop, because Wayland gives apps neither. The mouse
-  pointer in screenshots is the desktop's choice. Minimizing the editor stops it reacting to links and the tray until
-  it is restored (a hotkey brings it back, with the token the desktop sends); close it with ✕ instead.
+  pointer in screenshots is the desktop's choice. A minimized editor gets no frame callbacks, so nothing runs
+  until it is restored; a hotkey or a tray click brings it back with the activation token the desktop sends, and so does
+  a link when its launcher passes one (`XDG_ACTIVATION_TOKEN`; Firefox as a snap doesn't). Close the editor with ✕ rather
+  than minimizing it.
 - **Linux text recognition** reads Latin script only (ocrs's models). Windows reads every installed OCR language.
 - **Window capture on Linux** shows what was on screen, so a covered part of the window is whatever covered it.
 - **Linux checks:** the Wayland behaviour above was checked by hand on Ubuntu 26.04 (GNOME 50, Wayland). X11 is

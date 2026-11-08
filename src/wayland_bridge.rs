@@ -338,6 +338,39 @@ pub fn icon_scale(picture_px: u32, shown_points: f32) -> i32 {
     ((picture_px as f32 / shown_points.max(1.0)).round() as i32).clamp(1, 4)
 }
 
+/// How long an action may wait for a UI pass before the editor is brought back.
+pub const STALL_MS: u64 = 400;
+
+/// A token that came ahead of the event it belongs to (a second launch for a link sends its
+/// `XDG_ACTIVATION_TOKEN` just before the link), and when.
+static OFFERED: Mutex<Option<(String, u64)>> = Mutex::new(None);
+
+/// Remembers a token for the event that follows it.
+pub fn offer_token(token: &str) {
+    *OFFERED.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((token.to_string(), now_ms()));
+}
+
+/// The token offered a moment ago, once.
+pub fn take_offered_token() -> Option<String> {
+    let (token, at) = OFFERED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()?;
+    (now_ms().saturating_sub(at) < 5_000).then_some(token)
+}
+
+/// An action was just queued for the UI. A minimized editor gets no frame callbacks, so no UI pass
+/// would ever run it: when none has started `STALL_MS` later, the editor is activated with `token`
+/// (the desktop's, for the user action that caused this), which brings it back. An editor that
+/// isn't minimized runs a pass in milliseconds and is left alone.
+pub fn rescue_if_stalled(token: String) {
+    let queued = now_ms();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(STALL_MS));
+        let waited = now_ms().saturating_sub(queued);
+        if stalled(queued, last_pass_ms(), waited, STALL_MS) {
+            activate_editor(&token);
+        }
+    });
+}
+
 /// Milliseconds on a monotonic clock, for `stalled`.
 pub fn now_ms() -> u64 {
     static START: OnceLock<std::time::Instant> = OnceLock::new();
@@ -375,6 +408,14 @@ mod tests {
     fn the_icon_is_premultiplied_argb_and_scaled_to_its_size_in_points() {
         assert_eq!(super::argb_premultiplied(&[255, 0, 0, 255, 200, 100, 50, 128, 9, 9, 9, 0]), vec![0, 0, 255, 255, 25, 50, 100, 128, 0, 0, 0, 0]);
         assert_eq!((super::icon_scale(320, 160.0), super::icon_scale(160, 160.0), super::icon_scale(10, 160.0), super::icon_scale(2000, 10.0)), (2, 1, 1, 4));
+    }
+
+    #[test]
+    fn an_offered_token_is_given_once_to_the_event_that_follows() {
+        assert_eq!(super::take_offered_token(), None, "nothing offered");
+        super::offer_token("token-1");
+        assert_eq!(super::take_offered_token().as_deref(), Some("token-1"));
+        assert_eq!(super::take_offered_token(), None, "only once");
     }
 
     #[test]
