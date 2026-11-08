@@ -175,11 +175,38 @@ fn shell_data_object(path: &Path) -> Result<windows::Win32::System::Com::IDataOb
     Ok(data)
 }
 
-/// Linux has no drag here yet (it needs GTK or the X drag protocol), and tests never start a real
-/// drag: with no button held it could drop the file on whatever window is under the pointer.
-#[cfg(not(any(target_os = "macos", all(target_os = "windows", not(test)))))]
+/// Linux: Wayland starts the desktop's own drag through `wayland_bridge` (the drag runs in the
+/// desktop, the call returns at once, and the file is cleaned up when it ends). X11 speaks XDND
+/// itself (`xdnd`) and returns when the drag is over, as the Windows one does.
+#[cfg(all(target_os = "linux", not(test)))]
+pub fn begin(path: &Path, _preview_png: &[u8], _preview: (f32, f32)) -> Result<(), String> {
+    if crate::capture::wayland() {
+        return crate::wayland_bridge::start_drag(path);
+    }
+    crate::xdnd::drag(path)
+}
+
+/// Tests never start a real drag: with no button held it could drop the file on whatever window is
+/// under the pointer.
+#[cfg(all(test, not(target_os = "macos")))]
 pub fn begin(_path: &Path, _preview_png: &[u8], _preview: (f32, f32)) -> Result<(), String> {
-    Err(if cfg!(test) { "not in tests".into() } else { "Dragging the image out is only available on Windows and macOS".into() })
+    Err("not in tests".into())
+}
+
+/// A file's `file://` link, with what a URI can't carry as it is written `%XX` (spaces, non-ASCII
+/// and the like), as drop targets expect it in a `text/uri-list`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn file_uri(path: &Path) -> String {
+    use std::fmt::Write;
+    let mut out = String::from("file://");
+    for &b in path.to_string_lossy().as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            let _ = write!(out, "%{b:02X}");
+        }
+    }
+    out
 }
 
 #[cfg(target_os = "macos")]
@@ -269,6 +296,13 @@ mod native {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_file_link_escapes_what_a_uri_cant_carry() {
+        assert_eq!(file_uri(Path::new("/tmp/shotcraft-drag/Screenshot 1.png")), "file:///tmp/shotcraft-drag/Screenshot%201.png");
+        assert_eq!(file_uri(Path::new("/tmp/é#?.png")), "file:///tmp/%C3%A9%23%3F.png");
+        assert_eq!(file_uri(Path::new("/a-b_c.d~e/x.png")), "file:///a-b_c.d~e/x.png");
+    }
+
     use super::*;
 
     /// What a drop target gets on Windows: the shell's data object for the exported PNG offers the

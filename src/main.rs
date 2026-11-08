@@ -66,6 +66,8 @@ mod portal_hotkeys;
 mod print_pdf;
 #[cfg(target_os = "linux")]
 mod wayland_bridge;
+#[cfg(target_os = "linux")]
+mod xdnd;
 mod system;
 mod targets;
 #[cfg(test)]
