@@ -62,6 +62,8 @@ mod portal;
 mod portal_hotkeys;
 #[cfg(target_os = "linux")]
 mod print_pdf;
+#[cfg(target_os = "linux")]
+mod wayland_bridge;
 mod system;
 mod targets;
 #[cfg(test)]
@@ -2009,6 +2011,8 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        #[cfg(target_os = "linux")]
+        wayland_bridge::note_pass();
         if !self.started {
             self.started = true;
             if self.screenshot.is_none() {
@@ -2196,6 +2200,13 @@ fn main() -> eframe::Result {
             "ShotCraft",
             options,
             Box::new(move |cc| {
+                // Wayland: ShotCraft's own requests on winit's connection (`wayland_bridge`).
+                #[cfg(target_os = "linux")]
+                if capture::wayland() {
+                    if let Err(e) = wayland_bridge::attach(cc) {
+                        eprintln!("wayland: {e}");
+                    }
+                }
                 let app = App::new(cc, screenshot, show_at_start, open);
                 if let Some(i) = instance {
                     i.listen(app.queue.clone(), app.ctx.clone(), url_scheme::submit);

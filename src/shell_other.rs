@@ -44,6 +44,10 @@ pub struct Shell {
     clock: std::time::Instant,
 }
 
+/// How long a hotkey's action may wait for a UI pass before the editor is brought back.
+#[cfg(target_os = "linux")]
+const STALL_MS: u64 = 400;
+
 /// A Wayland session, where hotkeys go through the portal instead (`Shell::portal_keys`).
 fn wayland_session() -> bool {
     #[cfg(target_os = "linux")]
@@ -262,9 +266,20 @@ impl Shell {
             let label = |a: HotkeyAction| commands::for_hotkey(a).map_or_else(|| format!("{a:?}"), |c| c.label.to_string());
             let (bindings, failed) = crate::portal_hotkeys::bindings(&set, label);
             let (q, c) = self.events.clone();
-            portal.apply(bindings, move |a| {
-                if let Some(cmd) = commands::for_hotkey(a) {
-                    push(&q, &c, (cmd.action)());
+            portal.apply(bindings, move |a, token| {
+                let Some(cmd) = commands::for_hotkey(a) else { return };
+                let queued = crate::wayland_bridge::now_ms();
+                push(&q, &c, (cmd.action)());
+                // A minimized editor gets no frame callbacks, so the action would wait for good:
+                // when no UI pass has run soon after, bring the editor back with this press's token.
+                if let Some(token) = token {
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(STALL_MS));
+                        let waited = crate::wayland_bridge::now_ms().saturating_sub(queued);
+                        if crate::wayland_bridge::stalled(queued, crate::wayland_bridge::last_pass_ms(), waited, STALL_MS) {
+                            crate::wayland_bridge::activate_editor(&token);
+                        }
+                    });
                 }
             });
             self.show_hotkey_works = settings.hotkey(HotkeyAction::Show).is_some() && !failed.contains(&HotkeyAction::Show);

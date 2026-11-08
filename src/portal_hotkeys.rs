@@ -123,8 +123,8 @@ impl PortalHotkeys {
     }
 
     /// Binds `bindings` (none: just retires the current session). `hit` runs on the portal's
-    /// thread for each press.
-    pub fn apply(&self, bindings: Vec<Binding>, hit: impl Fn(HotkeyAction) + Send + 'static) {
+    /// thread for each press, with the desktop's activation token for it when there is one.
+    pub fn apply(&self, bindings: Vec<Binding>, hit: impl Fn(HotkeyAction, Option<String>) + Send + 'static) {
         let mine = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         if bindings.is_empty() {
             return;
@@ -138,7 +138,7 @@ impl PortalHotkeys {
     }
 }
 
-async fn run(bindings: Vec<Binding>, generation: Arc<AtomicU64>, mine: u64, hit: impl Fn(HotkeyAction)) -> Result<(), String> {
+async fn run(bindings: Vec<Binding>, generation: Arc<AtomicU64>, mine: u64, hit: impl Fn(HotkeyAction, Option<String>)) -> Result<(), String> {
     let err = |e: zbus::Error| e.to_string();
     let conn = zbus::Connection::session().await.map_err(err)?;
     let token = portal::token("keys");
@@ -178,12 +178,14 @@ async fn run(bindings: Vec<Binding>, generation: Arc<AtomicU64>, mine: u64, hit:
             Some(None) => continue,
             None => return Err("the desktop stopped sending hotkeys".into()),
         };
-        let Ok((from, id, _, _)) = msg.body().deserialize::<(zbus::zvariant::OwnedObjectPath, String, u64, std::collections::HashMap<String, zbus::zvariant::OwnedValue>)>() else { continue };
+        let Ok((from, id, _, options)) = msg.body().deserialize::<(zbus::zvariant::OwnedObjectPath, String, u64, std::collections::HashMap<String, zbus::zvariant::OwnedValue>)>() else { continue };
         if from.as_str() != session {
             continue;
         }
         if let Some(b) = bindings.iter().find(|b| b.id == id) {
-            hit(b.action);
+            // The desktop's token for this press: lets the editor be activated (`wayland_bridge`).
+            let token = options.get("activation_token").and_then(|v| v.downcast_ref::<String>().ok());
+            hit(b.action, token);
         }
     }
 }

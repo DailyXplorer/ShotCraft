@@ -39,6 +39,10 @@ x11rb = { version = "0.13", features = ["randr", "xfixes", "xtest"] }
 ashpd = { version = "0.13", default-features = false, features = ["async-io", "screenshot"] }
 flate2 = "1"
 futures-lite = "2"
+raw-window-handle = "0.6"
+wayland-backend = { version = "0.3", features = ["client_system"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 async-io = "2"
 ocrs = { version = "0.13", default-features = false, features = ["onnx"] }
 rten = { version = "0.26", default-features = false, features = ["onnx_format"] }
