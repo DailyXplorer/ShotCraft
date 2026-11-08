@@ -81,7 +81,7 @@ enum Recorded {
 fn recorded(events: &[egui::Event], modifiers: egui::Modifiers) -> Option<Recorded> {
     for e in events {
         let (key, modifiers) = match e {
-            egui::Event::Key { key, pressed: true, modifiers, .. } => (*key, *modifiers),
+            egui::Event::Key { key, physical_key, pressed: true, modifiers, .. } => (recorded_key(*key, *physical_key), *modifiers),
             egui::Event::Copy => (Key::C, modifiers),
             egui::Event::Cut => (Key::X, modifiers),
             egui::Event::Paste(_) => (Key::V, modifiers),
@@ -118,6 +118,19 @@ fn recorded(events: &[egui::Event], modifiers: egui::Modifiers) -> Option<Record
         }
     }
     None
+}
+
+/// Windows and Linux: the key's place on the keyboard, which is what the global hotkeys register
+/// (`Digit1`, `KeyA`). With Shift held egui names some keys by their symbol: the 1 key arrives as
+/// `!` (`Exclamationmark`), which has no hotkey name, so Ctrl+Shift+1 couldn't be recorded.
+#[cfg(not(target_os = "macos"))]
+fn recorded_key(key: Key, physical: Option<Key>) -> Key {
+    physical.unwrap_or(key)
+}
+
+#[cfg(target_os = "macos")]
+fn recorded_key(key: Key, _physical: Option<Key>) -> Key {
+    key
 }
 
 fn key_code(k: Key) -> Option<String> {
@@ -674,6 +687,18 @@ mod tests {
         assert_eq!(recorded(&[key(Key::A, egui::Modifiers::NONE)], egui::Modifiers::NONE), None, "a bare letter is no hotkey");
         assert_eq!(recorded(&[key(Key::Escape, egui::Modifiers::NONE)], egui::Modifiers::NONE), Some(Recorded::Cancel));
         assert_eq!(recorded(&[key(Key::Backspace, egui::Modifiers::NONE)], egui::Modifiers::NONE), Some(Recorded::Clear));
+    }
+
+    /// Ctrl+Shift+1 as egui-winit sends it on Windows and Linux: the key named by its symbol, the
+    /// place on the keyboard as the physical key. It wasn't recorded before (seen on GNOME 50).
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_shifted_digit_is_recorded_by_its_place_on_the_keyboard() {
+        let m = egui::Modifiers { ctrl: true, shift: true, command: true, ..egui::Modifiers::NONE };
+        let shifted_1 = egui::Event::Key { key: Key::Exclamationmark, physical_key: Some(Key::Num1), pressed: true, repeat: false, modifiers: m };
+        assert_eq!(recorded(&[shifted_1], m), Some(Recorded::Set("ctrl+shift+Digit1".into())));
+        let no_physical = egui::Event::Key { key: Key::Num9, physical_key: None, pressed: true, repeat: false, modifiers: m };
+        assert_eq!(recorded(&[no_physical], m), Some(Recorded::Set("ctrl+shift+Digit9".into())), "the logical key when there's no physical one");
     }
 
     /// egui-winit sends Cmd+C / Cmd+X / Cmd+V as copy, cut and paste events and no key event.
