@@ -3334,7 +3334,7 @@ fn dialog_backdrop(ctx: &egui::Context, window: egui::ViewportId, name: &str, t:
             .inner
         });
     if shown.inner || shown.backdrop_response.clicked() || shown.backdrop_response.drag_started() {
-        ctx.send_viewport_cmd_to(window, egui::ViewportCommand::Focus);
+        crate::bring_window_forward(ctx, window);
     }
 }
 

@@ -177,10 +177,69 @@ pub enum ThumbAction {
 /// Shows a floating window as a deferred viewport. Unlike immediate viewports, eframe can create
 /// these while the editor is hidden; the extra repaint lets it build the window on the next pass.
 pub fn show_window(ctx: &egui::Context, id: ViewportId, builder: ViewportBuilder, body: impl Fn(&mut egui::Ui) + Send + Sync + 'static) {
+    #[cfg(not(target_os = "macos"))]
+    if take_reopen(ctx, id) {
+        // Left out of this pass, eframe closes the window; the next pass opens it anew.
+        ctx.request_repaint();
+        return;
+    }
     if !ctx.input(|i| i.raw.viewports.contains_key(&id)) {
         ctx.request_repaint();
     }
     ctx.show_viewport_deferred(id, builder, move |ui, _| body(ui));
+}
+
+/// Brings a window shown with `show_window` to the front. On Wayland winit can't focus a window
+/// (`focus_window` does nothing there), so the window is closed and opened again instead: GNOME
+/// puts a new window of the app in use in front. Its state lives in the app, not in the window.
+/// Used for the dialogs: Preferences, About and Keyboard Shortcuts.
+pub fn bring_window_forward(ctx: &egui::Context, id: ViewportId) {
+    #[cfg(target_os = "linux")]
+    let wayland = capture::wayland();
+    #[cfg(not(target_os = "linux"))]
+    let wayland = false;
+    if reopens_to_come_forward(wayland) {
+        ctx.data_mut(|d| d.insert_temp(reopen_key(id), true));
+        ctx.request_repaint();
+    } else {
+        ctx.send_viewport_cmd_to(id, ViewportCommand::Focus);
+    }
+}
+
+fn reopens_to_come_forward(wayland: bool) -> bool {
+    wayland
+}
+
+fn reopen_key(id: ViewportId) -> egui::Id {
+    egui::Id::new("reopen-window").with(id)
+}
+
+/// Whether `id` waits to be opened anew (`bring_window_forward`); the answer is given once.
+#[cfg(not(target_os = "macos"))]
+fn take_reopen(ctx: &egui::Context, id: ViewportId) -> bool {
+    ctx.data_mut(|d| d.remove_temp::<bool>(reopen_key(id))).unwrap_or(false)
+}
+
+#[cfg(all(test, not(target_os = "macos")))]
+mod bring_forward_tests {
+    use super::*;
+
+    #[test]
+    fn only_wayland_reopens_a_window_to_bring_it_forward() {
+        assert!(reopens_to_come_forward(true), "winit can't focus a window there");
+        assert!(!reopens_to_come_forward(false));
+    }
+
+    #[test]
+    fn a_window_marked_to_reopen_is_left_out_of_one_pass_only() {
+        let ctx = egui::Context::default();
+        let prefs = ViewportId::from_hash_of("prefs");
+        assert!(!take_reopen(&ctx, prefs), "nothing marked");
+        ctx.data_mut(|d| d.insert_temp(reopen_key(prefs), true));
+        assert!(!take_reopen(&ctx, ViewportId::from_hash_of("about")), "only the marked window");
+        assert!(take_reopen(&ctx, prefs), "left out once: eframe closes it");
+        assert!(!take_reopen(&ctx, prefs), "and shown again on the next pass");
+    }
 }
 
 fn send(ctx: &egui::Context, queue: &Queue, action: Action) {
@@ -1250,12 +1309,12 @@ impl App {
                 | Action::Shortcuts
                 | Action::OpenFile
                 | Action::OpenClipboard => {
-                    self.ctx.send_viewport_cmd_to(vid, ViewportCommand::Focus);
+                    bring_window_forward(&self.ctx, vid);
                     return;
                 }
                 Action::Show => {
                     self.show_window();
-                    self.ctx.send_viewport_cmd_to(vid, ViewportCommand::Focus);
+                    bring_window_forward(&self.ctx, vid);
                     return;
                 }
                 _ => {}
