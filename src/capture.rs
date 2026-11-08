@@ -403,13 +403,20 @@ pub fn on_wallpaper(shadowed: &Image, win: (i32, i32, u32, u32), wall: &Image, s
 }
 // ---- scrolling capture (`scroll`), Windows and Linux ----
 
+/// Why scrolling capture can't run in this session, if it can't: on Wayland apps can neither look
+/// at the screen nor scroll other apps.
+#[cfg(target_os = "linux")]
+pub fn scrolling_unavailable(wayland: bool) -> Option<&'static str> {
+    wayland.then_some("Scrolling capture needs an X11 session: on Wayland, apps can't look at the screen.")
+}
+
 /// The screens frozen for choosing the area of a scrolling capture: no windows, no pointer.
 pub fn freeze_for_scrolling(scale: f32) -> Result<Frozen, String> {
     #[cfg(target_os = "linux")]
-    if backend::wayland() {
-        return Err("Scrolling capture needs an X11 session: on Wayland, apps can't look at the screen.".into());
+    if let Some(why) = scrolling_unavailable(backend::wayland()) {
+        return Err(why.into());
     }
-    let opt = CaptureOptions { last_area: None, window_bg: crate::settings::WindowBg::Transparent, solid_color: [0, 0, 0], scale, cursor: false, delay_secs: 0, snapshot: Snapshot::default() };
+    let opt =CaptureOptions { last_area: None, window_bg: crate::settings::WindowBg::Transparent, solid_color: [0, 0, 0], scale, cursor: false, delay_secs: 0, snapshot: Snapshot::default() };
     freeze(false, &opt)
 }
 
@@ -953,6 +960,14 @@ mod tests {
     fn img(w: u32, h: u32) -> Image {
         let px = (0..w * h).flat_map(|i| [(i % 256) as u8, (i / 256) as u8, 7, 255]).collect();
         Image { w, h, px: Arc::new(px) }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn scrolling_capture_is_refused_with_a_reason_on_wayland_only() {
+        let why = scrolling_unavailable(true).expect("Wayland can't scroll other apps");
+        assert!(why.contains("X11"), "the message says what to use instead: {why}");
+        assert_eq!(scrolling_unavailable(false), None);
     }
 
     #[test]

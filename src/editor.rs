@@ -1301,7 +1301,7 @@ impl App {
                     Item::Cmd(c) => {
                         let row = MenuRow {
                             icon: c.icon,
-                            label: c.label,
+                            label: &crate::commands::session_label(c),
                             keys: &c.shown_keys(&app.settings),
                             checked: c.checked.map(|on| on(&app.settings)),
                             enabled: (c.enabled)(app),

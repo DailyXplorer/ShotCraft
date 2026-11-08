@@ -852,6 +852,15 @@ impl App {
         if self.busy {
             return;
         }
+        // Said in the window, before anything is hidden: winit can't hide the editor on Wayland
+        // anyway, and GNOME closed the notification `error` sends for a hidden editor within
+        // ~30 ms, so the menu item seemed to do nothing.
+        #[cfg(target_os = "linux")]
+        if let Some(why) = capture::scrolling_unavailable(capture::wayland()) {
+            self.show_window();
+            self.error(why);
+            return;
+        }
         self.busy = true;
         self.scroll_dir = dir;
         let was_visible = !self.hidden;

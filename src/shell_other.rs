@@ -389,7 +389,13 @@ mod linux {
                         let activate = Box::new(move |t: &mut Tray| run_id(&t.queue, &t.ctx, id));
                         out.push(match c.checked {
                             Some(_) => CheckmarkItem { label: c.label.into(), checked: self.checked.contains(&id), activate, ..Default::default() }.into(),
-                            None => StandardItem { label: c.label.into(), activate, ..Default::default() }.into(),
+                            None => StandardItem {
+                                label: crate::commands::session_label(c).into_owned(),
+                                enabled: crate::commands::session_allows(id),
+                                activate,
+                                ..Default::default()
+                            }
+                            .into(),
                         });
                     }
                     Item::Sub(name, sub) => out.push(SubMenu { label: (*name).into(), submenu: self.items(sub), ..Default::default() }.into()),
