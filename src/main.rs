@@ -193,6 +193,47 @@ pub fn show_window(ctx: &egui::Context, id: ViewportId, builder: ViewportBuilder
     ctx.show_viewport_deferred(id, builder, move |ui, _| body(ui));
 }
 
+/// Wayland: winit can't hide a window there, so a hidden editor vanishes instead. Its frame goes
+/// (winit draws it on GNOME), clicks pass through, and nothing is drawn on its transparent
+/// background. Without this the editor stayed on screen when hidden, and showed up in every
+/// Fullscreen, All Displays and Delayed capture. Returns whether the editor is vanished now.
+#[cfg(target_os = "linux")]
+fn vanish_on_wayland(ctx: &egui::Context, hidden: bool) -> bool {
+    let vanished = editor_vanishes(capture::wayland(), hidden);
+    let key = egui::Id::new("editor-vanished");
+    if ctx.data(|d| d.get_temp::<bool>(key)).unwrap_or(false) != vanished {
+        ctx.data_mut(|d| d.insert_temp(key, vanished));
+        ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Decorations(!vanished));
+        ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::MousePassthrough(vanished));
+    }
+    vanished
+}
+
+#[cfg(target_os = "linux")]
+fn editor_vanishes(wayland: bool, hidden: bool) -> bool {
+    wayland && hidden
+}
+
+/// Linux: an error while the editor is hidden. On Wayland it shows in the editor, brought back
+/// for it: GNOME dropped ShotCraft's notifications (one was closed 24-36 ms after it arrived).
+#[cfg(target_os = "linux")]
+fn error_opens_the_editor(wayland: bool, hidden: bool) -> bool {
+    wayland && hidden
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod vanish_tests {
+    #[test]
+    fn only_a_hidden_editor_on_wayland_vanishes_and_takes_its_errors_in_the_window() {
+        assert!(super::editor_vanishes(true, true));
+        assert!(!super::editor_vanishes(true, false), "shown: drawn as usual");
+        assert!(!super::editor_vanishes(false, true), "X11 hides the window for real");
+        assert!(super::error_opens_the_editor(true, true));
+        assert!(!super::error_opens_the_editor(false, true), "X11 keeps its notification");
+        assert!(!super::error_opens_the_editor(true, false), "a shown editor already shows it");
+    }
+}
+
 /// Brings a window shown with `show_window` to the front. On Wayland winit can't focus a window
 /// (`focus_window` does nothing there), so the window is closed and opened again instead: GNOME
 /// puts a new window of the app in use in front. Its state lives in the app, not in the window.
@@ -550,6 +591,10 @@ impl App {
 
     pub fn error(&mut self, msg: impl Into<String>) {
         let msg = msg.into();
+        #[cfg(target_os = "linux")]
+        if error_opens_the_editor(capture::wayland(), self.hidden) {
+            self.show_window();
+        }
         if self.hidden {
             system::notify("ShotCraft", &msg);
         } else {
@@ -2032,7 +2077,13 @@ impl eframe::App for App {
             p.tab = tab.parse().unwrap_or(0);
             p.body(ui);
         } else {
-            self.editor_ui(ui);
+            #[cfg(target_os = "linux")]
+            let vanished = vanish_on_wayland(&ctx, self.hidden);
+            #[cfg(not(target_os = "linux"))]
+            let vanished = false;
+            if !vanished {
+                self.editor_ui(ui);
+            }
         }
         // The editor may have started typing or made a selection in this frame: the menu keys must
         // know before the next key arrives, not a frame later.
