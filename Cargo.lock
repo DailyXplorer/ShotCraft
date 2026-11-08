@@ -4469,6 +4469,8 @@ dependencies = [
  "chrono",
  "dirs 6.0.0",
  "eframe",
+ "flate2",
+ "futures-lite",
  "global-hotkey",
  "image",
  "ksni",

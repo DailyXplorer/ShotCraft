@@ -56,6 +56,8 @@ mod shell;
 #[cfg(target_os = "macos")]
 mod updater;
 mod url_scheme;
+#[cfg(target_os = "linux")]
+mod print_pdf;
 mod system;
 mod targets;
 #[cfg(test)]
@@ -127,6 +129,9 @@ pub enum Action {
     ScrollingFinished(Result<Option<scroll::Outcome>, String>),
     OcrCaptured(Result<Option<Captured>, String>),
     OcrDone(Result<system::OcrResult, String>),
+    /// Linux: the print job ended (Cancel is `Ok`); see `App::print`.
+    #[cfg(target_os = "linux")]
+    Printed(Result<(), String>),
     /// Windows and Linux: the screens are frozen; show the crosshair on them.
     #[cfg(not(target_os = "macos"))]
     Pick(Box<picker::Picker>),
@@ -1132,6 +1137,20 @@ impl App {
     pub fn print(&mut self) {
         let Some(img) = self.export() else { return };
         let scale = self.doc.as_ref().map(|d| d.scale_factor).unwrap_or(1.0);
+        // Linux: the portal's dialog is another program's, so waiting for it here would stop the
+        // editor drawing and GNOME would offer to force quit; the job runs on its own thread.
+        #[cfg(target_os = "linux")]
+        {
+            let (q, ctx) = (self.queue.clone(), self.ctx.clone());
+            std::thread::spawn(move || {
+                let res = system::print_image(&img, scale, "ShotCraft");
+                if let Ok(mut q) = q.lock() {
+                    q.push(Action::Printed(res));
+                }
+                ctx.request_repaint();
+            });
+        }
+        #[cfg(not(target_os = "linux"))]
         if let Err(e) = system::print_image(&img, scale, "ShotCraft") {
             self.error(format!("Can't print: {e}"));
         }
@@ -1292,6 +1311,10 @@ impl App {
                 }
             }
             Action::OcrDone(result) => self.ocr_done(result),
+            #[cfg(target_os = "linux")]
+            Action::Printed(Err(e)) => self.error(format!("Can't print: {e}")),
+            #[cfg(target_os = "linux")]
+            Action::Printed(Ok(())) => {}
             #[cfg(target_os = "macos")]
             Action::FrozenShots(start) => self.frozen_start(*start),
             Action::ScrollingCapture => self.start_scrolling(scroll::Direction::Down),
