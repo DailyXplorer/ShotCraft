@@ -208,9 +208,9 @@ fn shell_data_object(path: &Path) -> Result<windows::Win32::System::Com::IDataOb
 /// desktop, the call returns at once, and the file is cleaned up when it ends). X11 speaks XDND
 /// itself (`xdnd`) and returns when the drag is over, as the Windows one does.
 #[cfg(all(target_os = "linux", not(test)))]
-pub fn begin(path: &Path, _preview_png: &[u8], _preview: (f32, f32)) -> Result<(), String> {
+pub fn begin(path: &Path, preview_png: &[u8], preview: (f32, f32)) -> Result<(), String> {
     if crate::capture::wayland() {
-        return crate::wayland_bridge::start_drag(path);
+        return crate::wayland_bridge::start_drag(path, preview_png, preview);
     }
     crate::xdnd::drag(path)
 }

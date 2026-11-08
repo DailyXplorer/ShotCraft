@@ -20,7 +20,11 @@ use wayland_client::globals::{registry_queue_init, GlobalListContents};
 use wayland_client::protocol::wl_data_device::{self, WlDataDevice};
 use wayland_client::protocol::wl_data_device_manager::{DndAction, WlDataDeviceManager};
 use wayland_client::protocol::wl_data_offer::WlDataOffer;
+use wayland_client::protocol::wl_buffer::WlBuffer;
+use wayland_client::protocol::wl_compositor::WlCompositor;
 use wayland_client::protocol::wl_data_source::{self, WlDataSource};
+use wayland_client::protocol::wl_shm::{self, WlShm};
+use wayland_client::protocol::wl_shm_pool::WlShmPool;
 use wayland_client::protocol::wl_pointer::{self, WlPointer};
 use wayland_client::protocol::wl_registry;
 use wayland_client::protocol::wl_seat::{self, Capability, WlSeat};
@@ -41,6 +45,22 @@ struct Shared {
 struct Drag {
     path: PathBuf,
     dropped: bool,
+    /// The picture that follows the pointer; destroyed when the drag ends.
+    icon: Option<Icon>,
+}
+
+struct Icon {
+    surface: WlSurface,
+    buffer: WlBuffer,
+    pool: WlShmPool,
+}
+
+impl Icon {
+    fn destroy(self) {
+        self.surface.destroy();
+        self.buffer.destroy();
+        self.pool.destroy();
+    }
 }
 
 struct Bridge {
@@ -50,6 +70,9 @@ struct Bridge {
     editor: WlSurface,
     manager: Option<WlDataDeviceManager>,
     device: Option<WlDataDevice>,
+    /// For the drag's picture (without them the drag has none).
+    compositor: Option<WlCompositor>,
+    shm: Option<WlShm>,
     shared: Arc<Mutex<Shared>>,
 }
 
@@ -104,6 +127,26 @@ impl Dispatch<WlDataDevice, ()> for State {
     ]);
 }
 
+impl Dispatch<WlCompositor, ()> for State {
+    fn event(_: &mut Self, _: &WlCompositor, _: <WlCompositor as Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+}
+
+impl Dispatch<WlShm, ()> for State {
+    fn event(_: &mut Self, _: &WlShm, _: wl_shm::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+}
+
+impl Dispatch<WlShmPool, ()> for State {
+    fn event(_: &mut Self, _: &WlShmPool, _: <WlShmPool as Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+}
+
+impl Dispatch<WlBuffer, ()> for State {
+    fn event(_: &mut Self, _: &WlBuffer, _: <WlBuffer as Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+}
+
+impl Dispatch<WlSurface, ()> for State {
+    fn event(_: &mut Self, _: &WlSurface, _: <WlSurface as Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+}
+
 impl Dispatch<WlDataOffer, ()> for State {
     fn event(_: &mut Self, _: &WlDataOffer, _: <WlDataOffer as Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
 }
@@ -129,6 +172,9 @@ impl Dispatch<WlDataSource, ()> for State {
             wl_data_source::Event::DndFinished | wl_data_source::Event::Cancelled => {
                 if let Some(d) = lock(&state.shared).drag.take() {
                     crate::dragout::finish(&d.path, d.dropped);
+                    if let Some(icon) = d.icon {
+                        icon.destroy();
+                    }
                 }
                 source.destroy();
             }
@@ -178,10 +224,12 @@ pub fn attach(cc: &eframe::CreationContext<'_>) -> Result<(), String> {
     let seat: Option<WlSeat> = globals.bind(&qh, 1..=5, ()).ok();
     let manager: Option<WlDataDeviceManager> = globals.bind(&qh, 1..=3, ()).ok();
     let device = seat.as_ref().zip(manager.as_ref()).map(|(s, m)| m.get_data_device(s, &qh, ()));
+    let compositor: Option<WlCompositor> = globals.bind(&qh, 1..=4, ()).ok();
+    let shm: Option<WlShm> = globals.bind(&qh, 1..=1, ()).ok();
     queue.roundtrip(&mut state).map_err(|e| e.to_string())?;
     queue.roundtrip(&mut state).map_err(|e| e.to_string())?;
     let reader = conn.clone();
-    BRIDGE.set(Bridge { conn, qh, activation, editor, manager, device, shared }).map_err(|_| "attached twice".to_string())?;
+    BRIDGE.set(Bridge { conn, qh, activation, editor, manager, device, compositor, shm, shared }).map_err(|_| "attached twice".to_string())?;
     std::thread::spawn(move || {
         while dispatch_round(&reader, &mut queue, &mut state).is_ok() {}
     });
@@ -216,7 +264,7 @@ pub fn activate_editor(token: &str) -> bool {
 
 /// Starts the drag of the picture's file from the editor, for the button press the user is
 /// holding. The drag runs in the desktop; when it ends the file is cleaned up (`dragout::finish`).
-pub fn start_drag(path: &Path) -> Result<(), String> {
+pub fn start_drag(path: &Path, preview_png: &[u8], preview: (f32, f32)) -> Result<(), String> {
     let b = BRIDGE.get().ok_or("ShotCraft isn't attached to the desktop's connection")?;
     let (Some(manager), Some(device)) = (&b.manager, &b.device) else { return Err("the desktop has no drag and drop for apps".into()) };
     let serial = {
@@ -225,15 +273,69 @@ pub fn start_drag(path: &Path) -> Result<(), String> {
             return Err("a drag is already running".into());
         }
         let serial = sh.press_serial.ok_or("no mouse press to start the drag from")?;
-        sh.drag = Some(Drag { path: path.to_path_buf(), dropped: false });
+        sh.drag = Some(Drag { path: path.to_path_buf(), dropped: false, icon: None });
         serial
     };
+    // The picture that follows the pointer, centred on it; the drag goes without one if it can't be made.
+    let icon = make_icon(b, preview_png, preview);
     let source = manager.create_data_source(&b.qh, ());
     source.offer("text/uri-list".to_string());
     source.offer("image/png".to_string());
     source.set_actions(DndAction::Copy);
-    device.start_drag(Some(&source), &b.editor, None, serial);
+    device.start_drag(Some(&source), &b.editor, icon.as_ref().map(|i| &i.surface), serial);
+    match lock(&b.shared).drag.as_mut() {
+        Some(d) => d.icon = icon,
+        // The drag already ended (the dispatching thread was quicker): nothing will destroy it later.
+        None => {
+            if let Some(icon) = icon {
+                icon.destroy();
+            }
+        }
+    }
     b.conn.flush().map_err(|e| e.to_string())
+}
+
+/// The drag's picture: the small preview as a shared-memory buffer on a surface of its own.
+fn make_icon(b: &Bridge, png: &[u8], preview: (f32, f32)) -> Option<Icon> {
+    use std::os::fd::{AsFd, FromRawFd};
+    let (compositor, shm) = (b.compositor.as_ref()?, b.shm.as_ref()?);
+    let rgba = image::load_from_memory(png).ok()?.to_rgba8();
+    let (w, h) = (rgba.width(), rgba.height());
+    let pixels = argb_premultiplied(rgba.as_raw());
+    // SAFETY: `memfd_create` returns a new file descriptor that nothing else owns, or -1, which is checked.
+    let fd = unsafe {
+        let raw = libc::memfd_create(c"shotcraft-drag-icon".as_ptr(), libc::MFD_CLOEXEC);
+        if raw < 0 {
+            return None;
+        }
+        OwnedFd::from_raw_fd(raw)
+    };
+    std::fs::File::from(fd.try_clone().ok()?).write_all(&pixels).ok()?;
+    let pool = shm.create_pool(fd.as_fd(), i32::try_from(pixels.len()).ok()?, &b.qh, ());
+    let buffer = pool.create_buffer(0, w as i32, h as i32, (w * 4) as i32, wl_shm::Format::Argb8888, &b.qh, ());
+    let surface = compositor.create_surface(&b.qh, ());
+    let scale = icon_scale(w, preview.0);
+    surface.set_buffer_scale(scale);
+    // Moving the picture by minus half its size puts the pointer in its middle.
+    surface.attach(Some(&buffer), -((w as i32 / scale) / 2), -((h as i32 / scale) / 2));
+    surface.commit();
+    Some(Icon { surface, buffer, pool })
+}
+
+/// Straight RGBA as the premultiplied ARGB8888 a Wayland buffer wants (little-endian: B, G, R, A).
+pub fn argb_premultiplied(rgba: &[u8]) -> Vec<u8> {
+    rgba.chunks_exact(4)
+        .flat_map(|p| {
+            let a = u32::from(p[3]);
+            let m = |c: u8| ((u32::from(c) * a + 127) / 255) as u8;
+            [m(p[2]), m(p[1]), m(p[0]), p[3]]
+        })
+        .collect()
+}
+
+/// How many buffer pixels make a point: the preview picture is made at twice its size on screen.
+pub fn icon_scale(picture_px: u32, shown_points: f32) -> i32 {
+    ((picture_px as f32 / shown_points.max(1.0)).round() as i32).clamp(1, 4)
 }
 
 /// Milliseconds on a monotonic clock, for `stalled`.
@@ -267,6 +369,12 @@ mod tests {
         assert!(super::stalled(1_000, 900, 400, 400), "no pass since it was queued");
         assert!(!super::stalled(1_000, 1_050, 400, 400), "a pass ran after it was queued");
         assert!(!super::stalled(1_000, 900, 100, 400), "too soon to tell");
+    }
+
+    #[test]
+    fn the_icon_is_premultiplied_argb_and_scaled_to_its_size_in_points() {
+        assert_eq!(super::argb_premultiplied(&[255, 0, 0, 255, 200, 100, 50, 128, 9, 9, 9, 0]), vec![0, 0, 255, 255, 25, 50, 100, 128, 0, 0, 0, 0]);
+        assert_eq!((super::icon_scale(320, 160.0), super::icon_scale(160, 160.0), super::icon_scale(10, 160.0), super::icon_scale(2000, 10.0)), (2, 1, 1, 4));
     }
 
     #[test]
