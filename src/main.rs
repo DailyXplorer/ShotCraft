@@ -57,6 +57,8 @@ mod shell;
 mod updater;
 mod url_scheme;
 #[cfg(target_os = "linux")]
+mod launcher;
+#[cfg(target_os = "linux")]
 mod portal;
 #[cfg(target_os = "linux")]
 mod portal_hotkeys;
@@ -520,6 +522,8 @@ impl App {
         system::refresh_autostart(settings.autostart);
         #[cfg(not(target_os = "macos"))]
         links::refresh(settings.allow_links);
+        #[cfg(target_os = "linux")]
+        launcher::install();
         let queue = Queue::default();
         App {
             prefs: prefs::PrefsState::shared(settings.clone(), queue.clone()),
@@ -2190,6 +2194,9 @@ fn main() -> eframe::Result {
     #[cfg(not(target_os = "macos"))]
     {
         let viewport = ViewportBuilder::default().with_title(EDITOR_TITLE).with_inner_size(size).with_min_inner_size(min).with_transparent(true);
+        // Linux: the app id GNOME matches to the launcher entry (`launcher`) for the icon.
+        #[cfg(target_os = "linux")]
+        let viewport = viewport.with_app_id(launcher::APP_ID);
         let viewport = if show_at_start { viewport } else { viewport.with_position([-20_000.0, -20_000.0]) };
         let viewport = match eframe::icon_data::from_png_bytes(include_bytes!("../assets/window-icon.png")) {
             Ok(icon) => viewport.with_icon(Arc::new(icon)),

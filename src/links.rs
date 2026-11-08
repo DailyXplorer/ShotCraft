@@ -131,9 +131,15 @@ fn desktop_dir() -> std::path::PathBuf {
 /// A desktop entry that handles `shotcraft://` and shows in no menu (`%u`: the link).
 #[cfg(target_os = "linux")]
 fn desktop_entry(exe: &std::path::Path) -> String {
-    // Exec quoting (freedesktop Desktop Entry spec): backslash, quote, backtick and $ are escaped.
-    let quoted: String = exe.display().to_string().chars().flat_map(|c| if matches!(c, '\\' | '"' | '`' | '$') { vec!['\\', c] } else { vec![c] }).collect();
+    let quoted = exec_quoted(exe);
     format!("[Desktop Entry]\nType=Application\nName=ShotCraft\nComment=Opens shotcraft:// links\nExec=\"{quoted}\" %u\nMimeType=x-scheme-handler/shotcraft;\nNoDisplay=true\nTerminal=false\n")
+}
+
+/// A path as a desktop entry's Exec line wants it (freedesktop Desktop Entry spec): backslash,
+/// quote, backtick and $ are escaped.
+#[cfg(target_os = "linux")]
+pub fn exec_quoted(exe: &std::path::Path) -> String {
+    exe.display().to_string().chars().flat_map(|c| if matches!(c, '\\' | '"' | '`' | '$') { vec!['\\', c] } else { vec![c] }).collect()
 }
 
 #[cfg(test)]
