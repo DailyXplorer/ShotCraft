@@ -2337,8 +2337,10 @@ mod single {
                         on_link(link);
                         // Wayland: the token that came with the launch brings a minimized editor back.
                         #[cfg(target_os = "linux")]
-                        if let Some(t) = crate::wayland_bridge::take_offered_token() {
-                            crate::wayland_bridge::rescue_if_stalled(t);
+                        match crate::wayland_bridge::take_offered_token() {
+                            Some(t) => crate::wayland_bridge::rescue_if_stalled(t),
+                            // No token with the launch: a notification's click gives one.
+                            None => crate::wayland_bridge::rescue_with_notification(),
                         }
                     }
                     #[cfg(target_os = "linux")]

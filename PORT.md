@@ -58,8 +58,10 @@ Start it hidden in the tray with `--background`, as the login item does.
   on top of other windows and the thumbnail is placed by the desktop, because Wayland gives apps neither. The mouse
   pointer in screenshots is the desktop's choice. A minimized editor gets no frame callbacks, so nothing runs
   until it is restored; a hotkey or a tray click brings it back with the activation token the desktop sends, and so does
-  a link when its launcher passes one (`XDG_ACTIVATION_TOKEN`; Firefox as a snap doesn't). Close the editor with ✕ rather
-  than minimizing it.
+  a link when its launcher passes one (`XDG_ACTIVATION_TOKEN`). A link without a token (Firefox as a snap) shows a
+  "ShotCraft is waiting" notification instead, and a click on it, which carries a token, brings the editor back. A
+  stall is detected by poking the UI (a repaint request that gets no pass within 400 ms), not by the queue, because a
+  link's first pass starts the capture and the result then needs another. Closing the editor with ✕ avoids all this.
 - **Linux text recognition** reads Latin script only (ocrs's models). Windows reads every installed OCR language.
 - **Window capture on Linux** shows what was on screen, so a covered part of the window is whatever covered it.
 - **Linux checks:** the Wayland behaviour above was checked by hand on Ubuntu 26.04 (GNOME 50, Wayland). X11 is

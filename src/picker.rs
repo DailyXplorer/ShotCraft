@@ -22,14 +22,24 @@ pub struct Picker {
     pub for_scrolling: bool,
 }
 
+#[cfg(target_os = "linux")]
+impl Drop for Picker {
+    fn drop(&mut self) {
+        crate::wayland_bridge::PICKER_UP.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 impl Picker {
     pub fn new(frozen: Frozen, mode: CaptureMode, for_ocr: bool, look: crate::capture::WindowLook) -> Picker {
+        #[cfg(target_os = "linux")]
+        crate::wayland_bridge::PICKER_UP.store(true, std::sync::atomic::Ordering::SeqCst);
         Picker { state: Arc::new(Mutex::new(State::new(frozen, mode, look))), for_ocr, for_scrolling: false }
     }
 
     /// For the area of a scrolling capture.
-    pub fn for_scrolling(self) -> Picker {
-        Picker { for_scrolling: true, ..self }
+    pub fn for_scrolling(mut self) -> Picker {
+        self.for_scrolling = true;
+        self
     }
 
     fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {

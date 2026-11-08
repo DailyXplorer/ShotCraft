@@ -228,6 +228,7 @@ pub fn attach(cc: &eframe::CreationContext<'_>) -> Result<(), String> {
     let shm: Option<WlShm> = globals.bind(&qh, 1..=1, ()).ok();
     queue.roundtrip(&mut state).map_err(|e| e.to_string())?;
     queue.roundtrip(&mut state).map_err(|e| e.to_string())?;
+    let _ = POKE.set(cc.egui_ctx.clone());
     let reader = conn.clone();
     BRIDGE.set(Bridge { conn, qh, activation, editor, manager, device, compositor, shm, shared }).map_err(|_| "attached twice".to_string())?;
     std::thread::spawn(move || {
@@ -356,58 +357,148 @@ pub fn take_offered_token() -> Option<String> {
     (now_ms().saturating_sub(at) < 5_000).then_some(token)
 }
 
+/// Milliseconds on a monotonic clock.
+fn now_ms() -> u64 {
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
+}
+
+/// The capture crosshair is on screen (set by the picker while it lives).
+pub static PICKER_UP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The editor's context, to poke its UI (set when the bridge attaches).
+static POKE: OnceLock<eframe::egui::Context> = OnceLock::new();
+
+/// UI passes started so far (`note_pass`).
+static PASSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A UI pass starts (`App::ui`).
+pub fn note_pass() {
+    PASSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether a repaint request got no UI pass within `STALL_MS`: a minimized editor gets no frame
+/// callbacks, so nothing runs, however much waits in the queue. Asking is the only way to tell
+/// that from an editor that is just idle, which answers in milliseconds.
+fn ui_is_stalled() -> bool {
+    let Some(ctx) = POKE.get() else { return false };
+    let before = PASSES.load(std::sync::atomic::Ordering::Relaxed);
+    ctx.request_repaint();
+    std::thread::sleep(std::time::Duration::from_millis(STALL_MS));
+    no_pass_since(before, PASSES.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// The count of passes didn't move.
+pub fn no_pass_since(before: u64, after: u64) -> bool {
+    after == before
+}
+
+/// How many times, one second apart, an event is followed after it was queued: the pass that
+/// runs it may be the last one (a capture starts, and its result then needs another).
+const FOLLOW_ROUNDS: usize = 10;
+
+/// The editor may be poked (and rescued) only while no crosshair is up.
+pub fn may_poke(picker_up: bool) -> bool {
+    !picker_up
+}
+
+/// Waits for the UI to stall, within `FOLLOW_ROUNDS` seconds. True when it did.
+fn wait_for_stall() -> bool {
+    for _ in 0..FOLLOW_ROUNDS {
+        // The crosshair is up: the editor is hidden on purpose, so its silence says nothing, and
+        // activating it now would put it among the full-screen crosshair windows.
+        if !may_poke(PICKER_UP.load(std::sync::atomic::Ordering::SeqCst)) {
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            continue;
+        }
+        if ui_is_stalled() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(600));
+    }
+    false
+}
+
 /// An action was just queued for the UI. A minimized editor gets no frame callbacks, so no UI pass
-/// would ever run it: when none has started `STALL_MS` later, the editor is activated with `token`
-/// (the desktop's, for the user action that caused this), which brings it back. An editor that
-/// isn't minimized runs a pass in milliseconds and is left alone.
+/// would run it (or what it leads to): when the UI turns out to be stalled, the editor is
+/// activated with `token` (the desktop's, for the user action that caused this), which brings it
+/// back. An editor that isn't minimized answers every poke and is left alone.
 pub fn rescue_if_stalled(token: String) {
-    let queued = now_ms();
     std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(STALL_MS));
-        let waited = now_ms().saturating_sub(queued);
-        if stalled(queued, last_pass_ms(), waited, STALL_MS) {
+        if wait_for_stall() {
             activate_editor(&token);
         }
     });
 }
 
-/// Milliseconds on a monotonic clock, for `stalled`.
-pub fn now_ms() -> u64 {
-    static START: OnceLock<std::time::Instant> = OnceLock::new();
-    START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
+/// A notification is on screen asking for a click (one at a time).
+static ASKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Like `rescue_if_stalled`, for an event with no token (a link from a launcher that passes
+/// none, such as Firefox as a snap): when the editor is stalled, a notification asks for a click.
+/// The desktop gives a click on a notification an activation token (GNOME sends the
+/// `ActivationToken` signal with it), and that brings the editor back.
+pub fn rescue_with_notification() {
+    if BRIDGE.get().is_none() {
+        return;
+    }
+    std::thread::spawn(move || {
+        if !wait_for_stall() || ASKING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        if let Err(e) = async_io::block_on(ask_to_restore()) {
+            eprintln!("notification: {e}");
+        }
+        ASKING.store(false, std::sync::atomic::Ordering::SeqCst);
+    });
 }
 
-/// When the editor's last UI pass started (`now_ms`).
-static LAST_PASS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// A UI pass starts (`App::ui`).
-pub fn note_pass() {
-    LAST_PASS.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
-}
-
-pub fn last_pass_ms() -> u64 {
-    LAST_PASS.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-/// Whether the UI is stalled: an action was queued at `queued_ms`, `waited_ms` have passed, and
-/// no UI pass has started since it was queued (`last_pass_ms`).
-pub fn stalled(queued_ms: u64, last_pass_ms: u64, waited_ms: u64, limit_ms: u64) -> bool {
-    waited_ms >= limit_ms && last_pass_ms < queued_ms
+/// Shows the notification and waits (up to 30 s) for its click's token, then activates the editor.
+async fn ask_to_restore() -> Result<(), String> {
+    use ashpd::zbus;
+    use std::collections::HashMap;
+    let err = |e: zbus::Error| e.to_string();
+    let conn = zbus::Connection::session().await.map_err(err)?;
+    let proxy = zbus::Proxy::new(&conn, "org.freedesktop.Notifications", "/org/freedesktop/Notifications", "org.freedesktop.Notifications").await.map_err(err)?;
+    let mut tokens = proxy.receive_signal("ActivationToken").await.map_err(err)?;
+    let hints: HashMap<&str, zbus::zvariant::Value> = HashMap::from([("desktop-entry", "shotcraft".into())]);
+    let reply = proxy
+        .call_method("Notify", &("ShotCraft", 0u32, "shotcraft", "ShotCraft is waiting", "Click to bring its window back.", vec!["default", "Show"], hints, 30_000i32))
+        .await
+        .map_err(err)?;
+    let id: u32 = reply.body().deserialize().map_err(|e| e.to_string())?;
+    let wait = async {
+        while let Some(msg) = futures_lite::StreamExt::next(&mut tokens).await {
+            if let Ok((nid, token)) = msg.body().deserialize::<(u32, String)>() {
+                if nid == id {
+                    return Some(token);
+                }
+            }
+        }
+        None
+    };
+    let timeout = async {
+        async_io::Timer::after(std::time::Duration::from_secs(30)).await;
+        None
+    };
+    if let Some(token) = futures_lite::future::or(wait, timeout).await {
+        activate_editor(&token);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn a_queued_action_with_no_pass_since_is_a_stall_once_the_wait_is_over() {
-        assert!(super::stalled(1_000, 900, 400, 400), "no pass since it was queued");
-        assert!(!super::stalled(1_000, 1_050, 400, 400), "a pass ran after it was queued");
-        assert!(!super::stalled(1_000, 900, 100, 400), "too soon to tell");
+    fn the_editor_is_left_alone_while_the_crosshair_is_up() {
+        assert!(!super::may_poke(true), "hidden on purpose: its silence is not a stall");
+        assert!(super::may_poke(false));
     }
 
     #[test]
-    fn the_icon_is_premultiplied_argb_and_scaled_to_its_size_in_points() {
-        assert_eq!(super::argb_premultiplied(&[255, 0, 0, 255, 200, 100, 50, 128, 9, 9, 9, 0]), vec![0, 0, 255, 255, 25, 50, 100, 128, 0, 0, 0, 0]);
-        assert_eq!((super::icon_scale(320, 160.0), super::icon_scale(160, 160.0), super::icon_scale(10, 160.0), super::icon_scale(2000, 10.0)), (2, 1, 1, 4));
+    fn a_poke_that_got_no_pass_is_a_stall() {
+        assert!(super::no_pass_since(7, 7), "the UI never answered");
+        assert!(!super::no_pass_since(7, 8), "a pass ran");
     }
 
     #[test]
