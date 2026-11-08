@@ -89,21 +89,38 @@ const DESKTOP_FILE: &str = "shotcraft-links.desktop";
 /// Registers the link type for this user (`on`), or removes the registration.
 #[cfg(target_os = "linux")]
 pub fn set_registered(on: bool) {
-    let path = desktop_dir().join(DESKTOP_FILE);
-    if !on {
+    let dir = desktop_dir();
+    let path = dir.join(DESKTOP_FILE);
+    if on {
+        let Ok(exe) = std::env::current_exe() else { return };
+        let written = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, desktop_entry(&exe)));
+        if let Err(e) = written {
+            eprintln!("shotcraft:// links: could not register them: {e}");
+            return;
+        }
+    } else {
         // The default left in mimeapps.list names a file that is gone: desktops skip it.
         let _ = std::fs::remove_file(path);
-        return;
     }
-    let Ok(exe) = std::env::current_exe() else { return };
-    let written = std::fs::create_dir_all(desktop_dir()).and_then(|()| std::fs::write(&path, desktop_entry(&exe)));
-    if let Err(e) = written {
-        eprintln!("shotcraft:// links: could not register them: {e}");
-        return;
+    // A missing tool only costs the desktops that need it.
+    for (program, args) in registration_commands(&dir, on) {
+        let _ = std::process::Command::new(program).args(args).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
     }
-    // Make the entry the handler (xdg-utils is on every freedesktop system). Without it, desktops
-    // that read MimeType from the entries still find it.
-    let _ = std::process::Command::new("xdg-mime").args(["default", DESKTOP_FILE, "x-scheme-handler/shotcraft"]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+}
+
+/// What tells the desktop about the entry after it was written (`on`) or removed. `xdg-mime` makes it
+/// the handler (xdg-utils is on every freedesktop system). `update-desktop-database` rebuilds the
+/// folder's mimeinfo.cache: without it the entry is the default but not a registered handler, and the
+/// "Open With" dialog of the desktop portal, which sandboxed browsers (Firefox as a snap) go through,
+/// offered no app for a shotcraft:// link.
+#[cfg(target_os = "linux")]
+fn registration_commands(dir: &std::path::Path, on: bool) -> Vec<(&'static str, Vec<std::ffi::OsString>)> {
+    let mut out = vec![];
+    if on {
+        out.push(("xdg-mime", ["default", DESKTOP_FILE, "x-scheme-handler/shotcraft"].map(Into::into).to_vec()));
+    }
+    out.push(("update-desktop-database", vec![dir.as_os_str().to_owned()]));
+    out
 }
 
 #[cfg(target_os = "linux")]
@@ -192,5 +209,16 @@ mod tests {
         assert!(entry.contains("Exec=\"/opt/Shot \\\"Craft\\\"/\\$bin\" %u\n"), "{entry}");
         assert!(entry.contains("MimeType=x-scheme-handler/shotcraft;\n"));
         assert!(entry.contains("NoDisplay=true\n"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn registering_and_removing_both_rebuild_the_desktop_database() {
+        let dir = std::path::Path::new("/home/u/.local/share/applications");
+        let rebuild = ("update-desktop-database", vec![dir.as_os_str().to_owned()]);
+        let on = registration_commands(dir, true);
+        assert_eq!(on[0].0, "xdg-mime", "the entry becomes the default first");
+        assert!(on.contains(&rebuild), "and is registered, for the portal's Open With: {on:?}");
+        assert_eq!(registration_commands(dir, false), vec![rebuild], "a removed entry leaves the cache too");
     }
 }
