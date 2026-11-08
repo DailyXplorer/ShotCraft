@@ -126,6 +126,57 @@ fn screens_now(opt: &CaptureOptions) -> Result<Vec<Shot>, String> {
     Ok(shots)
 }
 
+/// Wayland: Area (and the text-recognition area) is chosen with ShotCraft's own crosshair on a
+/// plain screenshot of the desktop, as on X11, and Repeat Area works on one too. Window and Active
+/// Window keep the desktop's own tool (apps can't learn where windows are); so does everything
+/// when the plain screenshot can't be had.
+#[cfg(target_os = "linux")]
+fn wayland_start(mode: CaptureMode, opt: &CaptureOptions) -> Started {
+    let own_picker = matches!(mode, CaptureMode::Area | CaptureMode::RepeatArea);
+    if own_picker {
+        match backend::portal_picture(false) {
+            Ok(Some(img)) => {
+                let shots = shots_from_picture(img, &backend::xwayland_screens(), opt.scale);
+                return match (mode, opt.last_area) {
+                    (CaptureMode::RepeatArea, Some(r)) => Started::Done(repeat_area_in(r, shots)),
+                    (CaptureMode::RepeatArea, None) => Started::Done(repeat_area(opt)),
+                    _ => Started::Pick(Frozen { shots, windows: vec![] }, mode),
+                };
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("wayland: no plain screenshot, using the desktop's tool: {e}"),
+        }
+    }
+    if mode == CaptureMode::RepeatArea {
+        return Started::Done(Err("Repeat Area Capture couldn't take a screenshot of the desktop.".into()));
+    }
+    Started::Done(backend::portal(mode, opt))
+}
+
+/// A desktop picture as the screens the picker works on. One screen per monitor when the monitors
+/// tile the picture exactly (a window per screen covers it); otherwise the picture is one screen.
+#[cfg(target_os = "linux")]
+pub fn shots_from_picture(img: Image, monitors: &[(i32, i32, u32, u32)], scale: f32) -> Vec<Shot> {
+    let inside = |&(x, y, w, h): &(i32, i32, u32, u32)| x >= 0 && y >= 0 && w > 0 && h > 0 && x as i64 + w as i64 <= img.w as i64 && y as i64 + h as i64 <= img.h as i64;
+    let area: u64 = monitors.iter().map(|&(_, _, w, h)| u64::from(w) * u64::from(h)).sum();
+    if monitors.len() > 1 && monitors.iter().all(inside) && area == u64::from(img.w) * u64::from(img.h) {
+        let mut out: Vec<Shot> = monitors
+            .iter()
+            .filter_map(|&(x, y, w, h)| {
+                let r = R { x0: x as f32, y0: y as f32, x1: (x as u32 + w) as f32, y1: (y as u32 + h) as f32 };
+                crop(&img, r).map(|img| Shot { x, y, scale, primary: false, img })
+            })
+            .collect();
+        if out.len() == monitors.len() {
+            // The one at the desktop's origin is the main one, as far as can be told.
+            let main = out.iter().position(|s| s.x == 0 && s.y == 0).unwrap_or(0);
+            out[main].primary = true;
+            return out;
+        }
+    }
+    vec![Shot { x: 0, y: 0, scale, primary: true, img }]
+}
+
 pub enum Started {
     Done(Result<Option<Captured>, String>),
     /// The screens are frozen for the user to choose on, in this mode (the active-window capture
@@ -137,7 +188,7 @@ pub enum Started {
 pub fn start(mode: CaptureMode, opt: &CaptureOptions) -> Started {
     #[cfg(target_os = "linux")]
     if backend::wayland() {
-        return Started::Done(backend::portal(mode, opt));
+        return wayland_start(mode, opt);
     }
     match mode {
         CaptureMode::Area | CaptureMode::Window => match freeze(mode == CaptureMode::Window, opt) {
@@ -247,7 +298,11 @@ fn repeat_area(opt: &CaptureOptions) -> Result<Option<Captured>, String> {
     let Some(r) = opt.last_area else {
         return Err("No area to repeat. Repeat Area Capture takes a screenshot of the previously captured area. You need to perform the area capture first.".into());
     };
-    let shots = screens_now(opt)?;
+    repeat_area_in(r, screens_now(opt)?)
+}
+
+/// Repeat Area on screens already taken (Wayland takes them from a portal screenshot).
+fn repeat_area_in(r: R, shots: Vec<Shot>) -> Result<Option<Captured>, String> {
     let (cx, cy) = ((r.x0 + r.x1) / 2.0, (r.y0 + r.y1) / 2.0);
     let Some(shot) = shots.iter().find(|s| s.x as f32 <= cx && s.y as f32 <= cy && cx < s.x as f32 + s.img.w as f32 && cy < s.y as f32 + s.img.h as f32) else {
         return Err("The area captured last time is no longer on any screen. Capture an area again.".into());
@@ -695,7 +750,6 @@ mod backend {
     }
 
     pub fn portal(mode: CaptureMode, opt: &CaptureOptions) -> Result<Option<Captured>, String> {
-        use ashpd::desktop::screenshot::Screenshot;
         if mode == CaptureMode::RepeatArea {
             return Err("Repeat Area Capture isn't available on Wayland: the desktop doesn't tell apps where an area was.".into());
         }
@@ -705,6 +759,14 @@ mod backend {
         // The desktop has no "active window" for apps to read, so it asks; All Displays is its
         // plain full-desktop screenshot.
         let interactive = matches!(mode, CaptureMode::Area | CaptureMode::Window | CaptureMode::ActiveWindow);
+        let Some(img) = portal_picture(interactive)? else { return Ok(None) };
+        Ok(Some(Captured { img, scale: opt.scale, area: None, mode }))
+    }
+
+    /// A screenshot from the desktop's portal: the whole desktop, or (`interactive`) what the user
+    /// picks in the desktop's own tool. `Ok(None)`: cancelled. The desktop's copy is deleted.
+    pub fn portal_picture(interactive: bool) -> Result<Option<Image>, String> {
+        use ashpd::desktop::screenshot::Screenshot;
         let result = async_io::block_on(async { Screenshot::request().interactive(interactive).modal(true).send().await?.response() });
         let shot = match result {
             Ok(shot) => shot,
@@ -714,8 +776,7 @@ mod backend {
         let Some(path) = file_path(shot.uri().as_str()) else {
             return Err(format!("Can't take a screenshot: the desktop returned {}", shot.uri().as_str()));
         };
-        let img = read_and_remove(&path)?;
-        Ok(Some(Captured { img, scale: opt.scale, area: None, mode }))
+        read_and_remove(&path).map(Some)
     }
 
     /// Read the screenshot the desktop saved for this request, then delete that file. The desktop
@@ -809,6 +870,16 @@ mod backend {
         if wayland() {
             return vec![];
         }
+        randr_screens()
+    }
+
+    /// The monitors XWayland reports, for splitting a portal screenshot per monitor
+    /// (`shots_from_picture` checks that they tile the picture before trusting them).
+    pub fn xwayland_screens() -> Vec<(i32, i32, u32, u32)> {
+        randr_screens()
+    }
+
+    fn randr_screens() -> Vec<(i32, i32, u32, u32)> {
         let Ok((conn, screen_num)) = connect() else { return vec![] };
         let Some(root) = conn.setup().roots.get(screen_num).map(|s| s.root) else { return vec![] };
         conn.randr_get_monitors(root, true)
@@ -960,6 +1031,31 @@ mod tests {
     fn img(w: u32, h: u32) -> Image {
         let px = (0..w * h).flat_map(|i| [(i % 256) as u8, (i / 256) as u8, 7, 255]).collect();
         Image { w, h, px: Arc::new(px) }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_portal_picture_is_split_per_monitor_only_when_the_monitors_tile_it() {
+        // Two 4x2 monitors side by side in an 8x2 picture: one screen each, the one at 0,0 primary.
+        let two = shots_from_picture(img(8, 2), &[(4, 0, 4, 2), (0, 0, 4, 2)], 1.25);
+        assert_eq!(two.len(), 2);
+        assert!(two[0].x == 4 && !two[0].primary && two[1].x == 0 && two[1].primary);
+        assert!(two.iter().all(|s| s.img.w == 4 && s.img.h == 2 && s.scale == 1.25));
+        // Monitors that don't add up to the picture (XWayland reports other units): one screen.
+        let one = shots_from_picture(img(8, 2), &[(0, 0, 12, 3), (12, 0, 12, 3)], 1.0);
+        assert_eq!((one.len(), one[0].x, one[0].y, one[0].img.w, one[0].primary), (1, 0, 0, 8, true));
+        assert_eq!(shots_from_picture(img(8, 2), &[], 1.0).len(), 1, "no monitors known");
+        assert_eq!(shots_from_picture(img(8, 2), &[(0, 0, 8, 2)], 1.0).len(), 1, "one monitor");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn repeat_area_crops_the_last_area_out_of_a_given_picture() {
+        let shots = shots_from_picture(img(10, 8), &[], 1.0);
+        let r = R { x0: 2.0, y0: 3.0, x1: 6.0, y1: 7.0 };
+        let got = repeat_area_in(r, shots).expect("ok").expect("a capture");
+        assert_eq!((got.img.w, got.img.h, got.mode), (4, 4, CaptureMode::RepeatArea));
+        assert!(repeat_area_in(R { x0: 50.0, y0: 50.0, x1: 60.0, y1: 60.0 }, shots_from_picture(img(10, 8), &[], 1.0)).is_err(), "off every screen");
     }
 
     #[cfg(target_os = "linux")]
