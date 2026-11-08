@@ -21,8 +21,35 @@ pub const PREVIEW_MAX: f32 = 160.0;
 const STEM_MAX_CHARS: usize = 80;
 const FALLBACK_STEM: &str = "ShotCraft";
 
+/// Linux: the folder inside Pictures. Sandboxed apps (Firefox and others as snaps or Flatpaks) can
+/// read ordinary files in the home folder but not the system's /tmp, where a dragged file was
+/// "not found" for them.
+pub const HOME_DIR_NAME: &str = "ShotCraft drag-out";
+
 pub fn temp_dir() -> PathBuf {
+    #[cfg(target_os = "linux")]
+    return drag_dir(dirs::picture_dir(), std::env::temp_dir());
+    #[cfg(not(target_os = "linux"))]
     std::env::temp_dir().join(TEMP_DIR_NAME)
+}
+
+/// The folder of the drag files on Linux: inside Pictures when there is one, else the system's
+/// temporary folder.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn drag_dir(pictures: Option<PathBuf>, system_temp: PathBuf) -> PathBuf {
+    match pictures {
+        Some(p) => p.join(HOME_DIR_NAME),
+        None => system_temp.join(TEMP_DIR_NAME),
+    }
+}
+
+/// Removes a drag file, and its folder when that is the one in Pictures and nothing else is in it
+/// (`remove_dir` only takes an empty folder).
+fn remove_file_and_empty_dir(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    if let Some(dir) = path.parent().filter(|d| d.file_name().is_some_and(|n| n == HOME_DIR_NAME)) {
+        let _ = std::fs::remove_dir(dir);
+    }
 }
 
 /// A file name stem that is safe to hand to any app: no path separators, control characters or
@@ -62,7 +89,11 @@ pub fn sweep_dir(dir: &Path, max_age: Duration) -> usize {
 
 /// Cleans the temporary folder of what earlier drags left behind.
 pub fn sweep_stale() {
-    sweep_dir(&temp_dir(), KEEP_FOR);
+    let dir = temp_dir();
+    sweep_dir(&dir, KEEP_FOR);
+    if dir.file_name().is_some_and(|n| n == HOME_DIR_NAME) {
+        let _ = std::fs::remove_dir(&dir);
+    }
 }
 
 /// Writes `img` as `<stem>.png` in `dir` (created when needed), never over an existing file.
@@ -83,7 +114,7 @@ pub fn export(img: &Image, stem: &str) -> Result<PathBuf, String> {
 pub fn remove_later(path: PathBuf, after: Duration) {
     std::thread::spawn(move || {
         std::thread::sleep(after);
-        let _ = std::fs::remove_file(path);
+        remove_file_and_empty_dir(&path);
     });
 }
 
@@ -106,9 +137,7 @@ pub fn cleanup_after(dropped: bool) -> Cleanup {
 /// Applies [`cleanup_after`] to the file of a finished drag.
 pub fn finish(path: &Path, dropped: bool) {
     match cleanup_after(dropped) {
-        Cleanup::Now => {
-            let _ = std::fs::remove_file(path);
-        }
+        Cleanup::Now => remove_file_and_empty_dir(path),
         Cleanup::After(d) => remove_later(path.to_path_buf(), d),
     }
 }
@@ -297,6 +326,27 @@ mod native {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn the_drag_folder_is_in_pictures_where_sandboxed_apps_can_read_it() {
+        assert_eq!(drag_dir(Some(PathBuf::from("/home/me/Pictures")), PathBuf::from("/tmp")), PathBuf::from("/home/me/Pictures/ShotCraft drag-out"));
+        assert_eq!(drag_dir(None, PathBuf::from("/tmp")), PathBuf::from("/tmp/ShotCraft-drag"));
+    }
+
+    #[test]
+    fn a_finished_drag_takes_its_empty_folder_with_it_but_never_a_busy_one() {
+        let base = std::env::temp_dir().join(format!("shotcraft-dragdir-test-{}", std::process::id()));
+        let dir = base.join(HOME_DIR_NAME);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (dir.join("a.png"), dir.join("b.png"));
+        std::fs::write(&a, b"x").unwrap();
+        std::fs::write(&b, b"x").unwrap();
+        remove_file_and_empty_dir(&a);
+        assert!(dir.is_dir() && b.exists(), "another drag's file keeps the folder");
+        remove_file_and_empty_dir(&b);
+        assert!(!dir.exists(), "the empty folder is gone");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn a_file_link_escapes_what_a_uri_cant_carry() {
         assert_eq!(file_uri(Path::new("/tmp/shotcraft-drag/Screenshot 1.png")), "file:///tmp/shotcraft-drag/Screenshot%201.png");
         assert_eq!(file_uri(Path::new("/tmp/é#?.png")), "file:///tmp/%C3%A9%23%3F.png");
@@ -442,6 +492,8 @@ mod tests {
         assert!(!primary_button_down(0) && !primary_button_down(0b10));
     }
 
+    /// Windows and macOS keep the files in the system's temporary folder.
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn temp_folder_is_ours_inside_the_system_one() {
         assert_eq!(temp_dir().file_name().unwrap(), TEMP_DIR_NAME);
