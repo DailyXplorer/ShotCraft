@@ -27,6 +27,10 @@ pub struct Shell {
     tray: Option<ksni::blocking::Handle<linux::Tray>>,
     #[cfg(target_os = "linux")]
     events: (Queue, eframe::egui::Context),
+    /// Wayland: the hotkeys go through the desktop's GlobalShortcuts portal (`portal_hotkeys`),
+    /// and `hotkeys` stays empty: an X11 grab there only saw keys while an X11 window had focus.
+    #[cfg(target_os = "linux")]
+    portal_keys: Option<crate::portal_hotkeys::PortalHotkeys>,
     hotkeys: Option<GlobalHotKeyManager>,
     registered: Vec<HotKey>,
     /// Whether the Show ShotCraft hotkey works: the tray icon can be hidden only then.
@@ -38,6 +42,15 @@ pub struct Shell {
     /// The check mark the tray icon shows for a moment after a copy or a save (upstream's timing).
     flash: crate::tray_flash::TrayFlash,
     clock: std::time::Instant,
+}
+
+/// A Wayland session, where hotkeys go through the portal instead (`Shell::portal_keys`).
+fn wayland_session() -> bool {
+    #[cfg(target_os = "linux")]
+    let w = crate::capture::wayland();
+    #[cfg(not(target_os = "linux"))]
+    let w = false;
+    w
 }
 
 fn push(queue: &Queue, ctx: &eframe::egui::Context, a: crate::Action) {
@@ -224,7 +237,9 @@ impl Shell {
             tray: None,
             #[cfg(target_os = "linux")]
             events: (queue.clone(), ctx.clone()),
-            hotkeys: GlobalHotKeyManager::new().ok(),
+            #[cfg(target_os = "linux")]
+            portal_keys: crate::capture::wayland().then(crate::portal_hotkeys::PortalHotkeys::new),
+            hotkeys: if wayland_session() { None } else { GlobalHotKeyManager::new().ok() },
             registered: vec![],
             show_hotkey_works: false,
             escape: None,
@@ -241,6 +256,21 @@ impl Shell {
     /// Re-register global hotkeys from the settings; returns the ones the system refused. Whether
     /// Show ShotCraft works decides whether the tray icon may be hidden (`sync`).
     pub fn apply_hotkeys(&mut self, settings: &Settings) -> Vec<HotkeyAction> {
+        #[cfg(target_os = "linux")]
+        if let Some(portal) = &self.portal_keys {
+            let set: Vec<(HotkeyAction, String)> = HotkeyAction::ALL.iter().filter_map(|a| Some((*a, settings.hotkey(*a)?.to_string()))).collect();
+            let label = |a: HotkeyAction| commands::for_hotkey(a).map_or_else(|| format!("{a:?}"), |c| c.label.to_string());
+            let (bindings, failed) = crate::portal_hotkeys::bindings(&set, label);
+            let (q, c) = self.events.clone();
+            portal.apply(bindings, move |a| {
+                if let Some(cmd) = commands::for_hotkey(a) {
+                    push(&q, &c, (cmd.action)());
+                }
+            });
+            self.show_hotkey_works = settings.hotkey(HotkeyAction::Show).is_some() && !failed.contains(&HotkeyAction::Show);
+            self.sync(settings);
+            return failed;
+        }
         let failed = match &self.hotkeys {
             None => HotkeyAction::ALL.iter().copied().filter(|a| settings.hotkey(*a).is_some()).collect(),
             Some(mgr) => {

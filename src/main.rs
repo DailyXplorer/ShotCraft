@@ -57,6 +57,10 @@ mod shell;
 mod updater;
 mod url_scheme;
 #[cfg(target_os = "linux")]
+mod portal;
+#[cfg(target_os = "linux")]
+mod portal_hotkeys;
+#[cfg(target_os = "linux")]
 mod print_pdf;
 mod system;
 mod targets;

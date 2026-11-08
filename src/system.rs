@@ -1056,7 +1056,9 @@ fn print_on(hdc: windows::Win32::Graphics::Gdi::HDC, devmode: windows::Win32::Fo
 /// (`print_pdf::prepared_page`).
 #[cfg(target_os = "linux")]
 pub fn print_image(img: &Image, scale: f32, title: &str) -> Result<(), String> {
+    use crate::portal;
     use crate::print_pdf::{image_pdf, prepared_page};
+    const PRINT: &str = "org.freedesktop.portal.Print";
     let orientation = if crate::menu_model::print_landscape((img.w, img.h)) { "landscape" } else { "portrait" };
     async_io::block_on(async {
         let conn = ashpd::zbus::Connection::session().await.map_err(|e| format!("no desktop session bus ({e})"))?;
@@ -1068,7 +1070,7 @@ pub fn print_image(img: &Image, scale: f32, title: &str) -> Result<(), String> {
             o
         };
         let token = portal::token("prep");
-        let answer = portal::request(&conn, &token, "PreparePrint", &("", title, settings, setup, options(&token, Some(("accept_label", portal::value("Print")))))).await?;
+        let answer = portal::request(&conn, PRINT, &token, "PreparePrint", &("", title, settings, setup, options(&token, Some(("accept_label", portal::value("Print")))))).await?;
         let Some(results) = answer else { return Ok(()) };
         let (job, page) = prepared_page(&results).ok_or("the print dialog's answer has no job token")?;
         let pdf = image_pdf(img, scale, page)?;
@@ -1080,64 +1082,9 @@ pub fn print_image(img: &Image, scale: f32, title: &str) -> Result<(), String> {
         let file = file.map_err(|e| format!("can't read the page to print: {e}"))?;
         let token = portal::token("print");
         let fd = ashpd::zbus::zvariant::Fd::from(std::os::fd::AsFd::as_fd(&file));
-        portal::request(&conn, &token, "Print", &("", title, fd, options(&token, Some(("token", portal::value(job)))))).await?;
+        portal::request(&conn, PRINT, &token, "Print", &("", title, fd, options(&token, Some(("token", portal::value(job)))))).await?;
         Ok(())
     })
-}
-
-/// Linux: one request to the print portal, the freedesktop way: listen on the request's object
-/// path, call, and wait for its Response. `Ok(None)`: the user cancelled.
-#[cfg(target_os = "linux")]
-mod portal {
-    use ashpd::zbus::zvariant::{DynamicType, OwnedValue, Value};
-    use ashpd::zbus::{Connection, Proxy};
-    use futures_lite::StreamExt;
-    use std::collections::HashMap;
-
-    pub fn value<'a>(v: impl Into<Value<'a>>) -> Value<'a> {
-        v.into()
-    }
-
-    /// A handle token: letters, digits and `_` only, unique in this process.
-    pub fn token(what: &str) -> String {
-        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        format!("shotcraft_{what}_{}_{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
-    }
-
-    /// The request object path the portal will use for `token` (the sender's unique name without
-    /// its colon, dots as underscores).
-    pub fn request_path(unique_name: &str, token: &str) -> String {
-        format!("/org/freedesktop/portal/desktop/request/{}/{token}", unique_name.trim_start_matches(':').replace('.', "_"))
-    }
-
-    #[cfg(test)]
-    #[test]
-    fn the_request_path_is_the_one_the_portal_uses_and_tokens_differ() {
-        assert_eq!(request_path(":1.183", "shotcraft_prep_9_0"), "/org/freedesktop/portal/desktop/request/1_183/shotcraft_prep_9_0");
-        let (a, b) = (token("x"), token("x"));
-        assert_ne!(a, b);
-        assert!(a.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'), "{a}");
-    }
-
-    pub async fn request<B>(conn: &Connection, token: &str, method: &str, body: &B) -> Result<Option<HashMap<String, OwnedValue>>, String>
-    where
-        B: serde::Serialize + DynamicType,
-    {
-        let err = |e: ashpd::zbus::Error| e.to_string();
-        let name = conn.unique_name().ok_or("no name on the session bus")?.to_string();
-        let path = request_path(&name, token);
-        let request = Proxy::new(conn, "org.freedesktop.portal.Desktop", path.as_str(), "org.freedesktop.portal.Request").await.map_err(err)?;
-        let mut answers = request.receive_signal("Response").await.map_err(err)?;
-        let print = Proxy::new(conn, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", "org.freedesktop.portal.Print").await.map_err(err)?;
-        print.call_method(method, body).await.map_err(|e| format!("the desktop has no print dialog ({e})"))?;
-        let msg = answers.next().await.ok_or("the print dialog closed without an answer")?;
-        let (code, results): (u32, HashMap<String, OwnedValue>) = msg.body().deserialize().map_err(err)?;
-        match code {
-            0 => Ok(Some(results)),
-            1 => Ok(None),
-            _ => Err("the print dialog failed".into()),
-        }
-    }
 }
 
 #[cfg(test)]
