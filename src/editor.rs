@@ -22,9 +22,12 @@ pub const MIN_H: f32 = crate::sizing::EDITOR_MIN_SIZE.1;
 /// far as a notch moves a page in a browser.
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 const WHEEL_SCROLL_BOOST: f32 = 2.5;
-/// Windows and Linux: the menu bar above the toolbar (macOS has the system's).
-#[cfg(not(target_os = "macos"))]
+/// Windows and Linux: the menu bar above the toolbar (macOS has the system's). Linux gets 6 px
+/// more: at 24 px its labels sat 1 px above the line under the bar.
+#[cfg(target_os = "windows")]
 pub const MENUBAR_H: f32 = 24.0;
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub const MENUBAR_H: f32 = 30.0;
 
 #[derive(Clone, Copy)]
 pub struct Th {
