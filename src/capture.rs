@@ -314,6 +314,12 @@ fn displays(rects: &[Rect], mode: CaptureMode, opt: &CaptureOptions) -> Result<O
     Ok(Some(Captured { img, scale, area: None, mode }))
 }
 
+/// The mouse pointer in desktop pixels, where the system lets an app read it (not on Wayland).
+#[cfg(target_os = "linux")]
+pub fn desktop_cursor() -> Option<(i32, i32)> {
+    backend::cursor()
+}
+
 /// The screen containing a desktop point, as (x, y, width, height) in pixels, without capturing it.
 pub fn screen_at(x: f32, y: f32) -> Option<(i32, i32, u32, u32)> {
     backend::screens().into_iter().find(|&(sx, sy, w, h)| x >= sx as f32 && y >= sy as f32 && x < sx as f32 + w as f32 && y < sy as f32 + h as f32)

@@ -156,6 +156,8 @@ impl State {
         let (hover, pressed, released, esc, space, close) = ui.input(|inp| {
             (inp.pointer.hover_pos(), inp.pointer.primary_pressed(), inp.pointer.primary_released(), inp.key_pressed(Key::Escape), inp.key_pressed(Key::Space), inp.viewport().close_requested())
         });
+        // The window under the pointer is the only one that draws a crosshair.
+        let hover = if self.pointer_on(i) { hover } else { None };
         if esc || close {
             self.result = Some(Ok(None));
             return;
@@ -169,6 +171,20 @@ impl State {
 
     /// Whether Space has windows to offer. Wayland apps can't list other windows, so there the
     /// crosshair has none (Window capture there goes through the desktop's own picker).
+    /// Whether the pointer is on screen `i`. On X11 a new window can be told a pointer position that
+    /// isn't its own (the other monitor's, as the window opens), and it never hears that the pointer
+    /// is elsewhere, so it drew a second crosshair and magnifier for good; the system's own answer
+    /// settles it. Where an app can't ask (Wayland), the window's events are right and this is true.
+    fn pointer_on(&self, i: usize) -> bool {
+        #[cfg(target_os = "linux")]
+        if let Some(p) = crate::capture::desktop_cursor() {
+            let s = &self.shots[i];
+            return point_on_screen((s.x, s.y, s.img.w, s.img.h), p);
+        }
+        let _ = i;
+        true
+    }
+
     fn can_pick_window(&self) -> bool {
         !self.windows.is_empty() || !cfg!(target_os = "linux")
     }
@@ -310,6 +326,12 @@ fn screen_at_window(screens: &[(i32, i32, u32, u32)], window: (f32, f32, f32, f3
     screens.iter().position(|&(sx, sy, sw, sh)| (sx as f32 - x).abs() <= 2.0 && (sy as f32 - y).abs() <= 2.0 && (sw as f32 - w).abs() <= 4.0 && (sh as f32 - h).abs() <= 4.0)
 }
 
+/// Whether a desktop point (pixels) is on a screen (x, y, width, height).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn point_on_screen(screen: (i32, i32, u32, u32), p: (i32, i32)) -> bool {
+    p.0 >= screen.0 && p.1 >= screen.1 && i64::from(p.0) < i64::from(screen.0) + i64::from(screen.2) && i64::from(p.1) < i64::from(screen.1) + i64::from(screen.3)
+}
+
 /// Darkens everything in `all` except `keep`.
 fn dim_outside(painter: &egui::Painter, all: Rect, keep: Rect, dim: Color32) {
     let keep = keep.intersect(all);
@@ -391,5 +413,13 @@ mod tests {
         assert_eq!(screen_at_window(&screens, (3840.0, 0.0, 800.0, 600.0)), None, "the first frames, at the Dell's corner but not its size");
         assert_eq!(screen_at_window(&screens, (3841.0, 1.0, 1679.0, 1051.0)), Some(1), "a pixel of slack");
         assert_eq!(screen_at_window(&screens, (500.0, 500.0, 3840.0, 2160.0)), None);
+    }
+
+    #[test]
+    fn only_the_screen_under_the_pointer_takes_it() {
+        let (lg, dell) = ((0, 0, 3840, 2160), (3840, 0, 1680, 1050));
+        assert!(point_on_screen(lg, (1500, 900)) && !point_on_screen(dell, (1500, 900)));
+        assert!(point_on_screen(dell, (4300, 500)) && !point_on_screen(lg, (4300, 500)));
+        assert!(point_on_screen(lg, (3839, 2159)) && !point_on_screen(lg, (3840, 0)) && !point_on_screen(dell, (3840, 1050)));
     }
 }
