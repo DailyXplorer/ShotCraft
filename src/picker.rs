@@ -133,8 +133,8 @@ impl State {
         }
         let ppp = ctx.pixels_per_point();
         let found = ctx.input(|inp| inp.viewport().outer_rect).and_then(|r| {
-            let (x, y) = (r.min.x * ppp, r.min.y * ppp);
-            self.shots.iter().position(|s| (s.x as f32 - x).abs() <= 2.0 && (s.y as f32 - y).abs() <= 2.0)
+            let screens: Vec<(i32, i32, u32, u32)> = self.shots.iter().map(|s| (s.x, s.y, s.img.w, s.img.h)).collect();
+            screen_at_window(&screens, (r.min.x * ppp, r.min.y * ppp, r.width() * ppp, r.height() * ppp))
         });
         if let Some(j) = found {
             self.covers[i] = Some(j);
@@ -301,6 +301,15 @@ impl State {
     }
 }
 
+/// The screen (x, y, width, height in pixels) a window covers, or none while it hasn't settled: a new
+/// window can show its first frames at a default place and size (the LG's window at the Dell's
+/// position, on X11), and matching that place alone gave the wrong screen for good. A window that
+/// covers a screen is at its corner and as big as it.
+fn screen_at_window(screens: &[(i32, i32, u32, u32)], window: (f32, f32, f32, f32)) -> Option<usize> {
+    let (x, y, w, h) = window;
+    screens.iter().position(|&(sx, sy, sw, sh)| (sx as f32 - x).abs() <= 2.0 && (sy as f32 - y).abs() <= 2.0 && (sw as f32 - w).abs() <= 4.0 && (sh as f32 - h).abs() <= 4.0)
+}
+
 /// Darkens everything in `all` except `keep`.
 fn dim_outside(painter: &egui::Painter, all: Rect, keep: Rect, dim: Color32) {
     let keep = keep.intersect(all);
@@ -373,5 +382,14 @@ mod tests {
         assert!(with.can_pick_window());
         assert_eq!(without.can_pick_window(), !cfg!(target_os = "linux"));
     }
-}
 
+    #[test]
+    fn a_window_counts_for_a_screen_only_when_it_sits_there_at_its_size() {
+        let screens = [(0, 0, 3840, 2160), (3840, 0, 1680, 1050)];
+        assert_eq!(screen_at_window(&screens, (0.0, 0.0, 3840.0, 2160.0)), Some(0));
+        assert_eq!(screen_at_window(&screens, (3840.0, 0.0, 1680.0, 1050.0)), Some(1));
+        assert_eq!(screen_at_window(&screens, (3840.0, 0.0, 800.0, 600.0)), None, "the first frames, at the Dell's corner but not its size");
+        assert_eq!(screen_at_window(&screens, (3841.0, 1.0, 1679.0, 1051.0)), Some(1), "a pixel of slack");
+        assert_eq!(screen_at_window(&screens, (500.0, 500.0, 3840.0, 2160.0)), None);
+    }
+}
