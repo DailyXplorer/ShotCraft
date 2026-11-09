@@ -191,7 +191,9 @@ pub fn start(mode: CaptureMode, opt: &CaptureOptions) -> Started {
         return wayland_start(mode, opt);
     }
     match mode {
-        CaptureMode::Area | CaptureMode::Window => match freeze(mode == CaptureMode::Window, opt) {
+        // Linux: the windows are listed for Area too, so that Space (switch to picking a window)
+        // has something to pick; Area used to start without them and Space then found none.
+        CaptureMode::Area | CaptureMode::Window => match freeze(mode == CaptureMode::Window || cfg!(target_os = "linux"), opt) {
             Ok(f) => Started::Pick(f, mode),
             Err(e) => Started::Done(Err(e)),
         },
