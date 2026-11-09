@@ -160,11 +160,17 @@ impl State {
             self.result = Some(Ok(None));
             return;
         }
-        if space {
+        if space && self.can_pick_window() {
             self.window_mode = !self.window_mode;
             self.drag = None;
         }
         self.paint(ui, i, rect, hover, pressed, released);
+    }
+
+    /// Whether Space has windows to offer. Wayland apps can't list other windows, so there the
+    /// crosshair has none (Window capture there goes through the desktop's own picker).
+    fn can_pick_window(&self) -> bool {
+        !self.windows.is_empty() || !cfg!(target_os = "linux")
     }
 
     /// Test hook (`SHOTCRAFT_PICKER` with `--screenshot`): draws the first screen into `ui` with the
@@ -269,7 +275,11 @@ impl State {
                 }
             }
         }
-        hint(painter, rect, "Drag to capture an area   ·   Space: pick a window   ·   Esc: cancel");
+        if self.can_pick_window() {
+            hint(painter, rect, "Drag to capture an area   ·   Space: pick a window   ·   Esc: cancel");
+        } else {
+            hint(painter, rect, "Drag to capture an area   ·   Esc: cancel");
+        }
     }
 
     fn finish_area(&mut self, i: usize, sel: Rect) {
@@ -353,4 +363,15 @@ mod tests {
         assert_ne!(builder.resizable, Some(false));
         assert_eq!(builder.fullscreen, Some(true));
     }
+
+    /// Wayland lists no windows, so Space has nothing to pick there; where windows are listed it works.
+    #[test]
+    fn space_picks_a_window_only_when_there_are_windows_to_pick() {
+        let win = crate::capture::WinInfo { id: 1, title: "t".into(), x: 0, y: 0, w: 10, h: 10 };
+        let with = State::new(crate::capture::Frozen { shots: vec![], windows: vec![win] }, CaptureMode::Area, crate::capture::WindowLook::Plain);
+        let without = State::new(crate::capture::Frozen { shots: vec![], windows: vec![] }, CaptureMode::Area, crate::capture::WindowLook::Plain);
+        assert!(with.can_pick_window());
+        assert_eq!(without.can_pick_window(), !cfg!(target_os = "linux"));
+    }
 }
+
