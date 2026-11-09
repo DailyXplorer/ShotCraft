@@ -74,10 +74,13 @@ impl Picker {
     /// creating the window, which would shrink it back out of full screen.
     fn builder(i: usize) -> ViewportBuilder {
         let builder = ViewportBuilder::default().with_title("ShotCraft Capture").with_decorations(false).with_always_on_top().with_taskbar(false).with_fullscreen(true).with_monitor(i);
+
         // Not on Linux: there winit pins a non-resizable window's size hints (min = max = 800x600),
         // and GNOME's mutter then refuses to make it full screen, leaving a small window.
         #[cfg(not(target_os = "linux"))]
         let builder = builder.with_resizable(false);
+        #[cfg(target_os = "linux")]
+        let builder = if capture::wayland() { builder } else { builder.with_inner_size([2.0, 2.0]) };
         builder
     }
 
@@ -86,6 +89,10 @@ impl Picker {
         Self::lock(&self.state).preview(ui, pointer, from);
     }
 }
+
+/// X11: how many frames a crosshair window may wait for the window manager to make it full screen.
+#[cfg(target_os = "linux")]
+const SETTLE_FRAMES: u32 = 90;
 
 /// What the crosshair windows share; each draws from its own callback.
 struct State {
@@ -165,6 +172,16 @@ impl State {
         if space && self.can_pick_window() {
             self.window_mode = !self.window_mode;
             self.drag = None;
+        }
+        // X11: the window first shows at a default place and size (a small box in the middle of a
+        // monitor) before the window manager makes it full screen. Until it covers its screen
+        // nothing is drawn in it, so that box is empty and not a second, tiny picture of the
+        // screen. A window manager that never makes it full screen gets the picture after
+        // `SETTLE_FRAMES` anyway.
+        #[cfg(target_os = "linux")]
+        if !capture::wayland() && self.covers[own].is_none() && self.frames[own] < SETTLE_FRAMES {
+            ctx.request_repaint();
+            return;
         }
         self.paint(ui, i, rect, hover, pressed, released);
     }
