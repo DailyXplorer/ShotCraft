@@ -151,6 +151,21 @@ fn wayland_start(mode: CaptureMode, opt: &CaptureOptions) -> Started {
     if mode == CaptureMode::RepeatArea {
         return Started::Done(Err("Repeat Area Capture couldn't take a screenshot of the desktop.".into()));
     }
+    // Fullscreen and Delayed take the main screen, as on macOS and Windows, not the whole desktop:
+    // the desktop's screenshot is cut at the monitors and the one at the layout's origin is kept.
+    if matches!(mode, CaptureMode::Fullscreen | CaptureMode::Delayed) {
+        if mode == CaptureMode::Delayed {
+            std::thread::sleep(std::time::Duration::from_secs(u64::from(opt.delay_secs)));
+        }
+        return Started::Done(match backend::portal_picture(false) {
+            Ok(Some(img)) => {
+                let outputs: Vec<_> = crate::wayland_bridge::logical_outputs().iter().map(|o| (o.x, o.y, o.w, o.h)).collect();
+                main_shot(shots_from_picture(img, &outputs, opt.scale), mode)
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(e),
+        });
+    }
     Started::Done(backend::portal(mode, opt))
 }
 
@@ -312,7 +327,11 @@ fn freeze(with_windows: bool, opt: &CaptureOptions) -> Result<Frozen, String> {
 
 /// Fullscreen and Delayed take the main screen, as `screencapture -m` does.
 fn main_screen(mode: CaptureMode, opt: &CaptureOptions) -> Result<Option<Captured>, String> {
-    let shots = screens_now(opt)?;
+    main_shot(screens_now(opt)?, mode)
+}
+
+/// The main screen of `shots` as a finished capture.
+fn main_shot(shots: Vec<Shot>, mode: CaptureMode) -> Result<Option<Captured>, String> {
     let primary = shots.iter().position(|s| s.primary).unwrap_or(0);
     let Some(shot) = shots.into_iter().nth(primary) else {
         return Err("Can't take a screenshot: no screen found.".into());
@@ -1047,6 +1066,15 @@ mod tests {
     fn img(w: u32, h: u32) -> Image {
         let px = (0..w * h).flat_map(|i| [(i % 256) as u8, (i / 256) as u8, 7, 255]).collect();
         Image { w, h, px: Arc::new(px) }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fullscreen_on_wayland_keeps_only_the_monitor_at_the_layouts_origin() {
+        let shots = shots_from_picture(img(5940, 2160), &[(3072, 0, 1680, 1050), (0, 0, 3072, 1728)], 1.0);
+        let Ok(Some(c)) = main_shot(shots, CaptureMode::Fullscreen) else { panic!("main screen") };
+        assert_eq!((c.img.w, c.img.h), (3840, 2160), "the big monitor, not the whole desktop");
+        assert!(main_shot(vec![], CaptureMode::Fullscreen).is_err());
     }
 
     #[cfg(target_os = "linux")]
