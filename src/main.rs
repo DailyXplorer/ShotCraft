@@ -67,6 +67,8 @@ mod print_pdf;
 #[cfg(target_os = "linux")]
 mod wayland_bridge;
 #[cfg(target_os = "linux")]
+mod x11_front;
+#[cfg(target_os = "linux")]
 mod xdnd;
 mod system;
 mod targets;
@@ -625,7 +627,18 @@ impl App {
         }
         app_mode::set_editor_alpha(1.0);
         self.ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Visible(true));
-        self.ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Focus);
+        // X11: the polite request is turned down when another app has the focus, and it made the
+        // editor blink to the front and straight back; `x11_front` asks once, the way a taskbar does.
+        #[cfg(target_os = "linux")]
+        let x11 = !capture::wayland();
+        #[cfg(not(target_os = "linux"))]
+        let x11 = false;
+        if x11 {
+            #[cfg(target_os = "linux")]
+            x11_front::activate_editor_soon();
+        } else {
+            self.ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Focus);
+        }
         self.bring_to_front(EDITOR_TITLE);
     }
 
@@ -2238,6 +2251,9 @@ fn main() -> eframe::Result {
                     if let Err(e) = wayland_bridge::attach(cc) {
                         eprintln!("wayland: {e}");
                     }
+                } else {
+                    // X11: the editor's window, to bring it to the front for a capture.
+                    x11_front::remember(cc);
                 }
                 let app = App::new(cc, screenshot, show_at_start, open);
                 if let Some(i) = instance {
@@ -2261,7 +2277,17 @@ fn main() -> eframe::Result {
     };
     #[cfg(target_os = "macos")]
     let options = eframe::NativeOptions { event_loop_builder: Some(app_mode::event_loop_hook(show_at_start)), ..options };
-    eframe::run_native("ShotCraft", options, Box::new(move |cc| Ok(Box::new(App::new(cc, screenshot, show_at_start, open)))))
+    eframe::run_native(
+        "ShotCraft",
+        options,
+        Box::new(move |cc| {
+            #[cfg(target_os = "linux")]
+            if !capture::wayland() {
+                x11_front::remember(cc);
+            }
+            Ok(Box::new(App::new(cc, screenshot, show_at_start, open)))
+        }),
+    )
 }
 
 
