@@ -1048,6 +1048,11 @@ impl App {
         self.ed.scale = self.doc.as_ref().map(|d| d.scale_factor).unwrap_or(1.0).max(1.0);
         let dark = ui.visuals().dark_mode;
         let t = th(dark);
+        // Linux: the colour of the bars behind them. The window is transparent, and at a fractional
+        // scale (X11 often derives one from the monitor's size) the edge between two bars can fall
+        // between pixels: that hairline showed whatever was behind the window.
+        #[cfg(target_os = "linux")]
+        ui.painter().rect_filled(ui.max_rect(), 0.0, t.bar);
         #[cfg(target_os = "macos")]
         self.keyboard(ui);
         // Windows and Linux: while a dialog (its own window) is open the editor takes no input, as
