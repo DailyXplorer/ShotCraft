@@ -136,7 +136,8 @@ fn wayland_start(mode: CaptureMode, opt: &CaptureOptions) -> Started {
     if own_picker {
         match backend::portal_picture(false) {
             Ok(Some(img)) => {
-                let shots = shots_from_picture(img, &backend::xwayland_screens(), opt.scale);
+                let outputs: Vec<_> = crate::wayland_bridge::logical_outputs().iter().map(|o| (o.x, o.y, o.w, o.h)).collect();
+                let shots = shots_from_picture(img, &outputs, opt.scale);
                 return match (mode, opt.last_area) {
                     (CaptureMode::RepeatArea, Some(r)) => Started::Done(repeat_area_in(r, shots)),
                     (CaptureMode::RepeatArea, None) => Started::Done(repeat_area(opt)),
@@ -153,28 +154,51 @@ fn wayland_start(mode: CaptureMode, opt: &CaptureOptions) -> Started {
     Started::Done(backend::portal(mode, opt))
 }
 
-/// A desktop picture as the screens the picker works on. One screen per monitor when the monitors
-/// tile the picture exactly (a window per screen covers it); otherwise the picture is one screen.
+/// A desktop picture as the screens the picker works on, one per monitor, so that each picker
+/// window holds exactly its own screen (a window holding the whole picture was far bigger than
+/// its monitor, and on a two-monitor desk it blanked one of them).
+///
+/// `outputs` are the monitors' logical positions and sizes, in the order the desktop announced them
+/// (which is winit's order: shot `i` goes to `with_monitor(i)`). The picture is the desktop
+/// surface drawn at one scale, so one factor, the picture's width over the layout's width, takes
+/// logical pixels to picture pixels, whatever each monitor's own scale. If that factor doesn't fit
+/// the picture's height too, or a monitor lies outside the picture, the picture stays one screen.
 #[cfg(target_os = "linux")]
-pub fn shots_from_picture(img: Image, monitors: &[(i32, i32, u32, u32)], scale: f32) -> Vec<Shot> {
-    let inside = |&(x, y, w, h): &(i32, i32, u32, u32)| x >= 0 && y >= 0 && w > 0 && h > 0 && x as i64 + w as i64 <= img.w as i64 && y as i64 + h as i64 <= img.h as i64;
-    let area: u64 = monitors.iter().map(|&(_, _, w, h)| u64::from(w) * u64::from(h)).sum();
-    if monitors.len() > 1 && monitors.iter().all(inside) && area == u64::from(img.w) * u64::from(img.h) {
-        let mut out: Vec<Shot> = monitors
-            .iter()
-            .filter_map(|&(x, y, w, h)| {
-                let r = R { x0: x as f32, y0: y as f32, x1: (x as u32 + w) as f32, y1: (y as u32 + h) as f32 };
-                crop(&img, r).map(|img| Shot { x, y, scale, primary: false, img })
-            })
-            .collect();
-        if out.len() == monitors.len() {
-            // The one at the desktop's origin is the main one, as far as can be told.
-            let main = out.iter().position(|s| s.x == 0 && s.y == 0).unwrap_or(0);
-            out[main].primary = true;
-            return out;
+pub fn shots_from_picture(img: Image, outputs: &[(i32, i32, u32, u32)], scale: f32) -> Vec<Shot> {
+    let one = |img: Image, scale: f32| vec![Shot { x: 0, y: 0, scale, primary: true, img }];
+    if outputs.is_empty() {
+        return one(img, scale);
+    }
+    let (min_x, min_y) = (outputs.iter().map(|o| o.0).min().unwrap_or(0), outputs.iter().map(|o| o.1).min().unwrap_or(0));
+    let right = outputs.iter().map(|&(x, _, w, _)| i64::from(x) + i64::from(w)).max().unwrap_or(0) - i64::from(min_x);
+    let bottom = outputs.iter().map(|&(_, y, _, h)| i64::from(y) + i64::from(h)).max().unwrap_or(0) - i64::from(min_y);
+    if right <= 0 || bottom <= 0 {
+        return one(img, scale);
+    }
+    let factor = img.w as f64 / right as f64;
+    // The height must agree (a pixel or two for rounding), or the layout isn't this picture's.
+    if (bottom as f64 * factor - f64::from(img.h)).abs() > 1.5 {
+        return one(img, scale);
+    }
+    let f = factor as f32;
+    if outputs.len() == 1 {
+        return one(img, f);
+    }
+    let mut out: Vec<Shot> = vec![];
+    for &(x, y, w, h) in outputs {
+        let (px, py) = ((f64::from(x - min_x) * factor).round() as i32, (f64::from(y - min_y) * factor).round() as i32);
+        // Sizes round down: the desktop surface has 1312 rows for 1050 logical ones at 1.25 (1312.5).
+        let (pw, ph) = ((f64::from(w) * factor + 1e-6).floor() as u32, (f64::from(h) * factor + 1e-6).floor() as u32);
+        let r = R { x0: px as f32, y0: py as f32, x1: (px as u32 + pw) as f32, y1: (py as u32 + ph) as f32 };
+        match crop(&img, r) {
+            Some(piece) => out.push(Shot { x: px, y: py, scale: f, primary: false, img: piece }),
+            None => return one(img, scale),
         }
     }
-    vec![Shot { x: 0, y: 0, scale, primary: true, img }]
+    // The monitor at the layout's origin is the main one, as far as can be told.
+    let main = out.iter().position(|sh| sh.x == 0 && sh.y == 0).unwrap_or(0);
+    out[main].primary = true;
+    out
 }
 
 pub enum Started {
@@ -872,16 +896,6 @@ mod backend {
         if wayland() {
             return vec![];
         }
-        randr_screens()
-    }
-
-    /// The monitors XWayland reports, for splitting a portal screenshot per monitor
-    /// (`shots_from_picture` checks that they tile the picture before trusting them).
-    pub fn xwayland_screens() -> Vec<(i32, i32, u32, u32)> {
-        randr_screens()
-    }
-
-    fn randr_screens() -> Vec<(i32, i32, u32, u32)> {
         let Ok((conn, screen_num)) = connect() else { return vec![] };
         let Some(root) = conn.setup().roots.get(screen_num).map(|s| s.root) else { return vec![] };
         conn.randr_get_monitors(root, true)
@@ -1037,17 +1051,34 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn a_portal_picture_is_split_per_monitor_only_when_the_monitors_tile_it() {
-        // Two 4x2 monitors side by side in an 8x2 picture: one screen each, the one at 0,0 primary.
-        let two = shots_from_picture(img(8, 2), &[(4, 0, 4, 2), (0, 0, 4, 2)], 1.25);
+    fn a_portal_picture_is_cut_per_monitor_from_the_desktops_logical_layout() {
+        // Mixed scales: a 3072x1728 logical monitor at 1.25 and a 1680x1050 one at 1.0, side by side.
+        // The desktop surface is drawn at 1.25: 5940 wide, 2160 high.
+        let two = shots_from_picture(img(5940, 2160), &[(3072, 0, 1680, 1050), (0, 0, 3072, 1728)], 1.0);
         assert_eq!(two.len(), 2);
-        assert!(two[0].x == 4 && !two[0].primary && two[1].x == 0 && two[1].primary);
-        assert!(two.iter().all(|s| s.img.w == 4 && s.img.h == 2 && s.scale == 1.25));
-        // Monitors that don't add up to the picture (XWayland reports other units): one screen.
-        let one = shots_from_picture(img(8, 2), &[(0, 0, 12, 3), (12, 0, 12, 3)], 1.0);
-        assert_eq!((one.len(), one[0].x, one[0].y, one[0].img.w, one[0].primary), (1, 0, 0, 8, true));
-        assert_eq!(shots_from_picture(img(8, 2), &[], 1.0).len(), 1, "no monitors known");
-        assert_eq!(shots_from_picture(img(8, 2), &[(0, 0, 8, 2)], 1.0).len(), 1, "one monitor");
+        assert_eq!((two[0].x, two[0].y, two[0].img.w, two[0].img.h, two[0].primary), (3840, 0, 2100, 1312, false), "the small monitor, stretched to the picture's scale");
+        assert_eq!((two[1].x, two[1].y, two[1].img.w, two[1].img.h, two[1].primary), (0, 0, 3840, 2160, true));
+        assert!(two.iter().all(|s| (s.scale - 1.25).abs() < 1e-6), "pixels per point on the picture");
+        // Same scale, one monitor lower than the other (the second configuration tested on real hardware).
+        let offset = shots_from_picture(img(5520, 2160), &[(3840, 628, 1680, 1050), (0, 0, 3840, 2160)], 1.0);
+        assert_eq!((offset[0].x, offset[0].y, offset[0].img.w, offset[0].img.h, offset[0].primary), (3840, 628, 1680, 1050, false));
+        assert_eq!((offset[1].x, offset[1].img.w, offset[1].primary), (0, 3840, true));
+        assert!(offset.iter().all(|s| (s.scale - 1.0).abs() < 1e-6));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_layout_that_is_not_the_pictures_leaves_it_one_screen() {
+        // No monitors known, or a layout whose height doesn't fit the picture's: one screen each time.
+        let cases = [(8, 2, vec![]), (8, 2, vec![(0, 0, 1000, 1000), (1000, 0, 1000, 1000)]), (800, 200, vec![(0, 0, 400, 200), (400, 0, 400, 300)])];
+        for (w, h, outputs) in cases {
+            let one = shots_from_picture(img(w, h), &outputs, 1.5);
+            assert_eq!((one.len(), one[0].x, one[0].y, one[0].img.w, one[0].primary, one[0].scale), (1, 0, 0, w, true, 1.5), "{outputs:?}");
+        }
+        // One monitor at 1.25: one screen at the picture's scale.
+        let single = shots_from_picture(img(3840, 2160), &[(0, 0, 3072, 1728)], 1.0);
+        assert_eq!((single.len(), single[0].img.w), (1, 3840));
+        assert!((single[0].scale - 1.25).abs() < 1e-6);
     }
 
     #[cfg(target_os = "linux")]

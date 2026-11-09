@@ -31,6 +31,9 @@ use wayland_client::protocol::wl_seat::{self, Capability, WlSeat};
 use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::{event_created_child, Connection, Dispatch, Proxy, QueueHandle, WEnum};
 use wayland_protocols::xdg::activation::v1::client::xdg_activation_v1::XdgActivationV1;
+use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_manager_v1::ZxdgOutputManagerV1;
+use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_v1::{self, ZxdgOutputV1};
+use wayland_client::protocol::wl_output::WlOutput;
 
 /// What the dispatching thread and the UI thread share.
 #[derive(Default)]
@@ -429,6 +432,87 @@ pub fn rescue_if_stalled(token: String) {
             activate_editor(&token);
         }
     });
+}
+
+/// A monitor as the desktop lays it out, in logical (scaled) pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LogicalOutput {
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
+}
+
+/// Collects the monitors' answers.
+#[derive(Default)]
+struct OutputState {
+    outputs: Vec<(Option<(i32, i32)>, Option<(i32, i32)>)>,
+}
+
+impl Dispatch<wayland_client::protocol::wl_registry::WlRegistry, GlobalListContents> for OutputState {
+    fn event(_: &mut Self, _: &wl_registry::WlRegistry, _: wl_registry::Event, _: &GlobalListContents, _: &Connection, _: &QueueHandle<Self>) {}
+}
+
+impl Dispatch<WlOutput, usize> for OutputState {
+    fn event(_: &mut Self, _: &WlOutput, _: <WlOutput as Proxy>::Event, _: &usize, _: &Connection, _: &QueueHandle<Self>) {}
+}
+
+impl Dispatch<ZxdgOutputManagerV1, ()> for OutputState {
+    fn event(_: &mut Self, _: &ZxdgOutputManagerV1, _: <ZxdgOutputManagerV1 as Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+}
+
+impl Dispatch<ZxdgOutputV1, usize> for OutputState {
+    fn event(state: &mut Self, _: &ZxdgOutputV1, event: zxdg_output_v1::Event, index: &usize, _: &Connection, _: &QueueHandle<Self>) {
+        let Some(slot) = state.outputs.get_mut(*index) else { return };
+        match event {
+            zxdg_output_v1::Event::LogicalPosition { x, y } => slot.0 = Some((x, y)),
+            zxdg_output_v1::Event::LogicalSize { width, height } => slot.1 = Some((width, height)),
+            _ => {}
+        }
+    }
+}
+
+/// The monitors' logical positions and sizes, in the order the desktop announced them (which is
+/// the order winit lists its monitors in, so index `i` here is `with_monitor(i)` there). Asked
+/// afresh each time, on a queue of its own. Empty when the desktop doesn't offer `xdg-output`.
+pub fn logical_outputs() -> Vec<LogicalOutput> {
+    if BRIDGE.get().is_none() {
+        return vec![];
+    }
+    // A connection of its own: the monitors bound here are announced to the windows of a connection
+    // that holds them (wl_surface.enter), and on the editor's connection winit panics on an object
+    // it didn't make. On this one nobody else is listening.
+    let Ok(conn) = Connection::connect_to_env() else { return vec![] };
+    let Ok((globals, mut queue)) = registry_queue_init::<OutputState>(&conn) else { return vec![] };
+    let qh = queue.handle();
+    let Ok(manager) = globals.bind::<ZxdgOutputManagerV1, _, _>(&qh, 1..=3, ()) else { return vec![] };
+    let announced: Vec<(u32, u32)> = globals.contents().with_list(|list| list.iter().filter(|g| g.interface == "wl_output").map(|g| (g.name, g.version)).collect());
+    let mut state = OutputState { outputs: vec![(None, None); announced.len()] };
+    let mut keep = vec![];
+    for (index, (name, version)) in announced.into_iter().enumerate() {
+        let output = globals.registry().bind::<WlOutput, _, _>(name, version.min(3), &qh, index);
+        keep.push((manager.get_xdg_output(&output, &qh, index), output));
+    }
+    let asked = queue.roundtrip(&mut state).is_ok() && queue.roundtrip(&mut state).is_ok();
+    // Release what was bound, at once and whatever the answer was. The desktop names a monitor to
+    // a window by the monitor object a client bound; a copy of ours that outlived this call would
+    // reach winit as an object it knows nothing about, and winit panics on it.
+    for (xdg, output) in keep {
+        xdg.destroy();
+        output.release();
+    }
+    let _ = conn.flush();
+    if !asked {
+        return vec![];
+    }
+    state
+        .outputs
+        .into_iter()
+        .filter_map(|(pos, size)| {
+            let ((x, y), (w, h)) = (pos?, size?);
+            (w > 0 && h > 0).then_some(LogicalOutput { x, y, w: w as u32, h: h as u32 })
+        })
+        .collect()
 }
 
 /// A notification is on screen asking for a click (one at a time).
