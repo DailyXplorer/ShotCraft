@@ -3333,6 +3333,11 @@ fn dialog_backdrop(ctx: &egui::Context, window: egui::ViewportId, name: &str, t:
                         .family(FontFamily::Name("medium".into())),
                 );
                 ui.label(egui::RichText::new("Close it to go back to the editor.").color(t.dim));
+                // The print dialog is another program's: there is no window of ours to show.
+                #[cfg(target_os = "linux")]
+                if name == crate::PRINT_DIALOG {
+                    return false;
+                }
                 ui.add_space(4.0);
                 ui.button("Show it").clicked()
             })
@@ -3461,6 +3466,19 @@ mod key_tests {
     }
     fn r(x0: f32, y0: f32, x1: f32, y1: f32) -> R {
         R { x0, y0, x1, y1 }
+    }
+
+    /// Linux: the desktop's print dialog is another program's window, so while it is open the editor
+    /// treats it as a dialog of its own (no input, dimmed), as it does for About and Preferences.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_print_dialog_blocks_the_editor_like_about_does() {
+        let mut t = Rig::new();
+        assert!(t.app.open_dialog().is_none());
+        t.app.printing = true;
+        assert_eq!(t.app.open_dialog().map(|d| d.1), Some(crate::PRINT_DIALOG));
+        t.app.printing = false;
+        assert!(t.app.open_dialog().is_none(), "it is over");
     }
 
     #[test]

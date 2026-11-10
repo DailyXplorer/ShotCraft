@@ -246,6 +246,10 @@ mod vanish_tests {
 /// (`focus_window` does nothing there), so the window is closed and opened again instead: GNOME
 /// puts a new window of the app in use in front. Its state lives in the app, not in the window.
 /// Used for the dialogs: Preferences, About and Keyboard Shortcuts.
+/// What the editor calls the desktop's print dialog while it is open (it has no window of ours to show).
+#[cfg(target_os = "linux")]
+pub const PRINT_DIALOG: &str = "The print dialog";
+
 pub fn bring_window_forward(ctx: &egui::Context, id: ViewportId) {
     #[cfg(target_os = "linux")]
     let wayland = capture::wayland();
@@ -409,6 +413,10 @@ pub struct App {
     appending: bool,
     pub about_open: bool,
     pub shortcuts_open: bool,
+    /// Linux: the desktop's print dialog is open (it is another program's window, so the editor
+    /// treats it as a dialog of its own: no input, dimmed, until it closes).
+    #[cfg(target_os = "linux")]
+    pub printing: bool,
     #[cfg(not(target_os = "macos"))]
     about_dialog: dialog::Shared,
     #[cfg(not(target_os = "macos"))]
@@ -496,6 +504,8 @@ impl App {
             busy: false,
             appending: false,
             about_open: false,
+            #[cfg(target_os = "linux")]
+            printing: false,
             shortcuts_open: false,
             #[cfg(not(target_os = "macos"))]
             about_dialog: dialog::Shared::default(),
@@ -568,6 +578,8 @@ impl App {
             busy: false,
             appending: false,
             about_open: false,
+            #[cfg(target_os = "linux")]
+            printing: false,
             shortcuts_open: false,
             #[cfg(not(target_os = "macos"))]
             about_dialog: dialog::Shared::default(),
@@ -1270,6 +1282,10 @@ impl App {
         // editor drawing and GNOME would offer to force quit; the job runs on its own thread.
         #[cfg(target_os = "linux")]
         {
+            if self.printing {
+                return;
+            }
+            self.printing = true;
             let (q, ctx) = (self.queue.clone(), self.ctx.clone());
             std::thread::spawn(move || {
                 let res = system::print_image(&img, scale, "ShotCraft");
@@ -1366,6 +1382,10 @@ impl App {
         if self.shortcuts_open {
             return Some((ViewportId::from_hash_of("shortcuts"), "Keyboard Shortcuts"));
         }
+        #[cfg(target_os = "linux")]
+        if self.printing {
+            return Some((ViewportId::from_hash_of("print"), PRINT_DIALOG));
+        }
         None
     }
 
@@ -1441,9 +1461,12 @@ impl App {
             }
             Action::OcrDone(result) => self.ocr_done(result),
             #[cfg(target_os = "linux")]
-            Action::Printed(Err(e)) => self.error(format!("Can't print: {e}")),
+            Action::Printed(Err(e)) => {
+                self.printing = false;
+                self.error(format!("Can't print: {e}"))
+            }
             #[cfg(target_os = "linux")]
-            Action::Printed(Ok(())) => {}
+            Action::Printed(Ok(())) => self.printing = false,
             #[cfg(target_os = "macos")]
             Action::FrozenShots(start) => self.frozen_start(*start),
             Action::ScrollingCapture => self.start_scrolling(scroll::Direction::Down),
