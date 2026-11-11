@@ -255,6 +255,16 @@ fn repeat_area(opt: &CaptureOptions) -> Result<Option<Captured>, String> {
     Ok(Some(Captured { img, scale: shot.scale, area: Some(r), mode: CaptureMode::RepeatArea }))
 }
 
+/// Where a window's visible frame lies in a picture of its whole outer rectangle. `origin` is the
+/// outer rectangle's top-left and `frame` the visible frame (x, y, width, height), both on the
+/// desktop. Windows 10 and 11 give a window invisible resize borders (7 px or so on the left, right
+/// and bottom): they are in the outer rectangle and not in the frame.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn frame_in_rect(origin: (i32, i32), frame: (i32, i32, u32, u32)) -> R {
+    let (x0, y0) = ((frame.0 - origin.0) as f32, (frame.1 - origin.1) as f32);
+    R { x0, y0, x1: x0 + frame.2 as f32, y1: y0 + frame.3 as f32 }
+}
+
 /// The part of `img` inside `r` (pixels, clamped to the image); None when nothing is left.
 pub fn crop(img: &Image, r: R) -> Option<Image> {
     let x0 = r.x0.min(r.x1).round().clamp(0.0, img.w as f32) as u32;
@@ -647,12 +657,81 @@ mod backend {
         (None, vec![])
     }
 
+    /// A window's own pixels. xcap's `capture_image` renders the whole window, border included,
+    /// then shrinks it to the visible frame before cutting the border off, which squeezes the
+    /// picture and loses its right and bottom edge; here the render is cut without a resize.
     pub fn window_image(win: &WinInfo) -> Option<Image> {
+        use windows::Win32::Foundation::{HWND, RECT};
+        use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
         let w = xcap::Window::all().ok()?.into_iter().find(|w| w.id().ok().map(u64::from) == Some(win.id))?;
-        let img = w.capture_image().ok()?;
-        let (width, height) = img.dimensions();
-        let img = opaque(rgba(width, height, img.into_raw()));
+        let frame = (w.x().ok()?, w.y().ok()?, w.width().ok()?, w.height().ok()?);
+        let hwnd = HWND(win.id as usize as *mut std::ffi::c_void);
+        let mut rect = RECT::default();
+        // SAFETY: GetWindowRect only writes the window's outer rectangle into the RECT it is given.
+        unsafe { GetWindowRect(hwnd, &mut rect) }.ok()?;
+        let (rw, rh) = (rect.right - rect.left, rect.bottom - rect.top);
+        if rw <= 0 || rh <= 0 || rw > 16384 || rh > 16384 {
+            return None;
+        }
+        let whole = opaque(rgba(rw as u32, rh as u32, print_window(hwnd, rw as u32, rh as u32)?));
+        let img = super::crop(&whole, super::frame_in_rect((rect.left, rect.top), frame))?;
         (!blank(&img)).then_some(img)
+    }
+
+    /// The whole window, as drawn by `PrintWindow` into a bitmap of `w`×`h` (its outer rectangle),
+    /// as top-down RGBA.
+    fn print_window(hwnd: windows::Win32::Foundation::HWND, w: u32, h: u32) -> Option<Vec<u8>> {
+        use windows::Win32::Graphics::Gdi::{CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GdiFlush, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS};
+        use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
+        let len = (w as usize) * (h as usize) * 4;
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w as i32,
+                biHeight: -(h as i32),
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // SAFETY: a memory DC, deleted below on every path.
+        let dc = unsafe { CreateCompatibleDC(None) };
+        if dc.is_invalid() {
+            return None;
+        }
+        let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+        // SAFETY: bmi describes a w×h 32-bit top-down DIB; `bits` receives its memory, valid while the DIB lives.
+        let out = match unsafe { CreateDIBSection(Some(dc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0) } {
+            Ok(dib) if !bits.is_null() => {
+                // SAFETY: the DIB is selected into our DC only for this drawing and selected out before it is deleted.
+                let old = unsafe { SelectObject(dc, dib.into()) };
+                // PW_RENDERFULLCONTENT (2) also gets windows drawn by the GPU; 0 is the plain render.
+                // SAFETY: draws the window into our DC; the DIB is as big as the window's outer rectangle.
+                let drawn = [2, 0].into_iter().any(|flags| unsafe { PrintWindow(hwnd, dc, PRINT_WINDOW_FLAGS(flags)) }.as_bool());
+                // SAFETY: takes no arguments; finishes this thread's pending GDI drawing.
+                let _ = unsafe { GdiFlush() };
+                let copy = drawn.then(|| {
+                    // SAFETY: `bits` points to the DIB's w*h*4 bytes, which nothing else touches while we hold it.
+                    let mut px = unsafe { std::slice::from_raw_parts(bits as *const u8, len) }.to_vec();
+                    for p in px.chunks_exact_mut(4) {
+                        p.swap(0, 2);
+                    }
+                    px
+                });
+                // SAFETY: restores the DC's own bitmap, then deletes ours, which is no longer selected.
+                unsafe {
+                    SelectObject(dc, old);
+                    let _ = DeleteObject(dib.into());
+                }
+                copy
+            }
+            _ => None,
+        };
+        // SAFETY: the DC made above, with its original bitmap back in.
+        let _ = unsafe { DeleteDC(dc) };
+        out
     }
 }
 
@@ -849,6 +928,19 @@ mod tests {
             Ok(path) => assert!(path.is_file()),
             Err(why) => assert!(why.contains("no picture") || !why.is_empty()),
         }
+    }
+
+    /// A 800x500 window whose visible frame is 786x493 (7 px of invisible border on the left and right,
+    /// 7 below): the cut is the frame at its offset, the size of the frame and not smaller.
+    #[test]
+    fn a_window_picture_is_cut_at_the_frame_without_a_resize() {
+        let r = frame_in_rect((100, 50), (107, 50, 786, 493));
+        assert_eq!((r.x0, r.y0, r.x1, r.y1), (7.0, 0.0, 793.0, 493.0));
+        let whole = img(800, 500);
+        let out = crop(&whole, r).expect("crop");
+        assert_eq!((out.w, out.h), (786, 493));
+        // The first pixel is the window's pixel at (7, 0), not one of a squeezed picture.
+        assert_eq!(&out.px[0..4], &whole.px[(7 * 4)..(7 * 4 + 4)]);
     }
 
     #[test]
