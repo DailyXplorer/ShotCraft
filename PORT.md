@@ -14,7 +14,7 @@ Windows, pure-Rust X11 and D-Bus crates on Linux), as the Mac build does with `o
 | On macOS | On Windows | On Linux |
 |---|---|---|
 | `screencapture` (full screen, delayed, repeat area) | `xcap` (GDI) | X11: `x11rb` GetImage per RandR monitor. Wayland: the desktop's screenshot portal (`ashpd`), a plain screenshot of the desktop |
-| `screencapture -i` crosshair (area, window, Space to switch) | `src/picker.rs`: a borderless full-screen window per screen over the frozen picture, with a magnifier, size readout, Space and Esc | Same on X11. Wayland: Area and Repeat Area use the same picker on a plain portal screenshot (a picker window per monitor when XWayland's monitors tile it); Window and Active Window use the portal's own picker, as apps can't learn where windows are |
+| `screencapture -i` crosshair (area, window, Space to switch) | `src/picker.rs`: a borderless full-screen window per screen over the frozen picture, with a magnifier, size readout, Space and Esc | Same on X11. Wayland: Area and Repeat Area use the same picker on a plain portal screenshot (one picker window per monitor, each cut from the portal picture by the monitor's position and size); Window and Active Window use the portal's own picker, as apps can't learn where windows are |
 | Window capture | the window's own pixels (`PrintWindow` through xcap), even when covered | what the frozen screen shows inside the window's frame |
 | Vision text recognition | `Windows.Media.Ocr`, every language with its OCR feature installed | `ocrs` with built-in models (Latin script) |
 | Vision barcodes | `rxing` (QR, Aztec, Data Matrix, PDF417, 1D codes) | `rxing` |
@@ -64,9 +64,11 @@ Start it hidden in the tray with `--background`, as the login item does.
   link's first pass starts the capture and the result then needs another. Closing the editor with ✕ avoids all this.
 - **Linux text recognition** reads Latin script only (ocrs's models). Windows reads every installed OCR language.
 - **Window capture on Linux** shows what was on screen, so a covered part of the window is whatever covered it.
-- **Linux checks:** the Wayland behaviour above was checked by hand on Ubuntu 26.04 (GNOME 50, Wayland). X11 is
-  covered by tests under Xvfb (including drag-out, against a fake XDND target) and was not run on a real X11 desktop.
-  More than one monitor is untested.
+- **Linux checks:** by hand on one machine, Ubuntu 26.04.1 (NVIDIA GTX 1070, an LG 4K and a Dell 1680x1050): GNOME 50
+  on Wayland (100 %, 125 % and mixed scales) and a real X11 session (Openbox with a status-notifier tray host, both
+  monitors). Both were run through the captures, the tray, the hotkeys, drag-out, links and print; the pull request lists
+  what each covered. Also covered by tests under Xvfb (including drag-out, against a fake XDND target). Not checked:
+  another GPU, and other X11 desktops (GNOME on Xorg, KDE, Xfce).
 - The Mac-only option "Trim shadow" is hidden: Windows and Linux capture a window without a shadow (Wallpaper draws one).
 - **Updates:** Sparkle (Check for Updates…) is macOS-only; Windows and Linux builds have no updater and never
   connect to anything.
