@@ -242,14 +242,14 @@ mod vanish_tests {
     }
 }
 
-/// Brings a window shown with `show_window` to the front. On Wayland winit can't focus a window
-/// (`focus_window` does nothing there), so the window is closed and opened again instead: GNOME
-/// puts a new window of the app in use in front. Its state lives in the app, not in the window.
-/// Used for the dialogs: Preferences, About and Keyboard Shortcuts.
 /// What the editor calls the desktop's print dialog while it is open (it has no window of ours to show).
 #[cfg(target_os = "linux")]
 pub const PRINT_DIALOG: &str = "The print dialog";
 
+/// Brings a window shown with `show_window` to the front. On Wayland winit can't focus a window
+/// (`focus_window` does nothing there), so the window is closed and opened again instead: GNOME
+/// puts a new window of the app in use in front. Its state lives in the app, not in the window.
+/// Used for the dialogs: Preferences, About and Keyboard Shortcuts.
 pub fn bring_window_forward(ctx: &egui::Context, id: ViewportId) {
     #[cfg(target_os = "linux")]
     let wayland = capture::wayland();
@@ -2303,13 +2303,7 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "ShotCraft",
         options,
-        Box::new(move |cc| {
-            #[cfg(target_os = "linux")]
-            if !capture::wayland() {
-                x11_front::remember(cc);
-            }
-            Ok(Box::new(App::new(cc, screenshot, show_at_start, open)))
-        }),
+        Box::new(move |cc| Ok(Box::new(App::new(cc, screenshot, show_at_start, open)))),
     )
 }
 

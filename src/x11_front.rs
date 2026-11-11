@@ -54,7 +54,9 @@ pub fn activate_editor_soon() {
     std::thread::spawn(move || {
         let Ok((conn, n)) = x11rb::connect(None) else { return };
         let Some(root) = conn.setup().roots.get(n).map(|s| s.root) else { return };
-        let (Some(request), Some(property)) = (atom(&conn, b"_NET_ACTIVE_WINDOW"), atom(&conn, b"_NET_ACTIVE_WINDOW")) else { return };
+        // The message type and the root's property that names the active window are the same atom.
+        let Some(request) = atom(&conn, b"_NET_ACTIVE_WINDOW") else { return };
+        let property = request;
         std::thread::sleep(std::time::Duration::from_millis(FIRST_AFTER_MS));
         let mut waited = FIRST_AFTER_MS;
         while waited < KEEP_TRYING_MS {
