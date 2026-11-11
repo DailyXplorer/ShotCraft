@@ -2373,6 +2373,7 @@ mod single {
     const LINK: &[u8] = b"shotcraft:link ";
     /// Linux (Wayland): the launcher's activation token, sent just before its link, so that a
     /// minimized editor can be brought back for it (`wayland_bridge`).
+    #[cfg(target_os = "linux")]
     const TOKEN: &[u8] = b"shotcraft:token ";
     const OK: &[u8] = b"shotcraft:ok\n";
     /// The longest message read: a link as long as `url_scheme` takes, with its prefix and newline.
