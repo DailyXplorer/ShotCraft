@@ -120,17 +120,18 @@ fn recorded(events: &[egui::Event], modifiers: egui::Modifiers) -> Option<Record
     None
 }
 
-/// Windows and Linux: the key's place on the keyboard, which is what the global hotkeys register
-/// (`Digit1`, `KeyA`). With Shift held egui names some keys by their symbol: the 1 key arrives as
-/// `!` (`Exclamationmark`), which has no hotkey name, so Ctrl+Shift+1 couldn't be recorded.
-#[cfg(not(target_os = "macos"))]
+/// The key a shortcut is recorded with: what the key types when that has a hotkey name, and the
+/// key's place on the keyboard only when it has none. Windows and Linux register a hotkey by what
+/// the key types in the current layout, so on an AZERTY keyboard the A key must record `KeyA`,
+/// not the `KeyQ` of its place. With Shift held egui names some keys by their symbol: the 1 key
+/// arrives as `!` (`Exclamationmark`), which has no hotkey name, so Ctrl+Shift+1 is recorded by
+/// its place (`Digit1`).
 fn recorded_key(key: Key, physical: Option<Key>) -> Key {
-    physical.unwrap_or(key)
-}
-
-#[cfg(target_os = "macos")]
-fn recorded_key(key: Key, _physical: Option<Key>) -> Key {
-    key
+    if key_code(key).is_some() {
+        key
+    } else {
+        physical.unwrap_or(key)
+    }
 }
 
 fn key_code(k: Key) -> Option<String> {
@@ -689,16 +690,28 @@ mod tests {
         assert_eq!(recorded(&[key(Key::Backspace, egui::Modifiers::NONE)], egui::Modifiers::NONE), Some(Recorded::Clear));
     }
 
-    /// Ctrl+Shift+1 as egui-winit sends it on Windows and Linux: the key named by its symbol, the
-    /// place on the keyboard as the physical key. It wasn't recorded before (seen on GNOME 50).
-    #[cfg(not(target_os = "macos"))]
+    /// Ctrl+Shift+1 as egui-winit sends it: the key named by its symbol, the place on the keyboard
+    /// as the physical key. It wasn't recorded before (seen on GNOME 50).
     #[test]
     fn a_shifted_digit_is_recorded_by_its_place_on_the_keyboard() {
-        let m = egui::Modifiers { ctrl: true, shift: true, command: true, ..egui::Modifiers::NONE };
+        let m = egui::Modifiers { ctrl: true, shift: true, ..egui::Modifiers::NONE };
         let shifted_1 = egui::Event::Key { key: Key::Exclamationmark, physical_key: Some(Key::Num1), pressed: true, repeat: false, modifiers: m };
         assert_eq!(recorded(&[shifted_1], m), Some(Recorded::Set("ctrl+shift+Digit1".into())));
         let no_physical = egui::Event::Key { key: Key::Num9, physical_key: None, pressed: true, repeat: false, modifiers: m };
         assert_eq!(recorded(&[no_physical], m), Some(Recorded::Set("ctrl+shift+Digit9".into())), "the logical key when there's no physical one");
+    }
+
+    /// Ctrl+Alt+A on an AZERTY keyboard: the A key sits where Q is on a US keyboard. The hotkeys
+    /// are registered by what the key types, so the letter is recorded, not its place.
+    #[test]
+    fn a_letter_is_recorded_by_what_it_types_not_by_its_place() {
+        let m = egui::Modifiers { ctrl: true, alt: true, ..egui::Modifiers::NONE };
+        let azerty_a = egui::Event::Key { key: Key::A, physical_key: Some(Key::Q), pressed: true, repeat: false, modifiers: m };
+        assert_eq!(recorded(&[azerty_a], m), Some(Recorded::Set("ctrl+alt+KeyA".into())));
+        let qwertz_z = egui::Event::Key { key: Key::Z, physical_key: Some(Key::Y), pressed: true, repeat: false, modifiers: m };
+        assert_eq!(recorded(&[qwertz_z], m), Some(Recorded::Set("ctrl+alt+KeyZ".into())));
+        let azerty_comma = egui::Event::Key { key: Key::Comma, physical_key: Some(Key::M), pressed: true, repeat: false, modifiers: m };
+        assert_eq!(recorded(&[azerty_comma], m), Some(Recorded::Set("ctrl+alt+Comma".into())), "a named symbol too");
     }
 
     /// egui-winit sends Cmd+C / Cmd+X / Cmd+V as copy, cut and paste events and no key event.
