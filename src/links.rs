@@ -136,10 +136,19 @@ fn desktop_entry(exe: &std::path::Path) -> String {
 }
 
 /// A path as a desktop entry's Exec line wants it (freedesktop Desktop Entry spec): backslash,
-/// quote, backtick and $ are escaped.
+/// quote, backtick and $ are escaped, and a literal % is written %% (a lone % starts a field code
+/// such as %u, which would be replaced by the link).
 #[cfg(target_os = "linux")]
 pub fn exec_quoted(exe: &std::path::Path) -> String {
-    exe.display().to_string().chars().flat_map(|c| if matches!(c, '\\' | '"' | '`' | '$') { vec!['\\', c] } else { vec![c] }).collect()
+    exe.display()
+        .to_string()
+        .chars()
+        .flat_map(|c| match c {
+            '\\' | '"' | '`' | '$' => vec!['\\', c],
+            '%' => vec!['%', '%'],
+            _ => vec![c],
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -215,6 +224,15 @@ mod tests {
         assert!(entry.contains("Exec=\"/opt/Shot \\\"Craft\\\"/\\$bin\" %u\n"), "{entry}");
         assert!(entry.contains("MimeType=x-scheme-handler/shotcraft;\n"));
         assert!(entry.contains("NoDisplay=true\n"));
+    }
+
+    /// A % in the path is a literal % in an Exec line only as %%: a lone one starts a field code.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_percent_in_the_path_is_doubled_in_both_entries() {
+        let path = std::path::Path::new("/home/u/100%/Shot%uCraft");
+        assert_eq!(exec_quoted(path), "/home/u/100%%/Shot%%uCraft");
+        assert!(desktop_entry(path).contains("Exec=\"/home/u/100%%/Shot%%uCraft\" %u\n"));
     }
 
     #[cfg(target_os = "linux")]
