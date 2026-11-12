@@ -34,6 +34,39 @@ fn always(_: &App) -> bool {
     true
 }
 
+/// Whether this session can run the command at all. On Linux, scrolling capture can't run on
+/// Wayland (`capture::scrolling_unavailable`), so its items are greyed out there and say why; the
+/// hotkey and `shotcraft://` links still explain it in the window.
+pub fn session_allows(id: &str) -> bool {
+    #[cfg(target_os = "linux")]
+    let ok = allowed_in(id, crate::capture::wayland());
+    #[cfg(not(target_os = "linux"))]
+    let ok = {
+        let _ = id;
+        true
+    };
+    ok
+}
+
+#[cfg(target_os = "linux")]
+fn allowed_in(id: &str, wayland: bool) -> bool {
+    let scrolling = id == SCROLLING.id || id == SCROLLING_UP.id;
+    !scrolling || crate::capture::scrolling_unavailable(wayland).is_none()
+}
+
+/// The label a menu shows for `c`: with the reason when this session can't run it.
+pub fn session_label(c: &Command) -> std::borrow::Cow<'static, str> {
+    if session_allows(c.id) {
+        c.label.into()
+    } else {
+        format!("{} (needs X11)", c.label).into()
+    }
+}
+
+fn scrolling_possible(_: &App) -> bool {
+    session_allows(SCROLLING.id)
+}
+
 fn picture(app: &App) -> bool {
     app.doc.is_some()
 }
@@ -59,9 +92,9 @@ pub const WINDOW: Command =
 pub const DELAYED: Command = Command { id: "delayed", label: "Delayed Screenshot (3s)", icon: Some(Icon::Timer), action: || Action::Capture(CaptureMode::Delayed), ..BASE };
 pub const ALL_DISPLAYS: Command =
     Command { id: "alldisplays", label: "All Displays Screenshot", icon: Some(Icon::Display), hotkey: Some(HotkeyAction::AllDisplays), action: || Action::Capture(CaptureMode::AllDisplays), ..BASE };
-pub const SCROLLING: Command = Command { id: "scrolling", label: "Scrolling Capture", hotkey: Some(HotkeyAction::Scrolling), action: || Action::ScrollingCapture, ..BASE };
+pub const SCROLLING: Command = Command { id: "scrolling", label: "Scrolling Capture", hotkey: Some(HotkeyAction::Scrolling), action: || Action::ScrollingCapture, enabled: scrolling_possible, ..BASE };
 /// Starts at the bottom of the page and goes up.
-pub const SCROLLING_UP: Command = Command { id: "scrollingup", label: "Scrolling Capture (Up)", action: || Action::ScrollingCaptureUp, ..BASE };
+pub const SCROLLING_UP: Command = Command { id: "scrollingup", label: "Scrolling Capture (Up)", action: || Action::ScrollingCaptureUp, enabled: scrolling_possible, ..BASE };
 pub const ACTIVE_WINDOW: Command =
     Command { id: "activewindow", label: "Capture Active Window", icon: Some(Icon::Window), hotkey: Some(HotkeyAction::ActiveWindow), action: || Action::Capture(CaptureMode::ActiveWindow), ..BASE };
 pub const INSTANT_OCR: Command = Command { id: "ocr", label: "Recognize Text/QR", icon: Some(Icon::Ocr), hotkey: Some(HotkeyAction::Ocr), action: || Action::InstantOcr, ..BASE };
@@ -89,8 +122,7 @@ pub const OPEN_FILE: Command = Command { id: "open", label: "Open File…", icon
 pub const OPEN_CLIPBOARD: Command = Command { id: "clipboard", label: "Open From Clipboard", keys: &[key(CMD_SHIFT, Key::V)], action: || Action::OpenClipboard, ..BASE };
 pub const CLOSE: Command = Command { id: "close", label: "Close", keys: &[key(CMD, Key::W)], action: || Action::Close, ..BASE };
 pub const CLOSE_ALL: Command = Command { id: "closeall", label: "Close All", keys: &[key(CMD_ALT, Key::W)], action: || Action::CloseAll, ..BASE };
-/// The system's print dialog; Linux has no printing here yet.
-#[cfg(not(target_os = "linux"))]
+/// The system's print dialog (on Linux, the desktop's print portal).
 pub const PRINT: Command = Command { id: "print", label: "Print…", keys: &[key(CMD_SHIFT, Key::P)], action: || Action::Print, enabled: picture, ..BASE };
 
 // Edit.
@@ -153,7 +185,6 @@ pub const ALL: &[&Command] = &[
     &OPEN_CLIPBOARD,
     &CLOSE,
     &CLOSE_ALL,
-    #[cfg(not(target_os = "linux"))]
     &PRINT,
     &PASTE,
     &UNDO,
@@ -209,7 +240,6 @@ const FILE_MENU: &[Item] = &[
     C(&SAVE),
     C(&SAVE_AS),
     C(&PIN),
-    #[cfg(target_os = "windows")]
     C(&PRINT),
     Sep,
     C(&OPEN_FILE),
@@ -442,6 +472,18 @@ pub fn shortcut_rows(settings: &Settings) -> ShortcutRows {
 #[cfg(all(test, not(target_os = "macos")))]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wayland_greys_out_scrolling_capture_and_nothing_else() {
+        for c in [&SCROLLING, &SCROLLING_UP] {
+            assert!(!allowed_in(c.id, true), "{} can't run on Wayland", c.id);
+            assert!(allowed_in(c.id, false), "{} runs on X11", c.id);
+        }
+        for c in ALL.iter().filter(|c| c.id != SCROLLING.id && c.id != SCROLLING_UP.id) {
+            assert!(allowed_in(c.id, true), "{} isn't about scrolling", c.id);
+        }
+    }
 
     fn menu_commands() -> impl Iterator<Item = &'static Command> {
         let items = MENU_BAR.iter().flat_map(|(_, items)| items.iter()).chain(TRAY);

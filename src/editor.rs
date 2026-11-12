@@ -22,9 +22,12 @@ pub const MIN_H: f32 = crate::sizing::EDITOR_MIN_SIZE.1;
 /// far as a notch moves a page in a browser.
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 const WHEEL_SCROLL_BOOST: f32 = 2.5;
-/// Windows and Linux: the menu bar above the toolbar (macOS has the system's).
-#[cfg(not(target_os = "macos"))]
+/// Windows and Linux: the menu bar above the toolbar (macOS has the system's). Linux gets 6 px
+/// more: at 24 px its labels sat 1 px above the line under the bar.
+#[cfg(target_os = "windows")]
 pub const MENUBAR_H: f32 = 24.0;
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub const MENUBAR_H: f32 = 30.0;
 
 #[derive(Clone, Copy)]
 pub struct Th {
@@ -1045,6 +1048,11 @@ impl App {
         self.ed.scale = self.doc.as_ref().map(|d| d.scale_factor).unwrap_or(1.0).max(1.0);
         let dark = ui.visuals().dark_mode;
         let t = th(dark);
+        // Linux: the colour of the bars behind them. The window is transparent, and at a fractional
+        // scale (X11 often derives one from the monitor's size) the edge between two bars can fall
+        // between pixels: that hairline showed whatever was behind the window.
+        #[cfg(target_os = "linux")]
+        ui.painter().rect_filled(ui.max_rect(), 0.0, t.bar);
         #[cfg(target_os = "macos")]
         self.keyboard(ui);
         // Windows and Linux: while a dialog (its own window) is open the editor takes no input, as
@@ -1298,7 +1306,7 @@ impl App {
                     Item::Cmd(c) => {
                         let row = MenuRow {
                             icon: c.icon,
-                            label: c.label,
+                            label: &crate::commands::session_label(c),
                             keys: &c.shown_keys(&app.settings),
                             checked: c.checked.map(|on| on(&app.settings)),
                             enabled: (c.enabled)(app),
@@ -3091,6 +3099,14 @@ fn about_body(ui: &mut Ui, t: &Th) {
         .size(11.0)
         .color(t.dim),
     );
+    // The Linux build carries the Ocrs models: their attribution, as their authors word it
+    // (assets/ocr/README.md).
+    #[cfg(target_os = "linux")]
+    ui.label(
+        egui::RichText::new("Text recognition: ocrs (MIT/Apache-2.0) with the Ocrs models (github.com/robertknight/ocrs-models), trained on the HierText dataset by Google Research. Licensed under CC BY-SA 4.0.")
+            .size(11.0)
+            .color(t.dim),
+    );
 }
 
 /// The Keyboard Shortcuts window, from the command table: the menus' keys on the left; the keys of
@@ -3317,13 +3333,18 @@ fn dialog_backdrop(ctx: &egui::Context, window: egui::ViewportId, name: &str, t:
                         .family(FontFamily::Name("medium".into())),
                 );
                 ui.label(egui::RichText::new("Close it to go back to the editor.").color(t.dim));
+                // The print dialog is another program's: there is no window of ours to show.
+                #[cfg(target_os = "linux")]
+                if name == crate::PRINT_DIALOG {
+                    return false;
+                }
                 ui.add_space(4.0);
                 ui.button("Show it").clicked()
             })
             .inner
         });
     if shown.inner || shown.backdrop_response.clicked() || shown.backdrop_response.drag_started() {
-        ctx.send_viewport_cmd_to(window, egui::ViewportCommand::Focus);
+        crate::bring_window_forward(ctx, window);
     }
 }
 
@@ -3445,6 +3466,19 @@ mod key_tests {
     }
     fn r(x0: f32, y0: f32, x1: f32, y1: f32) -> R {
         R { x0, y0, x1, y1 }
+    }
+
+    /// Linux: the desktop's print dialog is another program's window, so while it is open the editor
+    /// treats it as a dialog of its own (no input, dimmed), as it does for About and Preferences.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_print_dialog_blocks_the_editor_like_about_does() {
+        let mut t = Rig::new();
+        assert!(t.app.open_dialog().is_none());
+        t.app.printing = true;
+        assert_eq!(t.app.open_dialog().map(|d| d.1), Some(crate::PRINT_DIALOG));
+        t.app.printing = false;
+        assert!(t.app.open_dialog().is_none(), "it is over");
     }
 
     #[test]

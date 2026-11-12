@@ -4,10 +4,8 @@
 mod app_mode;
 // Windows and Linux: screen capture and its crosshair, text recognition, links, the menus and the
 // dialogs (macOS: `screencapture`, Vision, the menu bar and the editor's own windows).
-#[cfg_attr(target_os = "linux", allow(dead_code))] // Linux: parts wait for its backend
 #[cfg(not(target_os = "macos"))]
 mod capture;
-#[cfg_attr(target_os = "linux", allow(dead_code))] // Linux: the tray parts wait for its tray
 #[cfg(not(target_os = "macos"))]
 mod commands;
 #[cfg(not(target_os = "macos"))]
@@ -53,12 +51,25 @@ mod tiled;
 mod shell;
 // Windows and Linux: the tray and the hotkeys (macOS: upstream's shell.rs).
 #[cfg(not(target_os = "macos"))]
-#[cfg_attr(target_os = "linux", allow(dead_code))] // Linux: parts wait for its tray
 #[path = "shell_other.rs"]
 mod shell;
 #[cfg(target_os = "macos")]
 mod updater;
 mod url_scheme;
+#[cfg(target_os = "linux")]
+mod launcher;
+#[cfg(target_os = "linux")]
+mod portal;
+#[cfg(target_os = "linux")]
+mod portal_hotkeys;
+#[cfg(target_os = "linux")]
+mod print_pdf;
+#[cfg(target_os = "linux")]
+mod wayland_bridge;
+#[cfg(target_os = "linux")]
+mod x11_front;
+#[cfg(target_os = "linux")]
+mod xdnd;
 mod system;
 mod targets;
 #[cfg(test)]
@@ -130,6 +141,9 @@ pub enum Action {
     ScrollingFinished(Result<Option<scroll::Outcome>, String>),
     OcrCaptured(Result<Option<Captured>, String>),
     OcrDone(Result<system::OcrResult, String>),
+    /// Linux: the print job ended (Cancel is `Ok`); see `App::print`.
+    #[cfg(target_os = "linux")]
+    Printed(Result<(), String>),
     /// Windows and Linux: the screens are frozen; show the crosshair on them.
     #[cfg(not(target_os = "macos"))]
     Pick(Box<picker::Picker>),
@@ -175,10 +189,114 @@ pub enum ThumbAction {
 /// Shows a floating window as a deferred viewport. Unlike immediate viewports, eframe can create
 /// these while the editor is hidden; the extra repaint lets it build the window on the next pass.
 pub fn show_window(ctx: &egui::Context, id: ViewportId, builder: ViewportBuilder, body: impl Fn(&mut egui::Ui) + Send + Sync + 'static) {
+    #[cfg(not(target_os = "macos"))]
+    if take_reopen(ctx, id) {
+        // Left out of this pass, eframe closes the window; the next pass opens it anew.
+        ctx.request_repaint();
+        return;
+    }
     if !ctx.input(|i| i.raw.viewports.contains_key(&id)) {
         ctx.request_repaint();
     }
     ctx.show_viewport_deferred(id, builder, move |ui, _| body(ui));
+}
+
+/// Wayland: winit can't hide a window there, so a hidden editor vanishes instead. Its frame goes
+/// (winit draws it on GNOME), clicks pass through, and nothing is drawn on its transparent
+/// background. Without this the editor stayed on screen when hidden, and showed up in every
+/// Fullscreen, All Displays and Delayed capture. Returns whether the editor is vanished now.
+#[cfg(target_os = "linux")]
+fn vanish_on_wayland(ctx: &egui::Context, hidden: bool) -> bool {
+    let vanished = editor_vanishes(capture::wayland(), hidden);
+    let key = egui::Id::new("editor-vanished");
+    if ctx.data(|d| d.get_temp::<bool>(key)).unwrap_or(false) != vanished {
+        ctx.data_mut(|d| d.insert_temp(key, vanished));
+        ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Decorations(!vanished));
+        ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::MousePassthrough(vanished));
+    }
+    vanished
+}
+
+#[cfg(target_os = "linux")]
+fn editor_vanishes(wayland: bool, hidden: bool) -> bool {
+    wayland && hidden
+}
+
+/// Linux: an error while the editor is hidden. On Wayland it shows in the editor, brought back
+/// for it: GNOME dropped ShotCraft's notifications (one was closed 24-36 ms after it arrived).
+#[cfg(target_os = "linux")]
+fn error_opens_the_editor(wayland: bool, hidden: bool) -> bool {
+    wayland && hidden
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod vanish_tests {
+    #[test]
+    fn only_a_hidden_editor_on_wayland_vanishes_and_takes_its_errors_in_the_window() {
+        assert!(super::editor_vanishes(true, true));
+        assert!(!super::editor_vanishes(true, false), "shown: drawn as usual");
+        assert!(!super::editor_vanishes(false, true), "X11 hides the window for real");
+        assert!(super::error_opens_the_editor(true, true));
+        assert!(!super::error_opens_the_editor(false, true), "X11 keeps its notification");
+        assert!(!super::error_opens_the_editor(true, false), "a shown editor already shows it");
+    }
+}
+
+/// What the editor calls the desktop's print dialog while it is open (it has no window of ours to show).
+#[cfg(target_os = "linux")]
+pub const PRINT_DIALOG: &str = "The print dialog";
+
+/// Brings a window shown with `show_window` to the front. On Wayland winit can't focus a window
+/// (`focus_window` does nothing there), so the window is closed and opened again instead: GNOME
+/// puts a new window of the app in use in front. Its state lives in the app, not in the window.
+/// Used for the dialogs: Preferences, About and Keyboard Shortcuts.
+pub fn bring_window_forward(ctx: &egui::Context, id: ViewportId) {
+    #[cfg(target_os = "linux")]
+    let wayland = capture::wayland();
+    #[cfg(not(target_os = "linux"))]
+    let wayland = false;
+    if reopens_to_come_forward(wayland) {
+        ctx.data_mut(|d| d.insert_temp(reopen_key(id), true));
+        ctx.request_repaint();
+    } else {
+        ctx.send_viewport_cmd_to(id, ViewportCommand::Focus);
+    }
+}
+
+fn reopens_to_come_forward(wayland: bool) -> bool {
+    wayland
+}
+
+fn reopen_key(id: ViewportId) -> egui::Id {
+    egui::Id::new("reopen-window").with(id)
+}
+
+/// Whether `id` waits to be opened anew (`bring_window_forward`); the answer is given once.
+#[cfg(not(target_os = "macos"))]
+fn take_reopen(ctx: &egui::Context, id: ViewportId) -> bool {
+    ctx.data_mut(|d| d.remove_temp::<bool>(reopen_key(id))).unwrap_or(false)
+}
+
+#[cfg(all(test, not(target_os = "macos")))]
+mod bring_forward_tests {
+    use super::*;
+
+    #[test]
+    fn only_wayland_reopens_a_window_to_bring_it_forward() {
+        assert!(reopens_to_come_forward(true), "winit can't focus a window there");
+        assert!(!reopens_to_come_forward(false));
+    }
+
+    #[test]
+    fn a_window_marked_to_reopen_is_left_out_of_one_pass_only() {
+        let ctx = egui::Context::default();
+        let prefs = ViewportId::from_hash_of("prefs");
+        assert!(!take_reopen(&ctx, prefs), "nothing marked");
+        ctx.data_mut(|d| d.insert_temp(reopen_key(prefs), true));
+        assert!(!take_reopen(&ctx, ViewportId::from_hash_of("about")), "only the marked window");
+        assert!(take_reopen(&ctx, prefs), "left out once: eframe closes it");
+        assert!(!take_reopen(&ctx, prefs), "and shown again on the next pass");
+    }
 }
 
 fn send(ctx: &egui::Context, queue: &Queue, action: Action) {
@@ -191,6 +309,21 @@ pub const EDITOR_TITLE: &str = "ShotCraft";
 
 /// How long the editor stays on screen, transparent, before it is hidden again.
 const HIDE_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Windows and Linux: whether `keep_ui_alive` opens its helper window. Not on Wayland (see there).
+#[cfg(not(target_os = "macos"))]
+fn helper_window_wanted(wayland: bool) -> bool {
+    !wayland
+}
+
+#[cfg(all(test, not(target_os = "macos")))]
+mod helper_window_tests {
+    #[test]
+    fn wayland_gets_no_helper_window_and_everything_else_does() {
+        assert!(!super::helper_window_wanted(true), "a window there froze the app");
+        assert!(super::helper_window_wanted(false));
+    }
+}
 
 const WINDOW_MARGIN: f32 = 48.0;
 const WINDOW_MIN_HEIGHT_RATIO: f32 = 0.9;
@@ -280,6 +413,10 @@ pub struct App {
     appending: bool,
     pub about_open: bool,
     pub shortcuts_open: bool,
+    /// Linux: the desktop's print dialog is open (it is another program's window, so the editor
+    /// treats it as a dialog of its own: no input, dimmed, until it closes).
+    #[cfg(target_os = "linux")]
+    pub printing: bool,
     #[cfg(not(target_os = "macos"))]
     about_dialog: dialog::Shared,
     #[cfg(not(target_os = "macos"))]
@@ -367,6 +504,8 @@ impl App {
             busy: false,
             appending: false,
             about_open: false,
+            #[cfg(target_os = "linux")]
+            printing: false,
             shortcuts_open: false,
             #[cfg(not(target_os = "macos"))]
             about_dialog: dialog::Shared::default(),
@@ -397,6 +536,8 @@ impl App {
         system::refresh_autostart(settings.autostart);
         #[cfg(not(target_os = "macos"))]
         links::refresh(settings.allow_links);
+        #[cfg(target_os = "linux")]
+        launcher::install();
         let queue = Queue::default();
         App {
             prefs: prefs::PrefsState::shared(settings.clone(), queue.clone()),
@@ -437,6 +578,8 @@ impl App {
             busy: false,
             appending: false,
             about_open: false,
+            #[cfg(target_os = "linux")]
+            printing: false,
             shortcuts_open: false,
             #[cfg(not(target_os = "macos"))]
             about_dialog: dialog::Shared::default(),
@@ -470,6 +613,10 @@ impl App {
 
     pub fn error(&mut self, msg: impl Into<String>) {
         let msg = msg.into();
+        #[cfg(target_os = "linux")]
+        if error_opens_the_editor(capture::wayland(), self.hidden) {
+            self.show_window();
+        }
         if self.hidden {
             system::notify("ShotCraft", &msg);
         } else {
@@ -492,7 +639,18 @@ impl App {
         }
         app_mode::set_editor_alpha(1.0);
         self.ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Visible(true));
-        self.ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Focus);
+        // X11: the polite request is turned down when another app has the focus, and it made the
+        // editor blink to the front and straight back; `x11_front` asks once, the way a taskbar does.
+        #[cfg(target_os = "linux")]
+        let x11 = !capture::wayland();
+        #[cfg(not(target_os = "linux"))]
+        let x11 = false;
+        if x11 {
+            #[cfg(target_os = "linux")]
+            x11_front::activate_editor_soon();
+        } else {
+            self.ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Focus);
+        }
         self.bring_to_front(EDITOR_TITLE);
     }
 
@@ -572,6 +730,19 @@ impl App {
     #[cfg(not(target_os = "macos"))]
     fn keep_ui_alive(&mut self, ctx: &egui::Context) {
         if !self.hidden {
+            return;
+        }
+        // Not on Wayland: winit can't hide a window there, so the editor is never hidden and the
+        // UI passes keep running. The helper window only hurt: GNOME never sends the frame
+        // callback of such a tiny transparent surface, the renderer blocks in `present` for good,
+        // and the app froze ("ShotCraft is not responding"). A 1x1 non-resizable window also broke
+        // Wayland's 2x1 minimum at start-up.
+        #[cfg(target_os = "linux")]
+        let wayland = capture::wayland();
+        #[cfg(not(target_os = "linux"))]
+        let wayland = false;
+        if !helper_window_wanted(wayland) {
+            self.hide_pending = false;
             return;
         }
         let builder = ViewportBuilder::default()
@@ -825,6 +996,15 @@ impl App {
             return;
         }
         if self.busy {
+            return;
+        }
+        // Said in the window, before anything is hidden: winit can't hide the editor on Wayland
+        // anyway, and GNOME closed the notification `error` sends for a hidden editor within
+        // ~30 ms, so the menu item seemed to do nothing.
+        #[cfg(target_os = "linux")]
+        if let Some(why) = capture::scrolling_unavailable(capture::wayland()) {
+            self.show_window();
+            self.error(why);
             return;
         }
         self.busy = true;
@@ -1098,6 +1278,24 @@ impl App {
     pub fn print(&mut self) {
         let Some(img) = self.export() else { return };
         let scale = self.doc.as_ref().map(|d| d.scale_factor).unwrap_or(1.0);
+        // Linux: the portal's dialog is another program's, so waiting for it here would stop the
+        // editor drawing and GNOME would offer to force quit; the job runs on its own thread.
+        #[cfg(target_os = "linux")]
+        {
+            if self.printing {
+                return;
+            }
+            self.printing = true;
+            let (q, ctx) = (self.queue.clone(), self.ctx.clone());
+            std::thread::spawn(move || {
+                let res = system::print_image(&img, scale, "ShotCraft");
+                if let Ok(mut q) = q.lock() {
+                    q.push(Action::Printed(res));
+                }
+                ctx.request_repaint();
+            });
+        }
+        #[cfg(not(target_os = "linux"))]
         if let Err(e) = system::print_image(&img, scale, "ShotCraft") {
             self.error(format!("Can't print: {e}"));
         }
@@ -1184,6 +1382,10 @@ impl App {
         if self.shortcuts_open {
             return Some((ViewportId::from_hash_of("shortcuts"), "Keyboard Shortcuts"));
         }
+        #[cfg(target_os = "linux")]
+        if self.printing {
+            return Some((ViewportId::from_hash_of("print"), PRINT_DIALOG));
+        }
         None
     }
 
@@ -1197,12 +1399,12 @@ impl App {
                 | Action::Shortcuts
                 | Action::OpenFile
                 | Action::OpenClipboard => {
-                    self.ctx.send_viewport_cmd_to(vid, ViewportCommand::Focus);
+                    bring_window_forward(&self.ctx, vid);
                     return;
                 }
                 Action::Show => {
                     self.show_window();
-                    self.ctx.send_viewport_cmd_to(vid, ViewportCommand::Focus);
+                    bring_window_forward(&self.ctx, vid);
                     return;
                 }
                 _ => {}
@@ -1258,6 +1460,13 @@ impl App {
                 }
             }
             Action::OcrDone(result) => self.ocr_done(result),
+            #[cfg(target_os = "linux")]
+            Action::Printed(Err(e)) => {
+                self.printing = false;
+                self.error(format!("Can't print: {e}"))
+            }
+            #[cfg(target_os = "linux")]
+            Action::Printed(Ok(())) => self.printing = false,
             #[cfg(target_os = "macos")]
             Action::FrozenShots(start) => self.frozen_start(*start),
             Action::ScrollingCapture => self.start_scrolling(scroll::Direction::Down),
@@ -1844,13 +2053,18 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        #[cfg(target_os = "linux")]
+        wayland_bridge::note_pass();
         if !self.started {
             self.started = true;
             if self.screenshot.is_none() {
                 self.shell = Some(shell::Shell::start(self.queue.clone(), ctx.clone(), &self.settings));
                 #[cfg(target_os = "windows")]
                 self.tray_tip();
-                // Warm up: load the text model now, not on the first real OCR.
+                // Warm up: load the text model now, not on the first real OCR. Not on Linux: its
+                // models are compiled into the app and load on the first OCR, so the tray app
+                // doesn't hold them (or spend a start-up thread) for text nobody reads.
+                #[cfg(not(target_os = "linux"))]
                 std::thread::spawn(|| {
                     let _ = system::recognize(&Image { w: 64, h: 64, px: Arc::new(vec![255; 64 * 64 * 4]) });
                 });
@@ -1909,7 +2123,13 @@ impl eframe::App for App {
             p.tab = tab.parse().unwrap_or(0);
             p.body(ui);
         } else {
-            self.editor_ui(ui);
+            #[cfg(target_os = "linux")]
+            let vanished = vanish_on_wayland(&ctx, self.hidden);
+            #[cfg(not(target_os = "linux"))]
+            let vanished = false;
+            if !vanished {
+                self.editor_ui(ui);
+            }
         }
         // The editor may have started typing or made a selection in this frame: the menu keys must
         // know before the next key arrives, not a frame later.
@@ -1958,8 +2178,31 @@ fn log_panics() {
 }
 
 // Windows and Linux return from their own block below, before the macOS start.
+/// Linux (glibc): a screenshot is a buffer of tens of megabytes. glibc raises its "serve from the
+/// heap or map afresh" threshold after each large free, up to 32 MiB, and a 4K picture (33.2 MB)
+/// is just under that: after a few captures its buffers came from the heap, and the freed space,
+/// fragmented, stayed resident (204 MB at start, 340 MB after 30 captures and not coming back).
+/// Fixing the threshold at 1 MiB keeps big buffers mapped on their own, so they go back to the
+/// system when freed (237 MB after 45 captures). Returns whether the setting was accepted.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn map_big_buffers_afresh() -> bool {
+    // SAFETY: `mallopt` only sets an allocator tunable; it is called once, first thing in `main`,
+    // before ShotCraft starts any thread.
+    unsafe { libc::mallopt(libc::M_MMAP_THRESHOLD, 1 << 20) == 1 }
+}
+
+#[cfg(all(test, target_os = "linux", target_env = "gnu"))]
+mod malloc_tests {
+    #[test]
+    fn the_allocator_takes_the_map_threshold() {
+        assert!(super::map_big_buffers_afresh());
+    }
+}
+
 #[cfg_attr(not(target_os = "macos"), allow(unreachable_code))]
 fn main() -> eframe::Result {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    map_big_buffers_afresh();
     #[cfg(not(target_os = "macos"))]
     log_panics();
     // Files left in the temporary folder by earlier drags.
@@ -2012,6 +2255,9 @@ fn main() -> eframe::Result {
     #[cfg(not(target_os = "macos"))]
     {
         let viewport = ViewportBuilder::default().with_title(EDITOR_TITLE).with_inner_size(size).with_min_inner_size(min).with_transparent(true);
+        // Linux: the app id GNOME matches to the launcher entry (`launcher`) for the icon.
+        #[cfg(target_os = "linux")]
+        let viewport = viewport.with_app_id(launcher::APP_ID);
         let viewport = if show_at_start { viewport } else { viewport.with_position([-20_000.0, -20_000.0]) };
         let viewport = match eframe::icon_data::from_png_bytes(include_bytes!("../assets/window-icon.png")) {
             Ok(icon) => viewport.with_icon(Arc::new(icon)),
@@ -2022,6 +2268,16 @@ fn main() -> eframe::Result {
             "ShotCraft",
             options,
             Box::new(move |cc| {
+                // Wayland: ShotCraft's own requests on winit's connection (`wayland_bridge`).
+                #[cfg(target_os = "linux")]
+                if capture::wayland() {
+                    if let Err(e) = wayland_bridge::attach(cc) {
+                        eprintln!("wayland: {e}");
+                    }
+                } else {
+                    // X11: the editor's window, to bring it to the front for a capture.
+                    x11_front::remember(cc);
+                }
                 let app = App::new(cc, screenshot, show_at_start, open);
                 if let Some(i) = instance {
                     i.listen(app.queue.clone(), app.ctx.clone(), url_scheme::submit);
@@ -2044,7 +2300,11 @@ fn main() -> eframe::Result {
     };
     #[cfg(target_os = "macos")]
     let options = eframe::NativeOptions { event_loop_builder: Some(app_mode::event_loop_hook(show_at_start)), ..options };
-    eframe::run_native("ShotCraft", options, Box::new(move |cc| Ok(Box::new(App::new(cc, screenshot, show_at_start, open)))))
+    eframe::run_native(
+        "ShotCraft",
+        options,
+        Box::new(move |cc| Ok(Box::new(App::new(cc, screenshot, show_at_start, open)))),
+    )
 }
 
 
@@ -2105,6 +2365,10 @@ mod single {
     const PING: &[u8] = b"shotcraft:ping\n";
     /// Then the link and a newline: the `shotcraft://` link a second launch was started with.
     const LINK: &[u8] = b"shotcraft:link ";
+    /// Linux (Wayland): the launcher's activation token, sent just before its link, so that a
+    /// minimized editor can be brought back for it (`wayland_bridge`).
+    #[cfg(target_os = "linux")]
+    const TOKEN: &[u8] = b"shotcraft:token ";
     const OK: &[u8] = b"shotcraft:ok\n";
     /// The longest message read: a link as long as `url_scheme` takes, with its prefix and newline.
     const MAX_MSG: usize = 4096 + 64;
@@ -2131,11 +2395,26 @@ mod single {
                     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
                     let msg = read_message(&mut stream);
                     let link = msg.strip_prefix(LINK).and_then(|l| l.strip_suffix(b"\n")).and_then(|l| std::str::from_utf8(l).ok());
+                    #[cfg(target_os = "linux")]
+                    let token = msg.strip_prefix(TOKEN).and_then(|t| t.strip_suffix(b"\n")).and_then(|t| std::str::from_utf8(t).ok());
+                    #[cfg(not(target_os = "linux"))]
+                    let token: Option<&str> = None;
                     // The link is queued before the answer, so a launch that quits on it loses nothing.
                     if let Some(link) = link {
                         on_link(link);
+                        // Wayland: the token that came with the launch brings a minimized editor back.
+                        #[cfg(target_os = "linux")]
+                        match crate::wayland_bridge::take_offered_token() {
+                            Some(t) => crate::wayland_bridge::rescue_if_stalled(t),
+                            // No token with the launch: a notification's click gives one.
+                            None => crate::wayland_bridge::rescue_with_notification(),
+                        }
                     }
-                    if msg == SHOW || msg == PING || link.is_some() {
+                    #[cfg(target_os = "linux")]
+                    if let Some(t) = token {
+                        crate::wayland_bridge::offer_token(t);
+                    }
+                    if msg == SHOW || msg == PING || link.is_some() || token.is_some() {
                         let _ = stream.write_all(OK);
                     }
                     if msg == SHOW {
@@ -2176,6 +2455,15 @@ mod single {
 
     /// Hands a link to the ShotCraft that is running; true when it took it.
     pub fn send_link(link: &str) -> bool {
+        // Linux: the desktop gives a launch the token of the user action behind it. Passing it on
+        // first lets the running copy bring a minimized editor back for this link.
+        #[cfg(target_os = "linux")]
+        if let Some(t) = std::env::var("XDG_ACTIVATION_TOKEN").ok().filter(|t| !t.is_empty() && !t.contains('\n') && t.len() < 400) {
+            let mut msg = TOKEN.to_vec();
+            msg.extend_from_slice(t.as_bytes());
+            msg.push(b'\n');
+            exchange(PORT, &msg);
+        }
         send_link_on(PORT, link)
     }
 
