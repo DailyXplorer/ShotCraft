@@ -1,8 +1,8 @@
 //! Windows and Linux: how `shotcraft://` links reach the app (macOS: Apple events, `url_scheme`).
 //!
 //! The system hands a link to a program by starting it with the link as its argument, so the link
-//! type has to be registered for this user: under `HKCU\Software\Classes\shotcraft` on Windows
-//! (Linux: not yet). macOS registers it in the app bundle;
+//! type has to be registered for this user: under `HKCU\Software\Classes\shotcraft` on Windows, as
+//! a desktop entry for `x-scheme-handler/shotcraft` on Linux. macOS registers it in the app bundle;
 //! a portable exe has no installer to do it, so ShotCraft registers it itself, and only while
 //! Preferences ▸ Advanced ▸ Automation allows links. Switching that off removes the registration.
 //!
@@ -82,9 +82,89 @@ fn is_ours(command: &str) -> bool {
     command.to_ascii_lowercase().contains("shotcraft")
 }
 
-/// Linux: links aren't registered yet.
+/// The desktop entry's file name, which `xdg-mime` takes to make it the handler.
 #[cfg(target_os = "linux")]
-pub fn set_registered(_on: bool) {}
+const DESKTOP_FILE: &str = "shotcraft-links.desktop";
+
+/// Registers the link type for this user (`on`), or removes the registration.
+#[cfg(target_os = "linux")]
+pub fn set_registered(on: bool) {
+    let dir = desktop_dir();
+    let path = dir.join(DESKTOP_FILE);
+    if on {
+        let Ok(exe) = std::env::current_exe() else { return };
+        let written = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, desktop_entry(&exe)));
+        if let Err(e) = written {
+            eprintln!("shotcraft:// links: could not register them: {e}");
+            return;
+        }
+    } else {
+        // The default left in mimeapps.list names a file that is gone: desktops skip it.
+        let _ = std::fs::remove_file(path);
+    }
+    // A missing tool only costs the desktops that need it.
+    for (program, args) in registration_commands(&dir, on) {
+        let _ = std::process::Command::new(program).args(args).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+    }
+}
+
+/// What tells the desktop about the entry after it was written (`on`) or removed. `xdg-mime` makes it
+/// the handler (xdg-utils is on every freedesktop system). `update-desktop-database` rebuilds the
+/// folder's mimeinfo.cache: without it the entry is the default but not a registered handler, and the
+/// "Open With" dialog of the desktop portal, which sandboxed browsers (Firefox as a snap) go through,
+/// offered no app for a shotcraft:// link.
+#[cfg(target_os = "linux")]
+fn registration_commands(dir: &std::path::Path, on: bool) -> Vec<(&'static str, Vec<std::ffi::OsString>)> {
+    let mut out = vec![];
+    if on {
+        out.push(("xdg-mime", ["default", DESKTOP_FILE, "x-scheme-handler/shotcraft"].map(Into::into).to_vec()));
+    }
+    out.push(("update-desktop-database", vec![dir.as_os_str().to_owned()]));
+    out
+}
+
+#[cfg(target_os = "linux")]
+fn desktop_dir() -> std::path::PathBuf {
+    dirs::data_dir().or_else(|| dirs::home_dir().map(|h| h.join(".local/share"))).unwrap_or_default().join("applications")
+}
+
+/// A desktop entry that handles `shotcraft://` and shows in no menu (`%u`: the link).
+#[cfg(target_os = "linux")]
+fn desktop_entry(exe: &std::path::Path) -> String {
+    let program = exec_program(exe);
+    format!("[Desktop Entry]\nType=Application\nName=ShotCraft\nComment=Opens shotcraft:// links\nExec={program} %u\nMimeType=x-scheme-handler/shotcraft;\nNoDisplay=true\nTerminal=false\n")
+}
+
+/// A path as a desktop entry's Exec line wants it (freedesktop Desktop Entry spec): backslash,
+/// quote, backtick and $ are escaped, and a literal % is written %% (a lone % starts a field code
+/// such as %u, which would be replaced by the link).
+#[cfg(target_os = "linux")]
+pub fn exec_quoted(exe: &std::path::Path) -> String {
+    exe.display()
+        .to_string()
+        .chars()
+        .flat_map(|c| match c {
+            '\\' | '"' | '`' | '$' => vec!['\\', c],
+            '%' => vec!['%', '%'],
+            _ => vec![c],
+        })
+        .collect()
+}
+
+/// The program part of an Exec line: the quoted path, or, when the path has a % in it, `env` and the
+/// quoted path. GLib (GNOME's launcher library) checks that the Exec's program exists using the
+/// text as written, %% and all, and a path like `/home/u/Test 100%%/shotcraft` doesn't exist, so it
+/// refuses to load the whole entry (the link handler, the launcher, the login item). `env` does
+/// exist, and the %% becomes % when the entry is launched, as the spec says.
+#[cfg(target_os = "linux")]
+pub fn exec_program(exe: &std::path::Path) -> String {
+    let quoted = exec_quoted(exe);
+    if exe.to_string_lossy().contains('%') {
+        format!("env \"{quoted}\"")
+    } else {
+        format!("\"{quoted}\"")
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -150,5 +230,37 @@ mod tests {
         assert!(hkcu.open_subkey(&key).is_ok(), "another program's registration stays");
         let _ = hkcu.delete_subkey_all(&key);
         let _ = hkcu.delete_subkey(r"Software\ShotCraft-tests");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_desktop_entry_handles_the_links_and_quotes_the_path() {
+        let entry = desktop_entry(std::path::Path::new("/opt/Shot \"Craft\"/$bin"));
+        assert!(entry.contains("Exec=\"/opt/Shot \\\"Craft\\\"/\\$bin\" %u\n"), "{entry}");
+        assert!(entry.contains("MimeType=x-scheme-handler/shotcraft;\n"));
+        assert!(entry.contains("NoDisplay=true\n"));
+    }
+
+    /// A % in the path is a literal % in an Exec line only as %%: a lone one starts a field code.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_percent_in_the_path_is_doubled_in_both_entries() {
+        let path = std::path::Path::new("/home/u/100%/Shot%uCraft");
+        assert_eq!(exec_quoted(path), "/home/u/100%%/Shot%%uCraft");
+        assert!(desktop_entry(path).contains("Exec=env \"/home/u/100%%/Shot%%uCraft\" %u\n"), "{}", desktop_entry(path));
+        // Without a % the program is the path itself, as before.
+        assert_eq!(exec_program(std::path::Path::new("/opt/shotcraft")), "\"/opt/shotcraft\"");
+        assert!(exec_program(path).starts_with("env "), "GLib needs a program that exists to load the entry");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn registering_and_removing_both_rebuild_the_desktop_database() {
+        let dir = std::path::Path::new("/home/u/.local/share/applications");
+        let rebuild = ("update-desktop-database", vec![dir.as_os_str().to_owned()]);
+        let on = registration_commands(dir, true);
+        assert_eq!(on[0].0, "xdg-mime", "the entry becomes the default first");
+        assert!(on.contains(&rebuild), "and is registered, for the portal's Open With: {on:?}");
+        assert_eq!(registration_commands(dir, false), vec![rebuild], "a removed entry leaves the cache too");
     }
 }

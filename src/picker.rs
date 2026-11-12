@@ -22,14 +22,24 @@ pub struct Picker {
     pub for_scrolling: bool,
 }
 
+#[cfg(target_os = "linux")]
+impl Drop for Picker {
+    fn drop(&mut self) {
+        crate::wayland_bridge::PICKER_UP.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 impl Picker {
     pub fn new(frozen: Frozen, mode: CaptureMode, for_ocr: bool, look: crate::capture::WindowLook) -> Picker {
+        #[cfg(target_os = "linux")]
+        crate::wayland_bridge::PICKER_UP.store(true, std::sync::atomic::Ordering::SeqCst);
         Picker { state: Arc::new(Mutex::new(State::new(frozen, mode, look))), for_ocr, for_scrolling: false }
     }
 
     /// For the area of a scrolling capture.
-    pub fn for_scrolling(self) -> Picker {
-        Picker { for_scrolling: true, ..self }
+    pub fn for_scrolling(mut self) -> Picker {
+        self.for_scrolling = true;
+        self
     }
 
     fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
@@ -63,7 +73,15 @@ impl Picker {
     /// Borderless full screen on the i-th monitor. No size or position: egui applies those after
     /// creating the window, which would shrink it back out of full screen.
     fn builder(i: usize) -> ViewportBuilder {
-        ViewportBuilder::default().with_title("ShotCraft Capture").with_decorations(false).with_resizable(false).with_always_on_top().with_taskbar(false).with_fullscreen(true).with_monitor(i)
+        let builder = ViewportBuilder::default().with_title("ShotCraft Capture").with_decorations(false).with_always_on_top().with_taskbar(false).with_fullscreen(true).with_monitor(i);
+
+        // Not on Linux: there winit pins a non-resizable window's size hints (min = max = 800x600),
+        // and GNOME's mutter then refuses to make it full screen, leaving a small window.
+        #[cfg(not(target_os = "linux"))]
+        let builder = builder.with_resizable(false);
+        #[cfg(target_os = "linux")]
+        let builder = if capture::wayland() { builder } else { builder.with_inner_size([2.0, 2.0]) };
+        builder
     }
 
     /// Test hook: see `State::preview`.
@@ -71,6 +89,10 @@ impl Picker {
         Self::lock(&self.state).preview(ui, pointer, from);
     }
 }
+
+/// X11: how many frames a crosshair window may wait for the window manager to make it full screen.
+#[cfg(target_os = "linux")]
+const SETTLE_FRAMES: u32 = 90;
 
 /// What the crosshair windows share; each draws from its own callback.
 struct State {
@@ -118,8 +140,8 @@ impl State {
         }
         let ppp = ctx.pixels_per_point();
         let found = ctx.input(|inp| inp.viewport().outer_rect).and_then(|r| {
-            let (x, y) = (r.min.x * ppp, r.min.y * ppp);
-            self.shots.iter().position(|s| (s.x as f32 - x).abs() <= 2.0 && (s.y as f32 - y).abs() <= 2.0)
+            let screens: Vec<(i32, i32, u32, u32)> = self.shots.iter().map(|s| (s.x, s.y, s.img.w, s.img.h)).collect();
+            screen_at_window(&screens, (r.min.x * ppp, r.min.y * ppp, r.width() * ppp, r.height() * ppp))
         });
         if let Some(j) = found {
             self.covers[i] = Some(j);
@@ -141,15 +163,47 @@ impl State {
         let (hover, pressed, released, esc, space, close) = ui.input(|inp| {
             (inp.pointer.hover_pos(), inp.pointer.primary_pressed(), inp.pointer.primary_released(), inp.key_pressed(Key::Escape), inp.key_pressed(Key::Space), inp.viewport().close_requested())
         });
+        // The window under the pointer is the only one that draws a crosshair.
+        let hover = if self.pointer_on(i) { hover } else { None };
         if esc || close {
             self.result = Some(Ok(None));
             return;
         }
-        if space {
+        if space && self.can_pick_window() {
             self.window_mode = !self.window_mode;
             self.drag = None;
         }
+        // X11: the window first shows at a default place and size (a small box in the middle of a
+        // monitor) before the window manager makes it full screen. Until it covers its screen
+        // nothing is drawn in it, so that box is empty and not a second, tiny picture of the
+        // screen. A window manager that never makes it full screen gets the picture after
+        // `SETTLE_FRAMES` anyway.
+        #[cfg(target_os = "linux")]
+        if !capture::wayland() && self.covers[own].is_none() && self.frames[own] < SETTLE_FRAMES {
+            ctx.request_repaint();
+            return;
+        }
         self.paint(ui, i, rect, hover, pressed, released);
+    }
+
+    /// Whether Space has windows to offer. Wayland apps can't list other windows, so there the
+    /// crosshair has none (Window capture there goes through the desktop's own picker).
+    /// Whether the pointer is on screen `i`. On X11 a new window can be told a pointer position that
+    /// isn't its own (the other monitor's, as the window opens), and it never hears that the pointer
+    /// is elsewhere, so it drew a second crosshair and magnifier for good; the system's own answer
+    /// settles it. Where an app can't ask (Wayland), the window's events are right and this is true.
+    fn pointer_on(&self, i: usize) -> bool {
+        #[cfg(target_os = "linux")]
+        if let Some(p) = crate::capture::desktop_cursor() {
+            let s = &self.shots[i];
+            return point_on_screen((s.x, s.y, s.img.w, s.img.h), p);
+        }
+        let _ = i;
+        true
+    }
+
+    fn can_pick_window(&self) -> bool {
+        !self.windows.is_empty() || !cfg!(target_os = "linux")
     }
 
     /// Test hook (`SHOTCRAFT_PICKER` with `--screenshot`): draws the first screen into `ui` with the
@@ -254,7 +308,11 @@ impl State {
                 }
             }
         }
-        hint(painter, rect, "Drag to capture an area   ·   Space: pick a window   ·   Esc: cancel");
+        if self.can_pick_window() {
+            hint(painter, rect, "Drag to capture an area   ·   Space: pick a window   ·   Esc: cancel");
+        } else {
+            hint(painter, rect, "Drag to capture an area   ·   Esc: cancel");
+        }
     }
 
     fn finish_area(&mut self, i: usize, sel: Rect) {
@@ -274,6 +332,21 @@ impl State {
             None => Err("Can't capture that window.".into()),
         });
     }
+}
+
+/// The screen (x, y, width, height in pixels) a window covers, or none while it hasn't settled: a new
+/// window can show its first frames at a default place and size (the LG's window at the Dell's
+/// position, on X11), and matching that place alone gave the wrong screen for good. A window that
+/// covers a screen is at its corner and as big as it.
+fn screen_at_window(screens: &[(i32, i32, u32, u32)], window: (f32, f32, f32, f32)) -> Option<usize> {
+    let (x, y, w, h) = window;
+    screens.iter().position(|&(sx, sy, sw, sh)| (sx as f32 - x).abs() <= 2.0 && (sy as f32 - y).abs() <= 2.0 && (sw as f32 - w).abs() <= 4.0 && (sh as f32 - h).abs() <= 4.0)
+}
+
+/// Whether a desktop point (pixels) is on a screen (x, y, width, height).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn point_on_screen(screen: (i32, i32, u32, u32), p: (i32, i32)) -> bool {
+    p.0 >= screen.0 && p.1 >= screen.1 && i64::from(p.0) < i64::from(screen.0) + i64::from(screen.2) && i64::from(p.1) < i64::from(screen.1) + i64::from(screen.3)
 }
 
 /// Darkens everything in `all` except `keep`.
@@ -324,4 +397,46 @@ fn loupe(painter: &egui::Painter, all: Rect, tex: egui::TextureId, p: Pos2, q: (
     let centre = Rect::from_center_size(r.center(), vec2(cell, cell));
     painter.rect_stroke(centre, 0.0, Stroke::new(1.0, Color32::from_rgb(255, 59, 48)), StrokeKind::Outside);
     painter.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::from_white_alpha(220)), StrokeKind::Outside);
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    /// GNOME (mutter) won't make a window full screen once winit has pinned its size hints, which
+    /// a non-resizable window gets: the picker stayed an 800x600 window.
+    #[test]
+    fn the_picker_stays_resizable_so_that_it_can_go_full_screen() {
+        let builder = Picker::builder(0);
+        assert_ne!(builder.resizable, Some(false));
+        assert_eq!(builder.fullscreen, Some(true));
+    }
+
+    /// Wayland lists no windows, so Space has nothing to pick there; where windows are listed it works.
+    #[test]
+    fn space_picks_a_window_only_when_there_are_windows_to_pick() {
+        let win = crate::capture::WinInfo { id: 1, title: "t".into(), x: 0, y: 0, w: 10, h: 10 };
+        let with = State::new(crate::capture::Frozen { shots: vec![], windows: vec![win] }, CaptureMode::Area, crate::capture::WindowLook::Plain);
+        let without = State::new(crate::capture::Frozen { shots: vec![], windows: vec![] }, CaptureMode::Area, crate::capture::WindowLook::Plain);
+        assert!(with.can_pick_window());
+        assert_eq!(without.can_pick_window(), !cfg!(target_os = "linux"));
+    }
+
+    #[test]
+    fn a_window_counts_for_a_screen_only_when_it_sits_there_at_its_size() {
+        let screens = [(0, 0, 3840, 2160), (3840, 0, 1680, 1050)];
+        assert_eq!(screen_at_window(&screens, (0.0, 0.0, 3840.0, 2160.0)), Some(0));
+        assert_eq!(screen_at_window(&screens, (3840.0, 0.0, 1680.0, 1050.0)), Some(1));
+        assert_eq!(screen_at_window(&screens, (3840.0, 0.0, 800.0, 600.0)), None, "the first frames, at the Dell's corner but not its size");
+        assert_eq!(screen_at_window(&screens, (3841.0, 1.0, 1679.0, 1051.0)), Some(1), "a pixel of slack");
+        assert_eq!(screen_at_window(&screens, (500.0, 500.0, 3840.0, 2160.0)), None);
+    }
+
+    #[test]
+    fn only_the_screen_under_the_pointer_takes_it() {
+        let (lg, dell) = ((0, 0, 3840, 2160), (3840, 0, 1680, 1050));
+        assert!(point_on_screen(lg, (1500, 900)) && !point_on_screen(dell, (1500, 900)));
+        assert!(point_on_screen(dell, (4300, 500)) && !point_on_screen(lg, (4300, 500)));
+        assert!(point_on_screen(lg, (3839, 2159)) && !point_on_screen(lg, (3840, 0)) && !point_on_screen(dell, (3840, 1050)));
+    }
 }

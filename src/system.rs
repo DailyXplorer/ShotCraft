@@ -651,9 +651,35 @@ fn autostart_command(exe: &Path) -> String {
     format!("\"{}\" --background", exe.display())
 }
 
-/// Linux: not yet.
+/// Linux: a desktop entry in ~/.config/autostart, which every freedesktop session starts.
 #[cfg(target_os = "linux")]
-pub fn set_autostart(_on: bool) {}
+pub fn set_autostart(on: bool) {
+    let path = autostart_file();
+    if !on {
+        let _ = std::fs::remove_file(path);
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, autostart_entry(&exe));
+}
+
+#[cfg(target_os = "linux")]
+fn autostart_file() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| home().join(".config"))
+        .join("autostart/shotcraft.desktop")
+}
+
+#[cfg(target_os = "linux")]
+fn autostart_entry(exe: &Path) -> String {
+    let program = crate::links::exec_program(exe);
+    format!("[Desktop Entry]\nType=Application\nName=ShotCraft\nComment=Screenshots: capture, annotate, blur, measure, read text and pin\nExec={program} --background\nTerminal=false\nX-GNOME-Autostart-enabled=true\n")
+}
 
 
 /// Windows 11: whether the user put the tray icon of the program at `exe` on the taskbar
@@ -689,7 +715,9 @@ pub struct OcrResult {
     pub codes: Vec<String>,
 }
 
-/// Text and codes in an image, with the text read in the default languages.
+/// Text and codes in an image, with the text read in the default languages. (Linux has no
+/// start-up warm-up, so only the tests call it there.)
+#[cfg_attr(all(target_os = "linux", not(test)), allow(dead_code))]
 pub fn recognize(img: &Image) -> Result<OcrResult, String> {
     recognize_in(img, "")
 }
@@ -777,6 +805,22 @@ pub fn text_boxes(img: &Image) -> Vec<R> {
 #[cfg(not(target_os = "macos"))]
 pub fn recognize_in(img: &Image, _language: &str) -> Result<OcrResult, String> {
     crate::ocr::recognize(img)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_tests {
+    #[test]
+    fn autostart_entry_quotes_the_path() {
+        let entry = super::autostart_entry(std::path::Path::new("/opt/Shot \"Craft\"/$bin"));
+        assert!(
+            entry.contains("Exec=\"/opt/Shot \\\"Craft\\\"/\\$bin\" --background\n"),
+            "{entry}"
+        );
+        assert!(entry.starts_with("[Desktop Entry]\n"));
+        // The same quoting as the link entry's, a % doubled included.
+        let entry = super::autostart_entry(std::path::Path::new("/home/u/100%/Shot%uCraft"));
+        assert!(entry.contains("Exec=env \"/home/u/100%%/Shot%%uCraft\" --background\n"), "{entry}");
+    }
 }
 
 #[cfg(all(test, target_os = "windows"))]
@@ -995,15 +1039,80 @@ fn print_on(hdc: windows::Win32::Graphics::Gdi::HDC, devmode: windows::Win32::Fo
     Ok(())
 }
 
-/// Linux has no printing here yet (it needs CUPS or a GTK print dialog).
+/// Linux: the desktop's print dialog (the print portal, GNOME's or KDE's), then the picture on
+/// one page, laid out as on macOS and Windows (`print_pdf`), handed to the portal as a PDF. It
+/// waits for the dialog: call it off the UI thread, or the editor stops drawing. Cancel is no
+/// error.
+///
+/// The portal is called over D-Bus directly: ashpd's typed answer refused GNOME's (`pdf` where it
+/// wants `PDF`, and no orientation for some printers), so only what's needed is read
+/// (`print_pdf::prepared_page`).
 #[cfg(target_os = "linux")]
-pub fn print_image(_img: &Image, _scale: f32, _title: &str) -> Result<(), String> {
-    Err("Printing is only available on Windows and macOS for now".into())
+pub fn print_image(img: &Image, scale: f32, title: &str) -> Result<(), String> {
+    use crate::portal;
+    use crate::print_pdf::{image_pdf, prepared_page};
+    const PRINT: &str = "org.freedesktop.portal.Print";
+    let orientation = if crate::menu_model::print_landscape((img.w, img.h)) { "landscape" } else { "portrait" };
+    async_io::block_on(async {
+        let conn = ashpd::zbus::Connection::session().await.map_err(|e| format!("no desktop session bus ({e})"))?;
+        let settings = std::collections::HashMap::from([("orientation", portal::value(orientation))]);
+        let setup = std::collections::HashMap::from([("Orientation", portal::value(orientation))]);
+        let options = |token: &str, extra: Option<(&'static str, ashpd::zbus::zvariant::Value<'static>)>| {
+            let mut o = std::collections::HashMap::from([("handle_token", portal::value(token.to_string())), ("modal", portal::value(true))]);
+            o.extend(extra);
+            o
+        };
+        let token = portal::token("prep");
+        let answer = portal::request(&conn, PRINT, &token, "PreparePrint", &("", title, settings, setup, options(&token, Some(("accept_label", portal::value("Print")))))).await?;
+        let Some(results) = answer else { return Ok(()) };
+        let (job, page) = prepared_page(&results).ok_or("the print dialog's answer has no job token")?;
+        let pdf = image_pdf(img, scale, page)?;
+        // The portal takes the job as an open file; the name goes as soon as the file is open.
+        let path = std::env::temp_dir().join(format!("shotcraft-print-{}.pdf", portal::token("job")));
+        write_new_private(&path, &pdf).map_err(|e| format!("can't write the page to print: {e}"))?;
+        let file = std::fs::File::open(&path);
+        let _ = std::fs::remove_file(&path);
+        let file = file.map_err(|e| format!("can't read the page to print: {e}"))?;
+        let token = portal::token("print");
+        let fd = ashpd::zbus::zvariant::Fd::from(std::os::fd::AsFd::as_fd(&file));
+        portal::request(&conn, PRINT, &token, "Print", &("", title, fd, options(&token, Some(("token", portal::value(job)))))).await?;
+        Ok(())
+    })
+}
+
+/// Writes `bytes` to a file that must not exist yet, readable by this user alone. `create_new`
+/// fails on a name that exists, a symlink included, instead of following it to write somewhere else.
+#[cfg(target_os = "linux")]
+fn write_new_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?.write_all(bytes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_print_file_is_new_private_and_never_follows_a_symlink() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let dir = temp_png("print-file").with_extension("d");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.pdf");
+        write_new_private(&file, b"one").unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"one");
+        assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+        assert!(write_new_private(&file, b"two").is_err(), "a name that exists is refused");
+        assert_eq!(std::fs::read(&file).unwrap(), b"one");
+        // A link planted at the name leads to a file that must stay as it is.
+        let victim = dir.join("victim.txt");
+        std::fs::write(&victim, b"keep").unwrap();
+        let link = dir.join("b.pdf");
+        symlink(&victim, &link).unwrap();
+        assert!(write_new_private(&link, b"overwritten").is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep");
+    }
 
     #[test]
     fn the_date_command_output_is_read_back() {

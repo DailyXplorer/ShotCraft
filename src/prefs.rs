@@ -81,7 +81,7 @@ enum Recorded {
 fn recorded(events: &[egui::Event], modifiers: egui::Modifiers) -> Option<Recorded> {
     for e in events {
         let (key, modifiers) = match e {
-            egui::Event::Key { key, pressed: true, modifiers, .. } => (*key, *modifiers),
+            egui::Event::Key { key, physical_key, pressed: true, modifiers, .. } => (recorded_key(*key, *physical_key), *modifiers),
             egui::Event::Copy => (Key::C, modifiers),
             egui::Event::Cut => (Key::X, modifiers),
             egui::Event::Paste(_) => (Key::V, modifiers),
@@ -118,6 +118,133 @@ fn recorded(events: &[egui::Event], modifiers: egui::Modifiers) -> Option<Record
         }
     }
     None
+}
+
+/// The key a shortcut is recorded with: what the key types when that has a hotkey name, and the
+/// key's place on the keyboard only when it has none. Windows and Linux register a hotkey by what
+/// the key types in the current layout, so on an AZERTY keyboard the A key must record `KeyA`,
+/// not the `KeyQ` of its place. With Shift held egui names some keys by their symbol: the 1 key
+/// arrives as `!` (`Exclamationmark`), which has no hotkey name, so Ctrl+Shift+1 is recorded by
+/// its place (`Digit1`).
+///
+/// Windows: when egui names a key only by its place, the place is read through the current layout
+/// (`windows_layout::layout_key`). That is what Ctrl+Alt does on AZERTY: Windows takes Ctrl+Alt
+/// for AltGr, the A key types nothing with AltGr, and it arrived as the `KeyQ` of its place.
+fn recorded_key(key: Key, physical: Option<Key>) -> Key {
+    #[cfg(target_os = "windows")]
+    let layout = windows_layout::layout_key;
+    #[cfg(not(target_os = "windows"))]
+    let layout = |_: Key| None;
+    recorded_key_in(key, physical, layout)
+}
+
+/// `recorded_key`, with `layout` saying which key the current layout puts at a place.
+fn recorded_key_in(key: Key, physical: Option<Key>, layout: impl Fn(Key) -> Option<Key>) -> Key {
+    // What the key types, when egui has it and it is not just the place again.
+    if key_code(key).is_some() && physical != Some(key) {
+        return key;
+    }
+    let Some(place) = physical else { return key };
+    if let Some(k) = layout(place) {
+        return k;
+    }
+    if key_code(key).is_some() {
+        key
+    } else {
+        place
+    }
+}
+
+/// Windows: which key the current keyboard layout puts at a place on the keyboard.
+#[cfg(target_os = "windows")]
+mod windows_layout {
+    use super::Key;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyboardLayout, MapVirtualKeyExW, MAPVK_VSC_TO_VK};
+
+    /// The key at `place` (named as on a US keyboard, as egui and winit name places) in the current
+    /// layout, as the hotkeys name it: `global-hotkey` registers a key by its virtual-key code, so
+    /// this is the key the hotkey fires on. None for a key that is not a letter, a digit or one of
+    /// the named symbols.
+    pub fn layout_key(place: Key) -> Option<Key> {
+        let scan = scan_code(place)?;
+        // SAFETY: two lookups by value, the layout of this thread and a key in it; no memory is involved.
+        let vk = unsafe { MapVirtualKeyExW(scan, MAPVK_VSC_TO_VK, Some(GetKeyboardLayout(0))) };
+        key_for_vk(vk)
+    }
+
+    /// The scan code of a place on the keyboard.
+    pub fn scan_code(place: Key) -> Option<u32> {
+        Some(match place {
+            Key::Num1 => 0x02,
+            Key::Num2 => 0x03,
+            Key::Num3 => 0x04,
+            Key::Num4 => 0x05,
+            Key::Num5 => 0x06,
+            Key::Num6 => 0x07,
+            Key::Num7 => 0x08,
+            Key::Num8 => 0x09,
+            Key::Num9 => 0x0A,
+            Key::Num0 => 0x0B,
+            Key::Minus => 0x0C,
+            Key::Equals => 0x0D,
+            Key::Q => 0x10,
+            Key::W => 0x11,
+            Key::E => 0x12,
+            Key::R => 0x13,
+            Key::T => 0x14,
+            Key::Y => 0x15,
+            Key::U => 0x16,
+            Key::I => 0x17,
+            Key::O => 0x18,
+            Key::P => 0x19,
+            Key::OpenBracket => 0x1A,
+            Key::CloseBracket => 0x1B,
+            Key::A => 0x1E,
+            Key::S => 0x1F,
+            Key::D => 0x20,
+            Key::F => 0x21,
+            Key::G => 0x22,
+            Key::H => 0x23,
+            Key::J => 0x24,
+            Key::K => 0x25,
+            Key::L => 0x26,
+            Key::Semicolon => 0x27,
+            Key::Quote => 0x28,
+            Key::Backtick => 0x29,
+            Key::Backslash => 0x2B,
+            Key::Z => 0x2C,
+            Key::X => 0x2D,
+            Key::C => 0x2E,
+            Key::V => 0x2F,
+            Key::B => 0x30,
+            Key::N => 0x31,
+            Key::M => 0x32,
+            Key::Comma => 0x33,
+            Key::Period => 0x34,
+            Key::Slash => 0x35,
+            _ => return None,
+        })
+    }
+
+    /// The key a virtual-key code stands for, the other way round from `global-hotkey`'s table, for
+    /// the keys that have a hotkey name.
+    pub fn key_for_vk(vk: u32) -> Option<Key> {
+        const DIGITS: [Key; 10] = [Key::Num0, Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
+        const LETTERS: [Key; 26] = [
+            Key::A, Key::B, Key::C, Key::D, Key::E, Key::F, Key::G, Key::H, Key::I, Key::J, Key::K, Key::L, Key::M,
+            Key::N, Key::O, Key::P, Key::Q, Key::R, Key::S, Key::T, Key::U, Key::V, Key::W, Key::X, Key::Y, Key::Z,
+        ];
+        match vk {
+            0x30..=0x39 => DIGITS.get((vk - 0x30) as usize).copied(),
+            0x41..=0x5A => LETTERS.get((vk - 0x41) as usize).copied(),
+            0xBB => Some(Key::Equals),
+            0xBC => Some(Key::Comma),
+            0xBD => Some(Key::Minus),
+            0xBE => Some(Key::Period),
+            0xBF => Some(Key::Slash),
+            _ => None,
+        }
+    }
 }
 
 fn key_code(k: Key) -> Option<String> {
@@ -426,7 +553,7 @@ impl PrefsState {
         });
         // Windows and Linux draw the pointer into every capture but the Wayland desktop's own (its portal decides).
         #[cfg(not(target_os = "macos"))]
-        let pointer_tip = "Every capture, where the pointer was when it began.";
+        let pointer_tip = if cfg!(target_os = "linux") { "Every capture, where the pointer was when it began. Not on Wayland, where the desktop takes the screenshot." } else { "Every capture, where the pointer was when it began." };
         #[cfg(not(target_os = "macos"))]
         tip_row(ui, "Mouse pointer", pointer_tip, |ui| {
             ui.checkbox(&mut s.capture_cursor, "Include it in screenshots");
@@ -674,6 +801,61 @@ mod tests {
         assert_eq!(recorded(&[key(Key::A, egui::Modifiers::NONE)], egui::Modifiers::NONE), None, "a bare letter is no hotkey");
         assert_eq!(recorded(&[key(Key::Escape, egui::Modifiers::NONE)], egui::Modifiers::NONE), Some(Recorded::Cancel));
         assert_eq!(recorded(&[key(Key::Backspace, egui::Modifiers::NONE)], egui::Modifiers::NONE), Some(Recorded::Clear));
+    }
+
+    /// Ctrl+Shift+1 as egui-winit sends it: the key named by its symbol, the place on the keyboard
+    /// as the physical key. It wasn't recorded before (seen on GNOME 50).
+    #[test]
+    fn a_shifted_digit_is_recorded_by_its_place_on_the_keyboard() {
+        let m = egui::Modifiers { ctrl: true, shift: true, ..egui::Modifiers::NONE };
+        let shifted_1 = egui::Event::Key { key: Key::Exclamationmark, physical_key: Some(Key::Num1), pressed: true, repeat: false, modifiers: m };
+        assert_eq!(recorded(&[shifted_1], m), Some(Recorded::Set("ctrl+shift+Digit1".into())));
+        let no_physical = egui::Event::Key { key: Key::Num9, physical_key: None, pressed: true, repeat: false, modifiers: m };
+        assert_eq!(recorded(&[no_physical], m), Some(Recorded::Set("ctrl+shift+Digit9".into())), "the logical key when there's no physical one");
+    }
+
+    /// Ctrl+Alt+A on an AZERTY keyboard: the A key sits where Q is on a US keyboard. The hotkeys
+    /// are registered by what the key types, so the letter is recorded, not its place.
+    #[test]
+    fn a_letter_is_recorded_by_what_it_types_not_by_its_place() {
+        let m = egui::Modifiers { ctrl: true, alt: true, ..egui::Modifiers::NONE };
+        let azerty_a = egui::Event::Key { key: Key::A, physical_key: Some(Key::Q), pressed: true, repeat: false, modifiers: m };
+        assert_eq!(recorded(&[azerty_a], m), Some(Recorded::Set("ctrl+alt+KeyA".into())));
+        let qwertz_z = egui::Event::Key { key: Key::Z, physical_key: Some(Key::Y), pressed: true, repeat: false, modifiers: m };
+        assert_eq!(recorded(&[qwertz_z], m), Some(Recorded::Set("ctrl+alt+KeyZ".into())));
+        let azerty_comma = egui::Event::Key { key: Key::Comma, physical_key: Some(Key::M), pressed: true, repeat: false, modifiers: m };
+        assert_eq!(recorded(&[azerty_comma], m), Some(Recorded::Set("ctrl+alt+Comma".into())), "a named symbol too");
+    }
+
+    /// Ctrl+Alt on AZERTY under Windows: Ctrl+Alt is AltGr there, the A key types nothing with it,
+    /// and egui-winit names the key by its place, Q. The layout says the key at that place is A.
+    #[test]
+    fn a_key_named_only_by_its_place_is_read_through_the_layout() {
+        let azerty = |place: Key| match place {
+            Key::Q => Some(Key::A),
+            Key::A => Some(Key::Q),
+            Key::Semicolon => Some(Key::M),
+            Key::Num1 => Some(Key::Num1),
+            _ => None,
+        };
+        assert_eq!(recorded_key_in(Key::Q, Some(Key::Q), azerty), Key::A, "the A key with AltGr");
+        assert_eq!(recorded_key_in(Key::Semicolon, Some(Key::Semicolon), azerty), Key::M, "the M key, whose place has no hotkey name");
+        assert_eq!(recorded_key_in(Key::Exclamationmark, Some(Key::Num1), azerty), Key::Num1);
+        assert_eq!(recorded_key_in(Key::A, Some(Key::Q), azerty), Key::A, "what the key types comes first");
+        let none = |_: Key| None;
+        assert_eq!(recorded_key_in(Key::Q, Some(Key::Q), none), Key::Q, "without a layout, the place as before");
+        assert_eq!(recorded_key_in(Key::Exclamationmark, Some(Key::Num1), none), Key::Num1);
+        assert_eq!(recorded_key_in(Key::Num9, None, azerty), Key::Num9, "no place, nothing to look up");
+    }
+
+    /// The places and the virtual-key codes, as `global-hotkey` names them on Windows.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn places_and_virtual_keys_are_named_as_the_hotkeys_name_them() {
+        use super::windows_layout::{key_for_vk, scan_code};
+        assert_eq!((scan_code(Key::Q), scan_code(Key::A), scan_code(Key::Semicolon), scan_code(Key::Num1), scan_code(Key::F9)), (Some(0x10), Some(0x1E), Some(0x27), Some(0x02), None));
+        assert_eq!((key_for_vk(0x41), key_for_vk(0x5A), key_for_vk(0x30), key_for_vk(0x39)), (Some(Key::A), Some(Key::Z), Some(Key::Num0), Some(Key::Num9)));
+        assert_eq!((key_for_vk(0xBC), key_for_vk(0xBF), key_for_vk(0x70)), (Some(Key::Comma), Some(Key::Slash), None), "a named symbol, and F1, which has none here");
     }
 
     /// egui-winit sends Cmd+C / Cmd+X / Cmd+V as copy, cut and paste events and no key event.
