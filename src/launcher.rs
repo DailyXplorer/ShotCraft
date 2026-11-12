@@ -23,9 +23,9 @@ fn data_dir() -> PathBuf {
 /// The visible launcher entry: it starts the app and carries the icon. `StartupWMClass` ties X11
 /// windows to it as the app id does on Wayland.
 pub fn desktop_entry(exe: &Path) -> String {
-    let quoted = crate::links::exec_quoted(exe);
+    let program = crate::links::exec_program(exe);
     format!(
-        "[Desktop Entry]\nType=Application\nName=ShotCraft\nComment=Screenshots: capture, annotate, blur, measure, read text and pin\nExec=\"{quoted}\"\nIcon={APP_ID}\nCategories=Graphics;\nStartupWMClass={APP_ID}\nTerminal=false\n"
+        "[Desktop Entry]\nType=Application\nName=ShotCraft\nComment=Screenshots: capture, annotate, blur, measure, read text and pin\nExec={program}\nIcon={APP_ID}\nCategories=Graphics;\nStartupWMClass={APP_ID}\nTerminal=false\n"
     )
 }
 

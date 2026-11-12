@@ -131,8 +131,8 @@ fn desktop_dir() -> std::path::PathBuf {
 /// A desktop entry that handles `shotcraft://` and shows in no menu (`%u`: the link).
 #[cfg(target_os = "linux")]
 fn desktop_entry(exe: &std::path::Path) -> String {
-    let quoted = exec_quoted(exe);
-    format!("[Desktop Entry]\nType=Application\nName=ShotCraft\nComment=Opens shotcraft:// links\nExec=\"{quoted}\" %u\nMimeType=x-scheme-handler/shotcraft;\nNoDisplay=true\nTerminal=false\n")
+    let program = exec_program(exe);
+    format!("[Desktop Entry]\nType=Application\nName=ShotCraft\nComment=Opens shotcraft:// links\nExec={program} %u\nMimeType=x-scheme-handler/shotcraft;\nNoDisplay=true\nTerminal=false\n")
 }
 
 /// A path as a desktop entry's Exec line wants it (freedesktop Desktop Entry spec): backslash,
@@ -149,6 +149,21 @@ pub fn exec_quoted(exe: &std::path::Path) -> String {
             _ => vec![c],
         })
         .collect()
+}
+
+/// The program part of an Exec line: the quoted path, or, when the path has a % in it, `env` and the
+/// quoted path. GLib (GNOME's launcher library) checks that the Exec's program exists using the
+/// text as written, %% and all, and a path like `/home/u/Test 100%%/shotcraft` doesn't exist, so it
+/// refuses to load the whole entry (the link handler, the launcher, the login item). `env` does
+/// exist, and the %% becomes % when the entry is launched, as the spec says.
+#[cfg(target_os = "linux")]
+pub fn exec_program(exe: &std::path::Path) -> String {
+    let quoted = exec_quoted(exe);
+    if exe.to_string_lossy().contains('%') {
+        format!("env \"{quoted}\"")
+    } else {
+        format!("\"{quoted}\"")
+    }
 }
 
 #[cfg(test)]
@@ -232,7 +247,10 @@ mod tests {
     fn a_percent_in_the_path_is_doubled_in_both_entries() {
         let path = std::path::Path::new("/home/u/100%/Shot%uCraft");
         assert_eq!(exec_quoted(path), "/home/u/100%%/Shot%%uCraft");
-        assert!(desktop_entry(path).contains("Exec=\"/home/u/100%%/Shot%%uCraft\" %u\n"));
+        assert!(desktop_entry(path).contains("Exec=env \"/home/u/100%%/Shot%%uCraft\" %u\n"), "{}", desktop_entry(path));
+        // Without a % the program is the path itself, as before.
+        assert_eq!(exec_program(std::path::Path::new("/opt/shotcraft")), "\"/opt/shotcraft\"");
+        assert!(exec_program(path).starts_with("env "), "GLib needs a program that exists to load the entry");
     }
 
     #[cfg(target_os = "linux")]

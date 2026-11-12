@@ -677,8 +677,8 @@ fn autostart_file() -> PathBuf {
 
 #[cfg(target_os = "linux")]
 fn autostart_entry(exe: &Path) -> String {
-    let quoted = crate::links::exec_quoted(exe);
-    format!("[Desktop Entry]\nType=Application\nName=ShotCraft\nComment=Screenshots: capture, annotate, blur, measure, read text and pin\nExec=\"{quoted}\" --background\nTerminal=false\nX-GNOME-Autostart-enabled=true\n")
+    let program = crate::links::exec_program(exe);
+    format!("[Desktop Entry]\nType=Application\nName=ShotCraft\nComment=Screenshots: capture, annotate, blur, measure, read text and pin\nExec={program} --background\nTerminal=false\nX-GNOME-Autostart-enabled=true\n")
 }
 
 
@@ -819,7 +819,7 @@ mod linux_tests {
         assert!(entry.starts_with("[Desktop Entry]\n"));
         // The same quoting as the link entry's, a % doubled included.
         let entry = super::autostart_entry(std::path::Path::new("/home/u/100%/Shot%uCraft"));
-        assert!(entry.contains("Exec=\"/home/u/100%%/Shot%%uCraft\" --background\n"), "{entry}");
+        assert!(entry.contains("Exec=env \"/home/u/100%%/Shot%%uCraft\" --background\n"), "{entry}");
     }
 }
 
