@@ -201,7 +201,7 @@ ShotCraft also runs on Windows 10 and 11 and on Linux (X11; Wayland with limits,
 
 The script runs `cargo build --release`, assembles the app bundle and signs it ad hoc (no developer certificate).
 
-The app icon, window icon and menu bar icon are drawn in `assets/logo/*.svg`. After changing them, run `node scripts/make-icons.mjs` on a Mac (it needs Playwright and `iconutil`) to rewrite `assets/AppIcon.icns`, `assets/window-icon.png` and `assets/menubar.png`.
+The app icon, window icon and menu bar icon are drawn in `assets/logo/*.svg`. After changing them, run `node scripts/make-icons.mjs` on a Mac (it needs Playwright and `iconutil`) to rewrite `assets/AppIcon.icns`, `assets/window-icon.png`, `assets/menubar.png` and `assets/shotcraft.ico` (the Windows exe icon). On Windows or Linux it writes all of them except `assets/AppIcon.icns`, and prints the `iconutil` command to finish that one on a Mac.
 
 ## Permissions
 
