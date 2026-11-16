@@ -14,7 +14,9 @@ use std::collections::HashMap;
 use tiny_skia::Pixmap;
 
 pub use crate::sizing::{OPTIONS_H, STATUS_H, TOOLBAR_H};
-use crate::sizing::{seg_group_w, toolbar_cluster_left, toolbar_fit, TOOLBAR_DRAG_W, TOOLBAR_EDGE, TOOLBAR_GROUP_GAP as GROUP_GAP, TOOLBAR_SEG_W as SEG_W};
+use crate::sizing::{seg_group_w, toolbar_cluster_left, toolbar_fit, Chrome, StatusCells, CHROME, STATUS_CELL_H, TOOLBAR_DRAG_W, TOOLBAR_EDGE, TOOLBAR_GROUP_GAP as GROUP_GAP, TOOLBAR_SEG_W as SEG_W};
+/// The unified bar draws its buttons without frames and holds the colour, size and zoom cells.
+const UNIFIED: bool = matches!(CHROME, Chrome::Unified);
 /// Narrowest width the editor window can have.
 pub const MIN_W: f32 = crate::sizing::EDITOR_MIN_SIZE.0;
 pub const MIN_H: f32 = crate::sizing::EDITOR_MIN_SIZE.1;
@@ -148,6 +150,9 @@ pub struct Editor {
     custom_color: Color32,
     canvas: Rect,
     options_w: f32,
+    /// macOS: where the options bar stands with the window that makes room for it.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    options_room: OptionsRoom,
     ruler_sensitivity: f32,
     wheel_acc: f32,
     checker: Option<(bool, egui::TextureHandle)>,
@@ -196,6 +201,7 @@ impl Default for Editor {
             custom_color: Color32::RED,
             canvas: Rect::NOTHING,
             options_w: 0.0,
+            options_room: OptionsRoom::Closed,
             ruler_sensitivity: RULER_SENSITIVITY,
             wheel_acc: 0.0,
             checker: None,
@@ -254,10 +260,110 @@ const FILLS: [Fill; 4] = [Fill::HandDrawn, Fill::Transparent, Fill::Translucent,
 const SHAPES: [Shape; 2] = [Shape::Rect, Shape::Oval];
 const FONTS: [FontKind; 2] = [FontKind::Sans, FontKind::Goofy];
 
+/// The options bar and the window that makes room for it. A window asked to resize has its new
+/// size on a later pass, so the bar comes only once the window has grown and goes only once the
+/// window has shrunk: the canvas keeps its size on every pass in between.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+enum OptionsRoom {
+    /// No bar; the window is as tall as it opened.
+    Closed,
+    /// The window was asked for `grown` more points when it was `from` tall. The bar waits.
+    Opening { grown: f32, from: f32, passes: u8 },
+    /// The bar is there. The window grew by `grown` points for it: none when it had no room to.
+    Open { grown: f32 },
+    /// The window was asked to give its points back when it was `from` tall. The bar stays.
+    Closing { from: f32, passes: u8 },
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+impl OptionsRoom {
+    /// A window that has not reported its new height after this many passes will not: the bar
+    /// stops waiting for it.
+    const PATIENCE: u8 = 8;
+
+    /// One pass of the editor. `wanted`: there are options to show. `height`: the window's height
+    /// on this pass. `resize` asks the window for more points (fewer when negative) and returns
+    /// what it gave. Returns whether the bar is drawn on this pass.
+    fn step(&mut self, wanted: bool, height: f32, resize: impl FnOnce(f32) -> f32) -> bool {
+        *self = match *self {
+            OptionsRoom::Closed if wanted => match resize(OPTIONS_H) {
+                grown if grown > 0.0 => OptionsRoom::Opening { grown, from: height, passes: 0 },
+                _ => OptionsRoom::Open { grown: 0.0 },
+            },
+            OptionsRoom::Opening { grown, from, passes } if height != from || passes >= Self::PATIENCE => OptionsRoom::Open { grown },
+            OptionsRoom::Opening { grown, from, passes } => OptionsRoom::Opening { grown, from, passes: passes + 1 },
+            OptionsRoom::Open { grown } if !wanted && grown > 0.0 => {
+                resize(-grown);
+                OptionsRoom::Closing { from: height, passes: 0 }
+            }
+            OptionsRoom::Open { .. } if !wanted => OptionsRoom::Closed,
+            OptionsRoom::Closing { from, passes } if height != from || passes >= Self::PATIENCE => OptionsRoom::Closed,
+            OptionsRoom::Closing { from, passes } => OptionsRoom::Closing { from, passes: passes + 1 },
+            same => same,
+        };
+        matches!(self, OptionsRoom::Open { .. } | OptionsRoom::Closing { .. })
+    }
+
+    /// Whether another pass is needed soon: the window has not reported its new height yet.
+    fn waits(self) -> bool {
+        matches!(self, OptionsRoom::Opening { .. } | OptionsRoom::Closing { .. })
+    }
+}
+
+#[cfg(test)]
+mod options_room_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn the_bar_comes_once_the_window_has_grown_and_goes_once_it_has_shrunk() {
+        let asked = Cell::new(0.0f32);
+        let grant = |dy: f32| {
+            asked.set(asked.get() + dy);
+            dy
+        };
+        let mut room = OptionsRoom::Closed;
+        assert!(!room.step(false, 600.0, grant), "nothing to show");
+        assert!(!room.step(true, 600.0, grant), "the window is asked to grow first");
+        assert_eq!(asked.get(), OPTIONS_H);
+        assert!(room.waits());
+        assert!(!room.step(true, 600.0, grant), "still as tall as before: the bar waits");
+        assert!(room.step(true, 600.0 + OPTIONS_H, grant), "grown: the bar is there");
+        assert!(!room.waits());
+        assert_eq!(asked.get(), OPTIONS_H, "asked once");
+        assert!(room.step(false, 600.0 + OPTIONS_H, grant), "the bar stays while the window shrinks");
+        assert_eq!(asked.get(), 0.0, "the points are given back");
+        assert!(!room.step(false, 600.0, grant), "shrunk: the bar is gone");
+        assert_eq!(room, OptionsRoom::Closed);
+    }
+
+    #[test]
+    fn a_window_with_no_room_to_grow_shows_the_bar_at_once() {
+        let mut room = OptionsRoom::Closed;
+        assert!(room.step(true, 949.0, |_| 0.0));
+        assert_eq!(room, OptionsRoom::Open { grown: 0.0 });
+        assert!(!room.step(false, 949.0, |_| panic!("nothing to give back")));
+    }
+
+    #[test]
+    fn a_window_that_never_reports_its_new_height_does_not_hold_the_bar_back_for_long() {
+        let mut room = OptionsRoom::Closed;
+        let mut passes = 0;
+        while !room.step(true, 600.0, |dy| dy) {
+            passes += 1;
+            assert!(passes < 20);
+        }
+        assert_eq!(room, OptionsRoom::Open { grown: OPTIONS_H });
+    }
+}
+
 impl Editor {
     pub fn reset_for_new_doc(&mut self, prefer_100: bool) {
         self.fit = true;
         self.prefer_100 = prefer_100;
+        // The window is sized anew for the picture, without the options bar.
+        self.options_room = OptionsRoom::Closed;
         self.selected = None;
         self.editing_text = false;
         self.drag = Drag::None;
@@ -366,17 +472,54 @@ fn icon_btn(ui: &mut Ui, icon: Icon, selected: bool, tip: &str, t: &Th, w: f32) 
 /// file. True on the frame the drag begins.
 fn drag_handle(ui: &mut Ui, t: &Th, enabled: bool) -> bool {
     let (rect, resp) = ui.allocate_exact_size(vec2(TOOLBAR_DRAG_W, 28.0), if enabled { Sense::click_and_drag() } else { Sense::hover() });
-    ui.painter().rect_filled(rect, 7.0, t.seg);
-    ui.painter().rect_stroke(rect, 7.0, Stroke::new(0.5, t.line), StrokeKind::Inside);
-    if enabled && resp.hovered() {
-        ui.painter().rect_filled(rect.shrink(2.0), 5.0, t.hover);
+    if !UNIFIED {
+        ui.painter().rect_filled(rect, 7.0, t.seg);
+        ui.painter().rect_stroke(rect, 7.0, Stroke::new(0.5, t.line), StrokeKind::Inside);
     }
-    let ink = if enabled { t.text } else { t.dim };
+    let (tile, ink) = button_colours(t, false, enabled && resp.hovered());
+    ui.painter().rect_filled(rect.shrink(2.0), 5.0, tile);
+    let ink = if enabled { ink } else { t.dim.gamma_multiply(if UNIFIED { 0.6 } else { 1.0 }) };
     icons::draw(ui.painter(), Rect::from_center_size(rect.center(), vec2(18.0, 18.0)), Icon::DragFile, ink);
     let tip = if enabled { "Drag the picture into another app or a folder" } else { "Nothing to drag yet" };
     let resp = resp.on_hover_text(tip);
     let resp = if enabled { resp.on_hover_cursor(egui::CursorIcon::Grab) } else { resp };
     enabled && resp.drag_started()
+}
+
+/// The tile behind a toolbar button and the colour of its icon. Framed groups mark the selected
+/// tool in the accent colour. The unified bar has no frames: its icons are grey on the bar, and the
+/// selected one is dark on a grey tile, as in the reference app.
+fn button_colours(t: &Th, selected: bool, hovered: bool) -> (Color32, Color32) {
+    match (UNIFIED, selected, hovered) {
+        (false, true, _) => (t.accent, Color32::WHITE),
+        (true, true, _) => (t.hover, t.text),
+        (false, false, true) => (t.hover, t.text),
+        (true, false, true) => (t.hover.gamma_multiply(0.6), t.text),
+        (false, false, false) => (Color32::TRANSPARENT, t.text),
+        (true, false, false) => (Color32::TRANSPARENT, t.dim),
+    }
+}
+
+/// A group of toolbar buttons: a framed segmented control, or bare buttons in the unified bar.
+/// Returns the clicked index.
+fn tool_group(ui: &mut Ui, items: &[(Icon, &str, bool)], t: &Th, seg_w: f32) -> Option<usize> {
+    if !UNIFIED {
+        return segments(ui, items, t, seg_w);
+    }
+    let (rect, _) = ui.allocate_exact_size(vec2(seg_w * items.len() as f32 + 4.0, 28.0), Sense::hover());
+    let mut clicked = None;
+    for (i, (icon, tip, sel)) in items.iter().enumerate() {
+        let r = Rect::from_min_size(pos2(rect.left() + 2.0 + i as f32 * seg_w, rect.top()), vec2(seg_w, 28.0));
+        let resp = ui.interact(r, ui.id().with(("seg", tip, i)), Sense::click());
+        let (tile, ink) = button_colours(t, *sel, resp.hovered());
+        ui.painter().rect_filled(r.shrink2(vec2(1.0, 0.0)), 6.0, tile);
+        icons::draw(ui.painter(), Rect::from_center_size(r.center(), vec2(18.0, 18.0)), *icon, ink);
+        let resp = if tip.is_empty() { resp } else { resp.on_hover_text(*tip) };
+        if resp.clicked() {
+            clicked = Some(i);
+        }
+    }
+    clicked
 }
 
 /// A row of icon segments framed like a macOS segmented control; returns the clicked index.
@@ -1073,20 +1216,37 @@ impl App {
                 bottom: 0,
             }))
             .show(ui, |ui| self.menu_bar(ui, &t));
+        // The unified bar is the window's title bar: white in the light appearance, as the
+        // reference app's is.
+        let toolbar_fill = if UNIFIED && !dark { Color32::WHITE } else { t.bar };
         egui::Panel::top("toolbar")
             .exact_size(TOOLBAR_H)
-            .frame(egui::Frame::new().fill(t.bar))
+            .frame(egui::Frame::new().fill(toolbar_fill))
             .show(ui, |ui| self.toolbar(ui, &t));
-        if self.doc.is_some() && (self.selected_image().is_some() || !matches!(self.context_tool(), Tool::Select | Tool::Cut | Tool::Ocr)) {
+        let options = self.doc.is_some() && (self.selected_image().is_some() || !matches!(self.context_tool(), Tool::Select | Tool::Cut | Tool::Ocr));
+        // macOS: the window opens as tall as the picture and its bar, so the options bar has no
+        // room of its own. The window grows by the bar when it comes and gives the points back
+        // when it goes: the picture under it neither moves nor changes zoom.
+        #[cfg(target_os = "macos")]
+        let options = {
+            let drawn = self.ed.options_room.step(options, ui.max_rect().height(), crate::system::grow_main_window);
+            if self.ed.options_room.waits() {
+                ui.ctx().request_repaint();
+            }
+            drawn
+        };
+        if options {
             egui::Panel::top("options")
                 .exact_size(OPTIONS_H)
                 .frame(egui::Frame::new().fill(t.bar2).inner_margin(egui::Margin::symmetric(10, 0)))
                 .show(ui, |ui| self.options_bar(ui, &t));
         }
-        egui::Panel::bottom("status")
-            .exact_size(STATUS_H)
-            .frame(egui::Frame::new().fill(t.bar))
-            .show(ui, |ui| self.status_bar(ui, &t));
+        if !UNIFIED {
+            egui::Panel::bottom("status")
+                .exact_size(STATUS_H)
+                .frame(egui::Frame::new().fill(t.bar))
+                .show(ui, |ui| self.status_bar(ui, &t));
+        }
         egui::CentralPanel::default().frame(egui::Frame::new().fill(t.canvas)).show(ui, |ui| self.canvas_ui(ui, &t));
         self.popovers(ui.ctx(), &t);
         self.overlays(ui.ctx(), &t);
@@ -1186,7 +1346,7 @@ impl App {
                 ui.spacing_mut().item_spacing.x = GROUP_GAP;
                 // The groups are centred in the window (the Preferences button is pinned right).
                 ui.add_space(toolbar_cluster_left(rect.width(), fit));
-                if let Some(i) = segments(
+                if let Some(i) = tool_group(
                     ui,
                     &[(Icon::Copy, "Copy (Esc or ⌘C)", false), (Icon::Save, "Save (⌘S)", false), (Icon::Pin, "Pin to Screen (⌘P)", false)],
                     t,
@@ -1201,13 +1361,13 @@ impl App {
                 let current = self.ed.tool;
                 let tools: Vec<(Icon, &str, bool)> = Tool::TOOLBAR.iter().map(|x| (Icon::for_tool(*x), x.tooltip(), current == *x)).collect();
                 if fit.tools() > 0 {
-                    if let (Some(i), true) = (segments(ui, &tools[..fit.tools()], t, SEG_W), has_doc) {
+                    if let (Some(i), true) = (tool_group(ui, &tools[..fit.tools()], t, SEG_W), has_doc) {
                         self.set_tool(Tool::TOOLBAR[i]);
                     }
                 }
                 let actions = self.toolbar_actions();
                 if fit.actions() > 0 {
-                    let picked = segments(ui, &actions[..fit.actions()], t, SEG_W);
+                    let picked = tool_group(ui, &actions[..fit.actions()], t, SEG_W);
                     if let (Some(i), true) = (picked, has_doc) {
                         let anchor = Rect::from_min_size(ui.min_rect().right_bottom() + vec2(-180.0, 4.0), vec2(1.0, 1.0));
                         self.toolbar_action(i, anchor);
@@ -1215,15 +1375,14 @@ impl App {
                 }
                 if fit.overflows() {
                     let (r, resp) = ui.allocate_exact_size(vec2(seg_group_w(1), 28.0), Sense::click());
-                    ui.painter().rect_filled(r, 7.0, t.seg);
-                    ui.painter().rect_stroke(r, 7.0, Stroke::new(0.5, t.line), StrokeKind::Inside);
-                    let hidden_active = Tool::TOOLBAR[fit.tools()..].contains(&current) || actions[fit.actions()..].iter().any(|a| a.2);
-                    if hidden_active {
-                        ui.painter().rect_filled(r.shrink(2.0), 5.0, t.accent);
-                    } else if resp.hovered() {
-                        ui.painter().rect_filled(r.shrink(2.0), 5.0, t.hover);
+                    if !UNIFIED {
+                        ui.painter().rect_filled(r, 7.0, t.seg);
+                        ui.painter().rect_stroke(r, 7.0, Stroke::new(0.5, t.line), StrokeKind::Inside);
                     }
-                    icons::draw(ui.painter(), Rect::from_center_size(r.center(), vec2(17.0, 17.0)), Icon::ChevronDown, if hidden_active { Color32::WHITE } else { t.text });
+                    let hidden_active = Tool::TOOLBAR[fit.tools()..].contains(&current) || actions[fit.actions()..].iter().any(|a| a.2);
+                    let (tile, ink) = button_colours(t, hidden_active, resp.hovered());
+                    ui.painter().rect_filled(r.shrink(2.0), 5.0, tile);
+                    icons::draw(ui.painter(), Rect::from_center_size(r.center(), vec2(17.0, 17.0)), Icon::ChevronDown, ink);
                     let resp = resp.on_hover_text("More tools");
                     let mut chosen = None;
                     let hidden_tools = &Tool::TOOLBAR[fit.tools()..];
@@ -1267,14 +1426,17 @@ impl App {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(TOOLBAR_EDGE);
-                    #[cfg(target_os = "macos")]
-                    if segments(ui, &[(Icon::Gear, "Preferences… (⌘,)", false)], t, SEG_W).is_some() {
+                    // Windows and Linux: Preferences ends the bar, and its tooltip names the command
+                    // table's shortcut (Ctrl+,). macOS has the cells there, as the reference app
+                    // does; Preferences is in the menu bar icon menu and on ⌘,.
+                    #[cfg(not(target_os = "macos"))]
+                    if tool_group(ui, &[(Icon::Gear, &PREFERENCES.tooltip(), false)], t, SEG_W).is_some() {
                         self.open_prefs();
                     }
-                    // Windows and Linux: the tooltip names the command table's shortcut (Ctrl+,).
-                    #[cfg(not(target_os = "macos"))]
-                    if segments(ui, &[(Icon::Gear, &PREFERENCES.tooltip(), false)], t, SEG_W).is_some() {
-                        self.open_prefs();
+                    if UNIFIED {
+                        let shown = CHROME.status_cells(rect.width());
+                        let (cells, _) = ui.allocate_exact_size(vec2(shown.width(CHROME), STATUS_CELL_H), Sense::hover());
+                        self.status_cells(ui, t, cells, shown);
                     }
                 });
             });
@@ -1799,14 +1961,58 @@ impl App {
         }
     }
 
+    /// Split: the strip at the bottom of the editor, with the cells from its left edge and the
+    /// picture size at its right.
     fn status_bar(&mut self, ui: &mut Ui, t: &Th) {
         let rect = ui.max_rect();
         ui.painter().line_segment([rect.left_top(), rect.right_top()], Stroke::new(1.0, t.line));
+        let x = self.status_cells(ui, t, Rect::from_min_max(pos2(rect.left() + 8.0, rect.top()), pos2(rect.right() - 8.0, rect.bottom())), StatusCells::ALL);
+        if let Some(d) = &self.doc {
+            let small = FontId::new(10.5, FontFamily::Proportional);
+            let v = self.ed.view_area(d);
+            let info = format!("{} × {} px", v.w().round(), v.h().round());
+            let info_w = ui.painter().layout_no_wrap(info.clone(), small.clone(), t.dim).size().x;
+            if x + 16.0 + info_w <= rect.right() - 12.0 {
+                ui.painter().text(pos2(rect.right() - 12.0, rect.center().y), Align2::RIGHT_CENTER, info, small, t.dim);
+            }
+        }
+    }
+
+    /// WCAG and APCA contrast of the text in the selection against its background, when there is a
+    /// selection and it holds two colours.
+    fn selection_contrast(&self, ui: &Ui) -> Option<(f64, f64)> {
+        let (br, d) = (self.ed.selection.or(self.ed.crop_draft)?, self.doc.as_ref()?);
+        let key = (d.version, [br.x0.to_bits(), br.y0.to_bits(), br.x1.to_bits(), br.y1.to_bits()]);
+        let cache_id = ui.id().with("st-contrast-cache");
+        let cached = ui.data(|dd| dd.get_temp::<((u64, [u32; 4]), Option<(Rgba, Rgba)>)>(cache_id));
+        let pair = match cached {
+            Some((k, p)) if k == key => p,
+            _ => {
+                let p = crate::color::contrast_pair(&d.base, &br);
+                ui.data_mut(|dd| dd.insert_temp(cache_id, (key, p)));
+                p
+            }
+        };
+        pair.map(|(fg, bg)| (crate::color::contrast_wcag(fg, bg), crate::color::contrast_apca(fg, bg)))
+    }
+
+    /// The colours `selection_contrast` compared: text first, then background.
+    fn selection_contrast_colours(&self, ui: &Ui) -> Option<(Rgba, Rgba)> {
+        ui.data(|dd| dd.get_temp::<((u64, [u32; 4]), Option<(Rgba, Rgba)>)>(ui.id().with("st-contrast-cache"))).and_then(|(_, pair)| pair)
+    }
+
+    /// The colour, size and zoom cells (those `shown`), laid out from the left edge of `area`;
+    /// returns where they end. The status bar adds the contrast of the selection when it has room.
+    /// The unified bar has none: there the size cell names the contrast under the size.
+    fn status_cells(&mut self, ui: &mut Ui, t: &Th, area: Rect, shown: StatusCells) -> f32 {
+        use crate::sizing::STATUS_SEP_W;
+        #[allow(non_snake_case)]
+        let [STATUS_COLOR_W, STATUS_SIZE_W, STATUS_ZOOM_W] = CHROME.cell_widths();
         let small = FontId::new(10.5, FontFamily::Proportional);
         let value = FontId::new(12.0, FontFamily::Name("medium".into()));
-        let mut x = rect.left() + 8.0;
+        let mut x = area.left();
         let cell = |ui: &mut Ui, x: &mut f32, w: f32, id: &str| -> (Rect, Response) {
-            let r = Rect::from_min_size(pos2(*x, rect.top()), vec2(w, rect.height()));
+            let r = Rect::from_min_size(pos2(*x, area.top()), vec2(w, area.height()));
             let resp = ui.interact(r, ui.id().with(id), Sense::click());
             if resp.hovered() {
                 ui.painter().rect_filled(r.shrink(2.0), 5.0, t.hover);
@@ -1815,100 +2021,120 @@ impl App {
             (r, resp)
         };
         let sep = |ui: &mut Ui, x: &mut f32| {
-            ui.painter().line_segment([pos2(*x + 2.0, rect.top() + 6.0), pos2(*x + 2.0, rect.bottom() - 6.0)], Stroke::new(1.0, t.line));
-            *x += 6.0;
+            ui.painter().line_segment([pos2(*x + 2.0, area.top() + 6.0), pos2(*x + 2.0, area.bottom() - 6.0)], Stroke::new(1.0, t.line));
+            *x += STATUS_SEP_W;
         };
-        let txt = render::format_color(self.ed.hover_color, self.settings.color_format);
-        // Some formats (OKLCH, UIColor) are wider than the default cell.
-        // Sized from a few wide samples, not from the colour under the cursor, so the cells to
-        // the right do not slide around while the mouse moves.
-        let txt_w = [[255, 255, 255, 255], [0, 0, 255, 255], [200, 100, 255, 255], [255, 0, 255, 255]]
-            .iter()
-            .map(|c| ui.painter().layout_no_wrap(render::format_color(*c, self.settings.color_format), value.clone(), t.text).size().x)
-            .fold(0.0f32, f32::max);
-        let (r, resp) = cell(ui, &mut x, (txt_w + 44.0).max(140.0), "st-color");
-        let sw = Rect::from_min_size(pos2(r.left() + 6.0, r.center().y - 9.0), vec2(18.0, 18.0));
-        ui.painter().rect_filled(sw, 4.0, c32(self.ed.hover_color));
-        ui.painter().rect_stroke(sw, 4.0, Stroke::new(1.0, t.line), StrokeKind::Inside);
-        ui.painter().text(pos2(r.left() + 30.0, r.top() + 4.0), Align2::LEFT_TOP, txt, value.clone(), t.text);
-        ui.painter().text(pos2(r.left() + 30.0, r.bottom() - 4.0), Align2::LEFT_BOTTOM, "Tab to copy", small.clone(), t.dim);
-        if resp.clicked() {
-            self.ed.popover = if matches!(self.ed.popover, Popover::Color(_)) { Popover::None } else { Popover::Color(r) };
-        }
-        sep(ui, &mut x);
-        let sel = self.ed.selection.or(self.ed.crop_draft).or_else(|| self.doc.as_ref().map(|d| self.ed.view_area(d)));
-        let pts = self.settings.logical_points;
-        let scale = self.doc.as_ref().map(|d| d.scale_factor).unwrap_or(1.0);
-        let size_txt = sel.map_or("—".to_string(), |s| {
-            let k = if pts { scale.max(1.0) } else { 1.0 };
-            format!("{}×{}{}", (s.w() / k).round(), (s.h() / k).round(), if pts { "pt" } else { "px" })
+        let contrast = self.selection_contrast(ui);
+        let apca_first = self.settings.contrast_type == crate::color::ContrastType::Apca;
+        let contrast_text = contrast.map(|(wcag, apca)| if apca_first { format!("Lc {apca:.1}") } else { format!("{wcag:.2}:1") });
+        let contrast_tip = contrast.map(|(wcag, apca)| {
+            format!("WCAG 2.0 Contrast Ratio: {wcag:.2}\nAPCA Contrast: Lc {apca:.1}\n\nWCAG recommends a ratio of at least 4.5 for regular text and 3.0 for large text and UI elements.\nOption+click switches the measure shown here.")
         });
-        let (r, resp) = cell(ui, &mut x, 104.0, "st-size");
-        ui.painter().text(pos2(r.left() + 8.0, r.top() + 4.0), Align2::LEFT_TOP, size_txt, value.clone(), t.text);
-        ui.painter().text(pos2(r.left() + 8.0, r.bottom() - 4.0), Align2::LEFT_BOTTOM, "Selection Size", small.clone(), t.dim);
-        if resp.clicked() {
-            self.ed.popover = if matches!(self.ed.popover, Popover::Size(_)) { Popover::None } else { Popover::Size(r) };
-        }
-        sep(ui, &mut x);
-        // Contrast of the selection box: text colour against background colour.
-        // The contrast cell and the picture size give way when the window is narrow: the three
-        // main cells always fit.
-        let zoom_w = 64.0;
-        let room_for_contrast = x + 136.0 + 6.0 + zoom_w <= rect.right() - 8.0;
-        if let (Some(br), Some(d), true) = (self.ed.selection.or(self.ed.crop_draft), &self.doc, room_for_contrast) {
-            let key = (d.version, [br.x0.to_bits(), br.y0.to_bits(), br.x1.to_bits(), br.y1.to_bits()]);
-            let cache_id = ui.id().with("st-contrast-cache");
-            let cached = ui.data(|dd| dd.get_temp::<((u64, [u32; 4]), Option<(Rgba, Rgba)>)>(cache_id));
-            let pair = match cached {
-                Some((k, p)) if k == key => p,
-                _ => {
-                    let p = crate::color::contrast_pair(&d.base, &br);
-                    ui.data_mut(|dd| dd.insert_temp(cache_id, (key, p)));
-                    p
-                }
+        let alt = ui.input(|i| i.modifiers.alt);
+        let mut first = true;
+        let mut lead = |ui: &mut Ui, x: &mut f32| {
+            if !std::mem::take(&mut first) {
+                sep(ui, x);
+            }
+        };
+
+        if shown.color {
+            lead(ui, &mut x);
+            let txt = render::format_color(self.ed.hover_color, self.settings.color_format);
+            // Some formats (OKLCH, UIColor) are wider than the default cell. The status bar sizes
+            // the cell from a few wide samples, not from the colour under the cursor, so the cells
+            // to its right do not slide around while the mouse moves. The unified bar keeps the
+            // cell's width and cuts a longer text short.
+            let w = if UNIFIED {
+                STATUS_COLOR_W
+            } else {
+                let txt_w = [[255, 255, 255, 255], [0, 0, 255, 255], [200, 100, 255, 255], [255, 0, 255, 255]]
+                    .iter()
+                    .map(|c| ui.painter().layout_no_wrap(render::format_color(*c, self.settings.color_format), value.clone(), t.text).size().x)
+                    .fold(0.0f32, f32::max);
+                (txt_w + 44.0).max(STATUS_COLOR_W)
             };
-            if let Some((fg, bg)) = pair {
-                let (wcag, apca) = (crate::color::contrast_wcag(fg, bg), crate::color::contrast_apca(fg, bg));
-                let apca_first = self.settings.contrast_type == crate::color::ContrastType::Apca;
-                let (val, cap) = if apca_first { (format!("Lc {apca:.1}"), "APCA Contrast") } else { (format!("{wcag:.2}:1"), "WCAG 2.0 Contrast") };
-                let (r, resp) = cell(ui, &mut x, 136.0, "st-contrast");
-                let sw = |ui: &mut Ui, c: Rgba, at: Pos2| {
-                    let b = Rect::from_min_size(at, vec2(8.0, 8.0));
-                    ui.painter().rect_filled(b, 2.0, c32(c));
-                    ui.painter().rect_stroke(b, 2.0, Stroke::new(1.0, t.line), StrokeKind::Inside);
-                };
-                sw(ui, fg, pos2(r.right() - 18.0, r.top() + 6.0));
-                sw(ui, bg, pos2(r.right() - 18.0, r.top() + 17.0));
-                ui.painter().text(pos2(r.left() + 8.0, r.top() + 4.0), Align2::LEFT_TOP, val, value.clone(), t.text);
-                ui.painter().text(pos2(r.left() + 8.0, r.bottom() - 4.0), Align2::LEFT_BOTTOM, cap, small.clone(), t.dim);
-                let tip = format!(
-                    "WCAG 2.0 Contrast Ratio: {wcag:.2}\nAPCA Contrast: Lc {apca:.1}\n\nWCAG recommends a ratio of at least 4.5 for regular text and 3.0 for large text and UI elements.\nOption+click switches the measure shown here."
-                );
-                let alt = ui.input(|i| i.modifiers.alt);
-                resp.clone().on_hover_text(tip);
-                if resp.clicked() && alt {
-                    self.settings.contrast_type = self.settings.contrast_type.toggled();
-                    self.settings.save();
-                }
-                sep(ui, &mut x);
+            let (r, resp) = cell(ui, &mut x, w, "st-color");
+            let sw = Rect::from_min_size(pos2(r.left() + 6.0, r.center().y - 9.0), vec2(18.0, 18.0));
+            // A disc in the unified bar, as in the reference app; a rounded square in the status bar.
+            let radius = if UNIFIED { 9.0 } else { 4.0 };
+            ui.painter().rect_filled(sw, radius, c32(self.ed.hover_color));
+            ui.painter().rect_stroke(sw, radius, Stroke::new(1.0, t.line), StrokeKind::Inside);
+            let text = ui.painter().with_clip_rect(r.shrink2(vec2(2.0, 0.0)));
+            text.text(pos2(r.left() + 30.0, r.top() + 4.0), Align2::LEFT_TOP, txt, value.clone(), t.text);
+            text.text(pos2(r.left() + 30.0, r.bottom() - 4.0), Align2::LEFT_BOTTOM, "Tab to copy", small.clone(), t.dim);
+            if resp.clicked() {
+                self.ed.popover = if matches!(self.ed.popover, Popover::Color(_)) { Popover::None } else { Popover::Color(r) };
             }
         }
-        let ppp = ui.ctx().pixels_per_point();
-        let (r, resp) = cell(ui, &mut x, zoom_w, "st-zoom");
-        let zt = if self.doc.is_some() { format!("{}%", (self.ed.zoom * ppp * 100.0).round()) } else { "—".into() };
-        ui.painter().text(pos2(r.left() + 8.0, r.top() + 4.0), Align2::LEFT_TOP, zt, value, t.text);
-        ui.painter().text(pos2(r.left() + 8.0, r.bottom() - 4.0), Align2::LEFT_BOTTOM, "Zoom", small.clone(), t.dim);
-        if resp.clicked() {
-            self.ed.popover = if matches!(self.ed.popover, Popover::Zoom(_)) { Popover::None } else { Popover::Zoom(r) };
-        }
-        if let Some(d) = &self.doc {
-            let v = self.ed.view_area(d);
-            let info = format!("{} × {} px", v.w().round(), v.h().round());
-            let info_w = ui.painter().layout_no_wrap(info.clone(), small.clone(), t.dim).size().x;
-            if x + 16.0 + info_w <= rect.right() - 12.0 {
-                ui.painter().text(pos2(rect.right() - 12.0, rect.center().y), Align2::RIGHT_CENTER, info, small, t.dim);
+
+        if shown.size {
+            lead(ui, &mut x);
+            let chosen = self.ed.selection.or(self.ed.crop_draft);
+            let sel = chosen.or_else(|| self.doc.as_ref().map(|d| self.ed.view_area(d)));
+            let pts = self.settings.logical_points;
+            let scale = self.doc.as_ref().map(|d| d.scale_factor).unwrap_or(1.0);
+            let size_txt = sel.map_or("—".to_string(), |s| {
+                let k = if pts { scale.max(1.0) } else { 1.0 };
+                format!("{}×{}{}", (s.w() / k).round(), (s.h() / k).round(), if pts { "pt" } else { "px" })
+            });
+            // The unified bar says what the size is of, as the reference app does, and has the
+            // contrast of a selection take that line.
+            let caption = match (UNIFIED, &contrast_text, chosen) {
+                (true, Some(c), _) => format!("Contrast {c}"),
+                (true, None, None) => "Image size".to_string(),
+                _ => "Selection Size".to_string(),
+            };
+            let (r, resp) = cell(ui, &mut x, STATUS_SIZE_W, "st-size");
+            ui.painter().text(pos2(r.left() + 8.0, r.top() + 4.0), Align2::LEFT_TOP, size_txt, value.clone(), t.text);
+            ui.painter().text(pos2(r.left() + 8.0, r.bottom() - 4.0), Align2::LEFT_BOTTOM, caption, small.clone(), t.dim);
+            let switches = UNIFIED && contrast.is_some() && alt;
+            if let (true, Some(tip)) = (UNIFIED, &contrast_tip) {
+                resp.clone().on_hover_text(tip.as_str());
+            }
+            if resp.clicked() && switches {
+                self.settings.contrast_type = self.settings.contrast_type.toggled();
+                self.settings.save();
+            } else if resp.clicked() {
+                self.ed.popover = if matches!(self.ed.popover, Popover::Size(_)) { Popover::None } else { Popover::Size(r) };
             }
         }
+
+        // Status bar: the contrast cell and the picture size give way when the window is narrow,
+        // the three main cells always fit.
+        let room_for_contrast = !UNIFIED && x + STATUS_SEP_W + 136.0 + STATUS_SEP_W + STATUS_ZOOM_W <= area.right();
+        if let (Some(val), Some(tip), Some((fg, bg)), true) = (&contrast_text, &contrast_tip, self.selection_contrast_colours(ui), room_for_contrast) {
+            lead(ui, &mut x);
+            let cap = if apca_first { "APCA Contrast" } else { "WCAG 2.0 Contrast" };
+            let (r, resp) = cell(ui, &mut x, 136.0, "st-contrast");
+            let sw = |ui: &mut Ui, c: Rgba, at: Pos2| {
+                let b = Rect::from_min_size(at, vec2(8.0, 8.0));
+                ui.painter().rect_filled(b, 2.0, c32(c));
+                ui.painter().rect_stroke(b, 2.0, Stroke::new(1.0, t.line), StrokeKind::Inside);
+            };
+            sw(ui, fg, pos2(r.right() - 18.0, r.top() + 6.0));
+            sw(ui, bg, pos2(r.right() - 18.0, r.top() + 17.0));
+            ui.painter().text(pos2(r.left() + 8.0, r.top() + 4.0), Align2::LEFT_TOP, val.as_str(), value.clone(), t.text);
+            ui.painter().text(pos2(r.left() + 8.0, r.bottom() - 4.0), Align2::LEFT_BOTTOM, cap, small.clone(), t.dim);
+            resp.clone().on_hover_text(tip.as_str());
+            if resp.clicked() && alt {
+                self.settings.contrast_type = self.settings.contrast_type.toggled();
+                self.settings.save();
+            }
+        }
+
+        if shown.zoom {
+            lead(ui, &mut x);
+            let ppp = ui.ctx().pixels_per_point();
+            let (r, resp) = cell(ui, &mut x, STATUS_ZOOM_W, "st-zoom");
+            let zt = if self.doc.is_some() { format!("{}%", (self.ed.zoom * ppp * 100.0).round()) } else { "—".into() };
+            ui.painter().text(pos2(r.left() + 8.0, r.top() + 4.0), Align2::LEFT_TOP, zt, value, t.text);
+            ui.painter().text(pos2(r.left() + 8.0, r.bottom() - 4.0), Align2::LEFT_BOTTOM, "Zoom", small, t.dim);
+            if resp.clicked() {
+                self.ed.popover = if matches!(self.ed.popover, Popover::Zoom(_)) { Popover::None } else { Popover::Zoom(r) };
+            }
+        }
+        x
     }
 
     fn refresh_textures(&mut self, ctx: &egui::Context) {
@@ -2006,9 +2232,11 @@ impl App {
         // "fit" catches up on release.
         let editing = matches!(self.ed.drag, Drag::Create { .. } | Drag::Move { .. } | Drag::Handle { .. });
         if self.ed.fit && !editing {
-            let avail = rect.size() - vec2(48.0, 48.0);
-            let fitz = (avail.x / fit_target.w()).min(avail.y / fit_target.h()).max(0.01);
             let hundred = 1.0 / ppp;
+            let fits = fit_target.w() * hundred <= rect.width() + 0.5 && fit_target.h() * hundred <= rect.height() + 0.5;
+            let margin = CHROME.fit_margin(fits);
+            let avail = rect.size() - vec2(margin, margin);
+            let fitz = (avail.x / fit_target.w()).min(avail.y / fit_target.h()).max(0.01);
             self.ed.zoom = if self.ed.prefer_100 || self.settings.prefer_100 { hundred.min(fitz.max(hundred * 0.8)) } else { fitz.min(hundred) };
             // A tall picture (a scrolling capture) shrunk to fit its height would be unreadable: fit its
             // width instead and start at the top; scrolling or zooming moves down the picture.
@@ -2018,7 +2246,7 @@ impl App {
             }
             let content = vec2(fit_target.w(), fit_target.h()) * self.ed.zoom;
             let free = rect.size() - content;
-            let offset = if tall { vec2(free.x / 2.0, 24.0) } else { free / 2.0 };
+            let offset = if tall { vec2(free.x / 2.0, margin / 2.0) } else { free / 2.0 };
             self.ed.pan = offset - vec2(fit_target.x0, fit_target.y0) * self.ed.zoom;
         }
 
@@ -2814,10 +3042,13 @@ impl App {
 
     fn popovers(&mut self, ctx: &egui::Context, t: &Th) {
         let pop = self.ed.popover;
-        let (anchor, above) = match pop {
+        // The cells' popovers open over the status bar, and under the unified bar with their right
+        // edge on the cell's, since the cells sit at the right end of the window there.
+        let (anchor, pivot) = match pop {
             Popover::None => return,
-            Popover::Color(r) | Popover::Size(r) | Popover::Zoom(r) => (r.left_top() + vec2(0.0, -6.0), true),
-            Popover::Picker(r) | Popover::Resize(r) => (r.left_bottom() + vec2(0.0, 6.0), false),
+            Popover::Color(r) | Popover::Size(r) | Popover::Zoom(r) if UNIFIED => (r.right_bottom() + vec2(0.0, 6.0), Align2::RIGHT_TOP),
+            Popover::Color(r) | Popover::Size(r) | Popover::Zoom(r) => (r.left_top() + vec2(0.0, -6.0), Align2::LEFT_BOTTOM),
+            Popover::Picker(r) | Popover::Resize(r) => (r.left_bottom() + vec2(0.0, 6.0), Align2::LEFT_TOP),
         };
         let frame = egui::Frame::new().fill(t.bar).stroke(Stroke::new(1.0, t.line)).corner_radius(10.0).inner_margin(14).shadow(egui::Shadow {
             offset: [0, 6],
@@ -2828,7 +3059,7 @@ impl App {
         let area = egui::Area::new(egui::Id::new("editor-popover"))
             .order(egui::Order::Foreground)
             .fixed_pos(anchor)
-            .pivot(if above { Align2::LEFT_BOTTOM } else { Align2::LEFT_TOP })
+            .pivot(pivot)
             .show(ctx, |ui| {
                 frame.show(ui, |ui| match pop {
                     Popover::Color(_) => self.color_helper(ui, t),
@@ -4375,7 +4606,7 @@ mod toolbar_look_tests {
         let size = (480.0, 270.0);
         // The More button ends the centred groups.
         let fit = toolbar_fit(size.0);
-        let at = egui::pos2(toolbar_cluster_left(size.0, fit) + fit.cluster_width() - seg_group_w(1) / 2.0, 19.0);
+        let at = egui::pos2(toolbar_cluster_left(size.0, fit) + fit.cluster_width() - seg_group_w(1) / 2.0, TOOLBAR_H / 2.0);
         let img = overflow_menu_shot(size, at);
         crate::headless::save_png(&img, &std::path::Path::new(&dir).join("after-480-more-menu.png"));
     }
@@ -4384,13 +4615,13 @@ mod toolbar_look_tests {
     #[cfg(target_os = "macos")]
     fn drag_handle_center(width: f32) -> egui::Pos2 {
         let left = toolbar_cluster_left(width, toolbar_fit(width)) + seg_group_w(crate::sizing::TOOLBAR_COPY_ITEMS) + GROUP_GAP;
-        egui::pos2(left + TOOLBAR_DRAG_W / 2.0, 19.0)
+        egui::pos2(left + TOOLBAR_DRAG_W / 2.0, TOOLBAR_H / 2.0)
     }
     /// Windows and Linux: under the menu bar.
     #[cfg(not(target_os = "macos"))]
     fn drag_handle_center(width: f32) -> egui::Pos2 {
         let left = toolbar_cluster_left(width, toolbar_fit(width)) + seg_group_w(crate::sizing::TOOLBAR_COPY_ITEMS) + GROUP_GAP;
-        egui::pos2(left + TOOLBAR_DRAG_W / 2.0, MENUBAR_H + 19.0)
+        egui::pos2(left + TOOLBAR_DRAG_W / 2.0, MENUBAR_H + TOOLBAR_H / 2.0)
     }
 
     fn pull(app: &mut App, rig: &mut crate::headless::Rig, size: (f32, f32), from: egui::Pos2) {
@@ -4461,7 +4692,7 @@ mod toolbar_look_tests {
     fn toolbar_pictures_for_the_eyes() {
         let Ok(dir) = std::env::var("SHOTCRAFT_SHOTS") else { return };
         let prefix = std::env::var("SHOTCRAFT_SHOT_PREFIX").unwrap_or_else(|_| "after".into());
-        for (w, h) in [(1180.0, 640.0), (760.0, 420.0), (480.0, 270.0)] {
+        for (w, h) in [(1180.0, 640.0), (836.0, 470.0), (760.0, 420.0), (480.0, 270.0)] {
             for dark in [false, true] {
                 for tool in [Tool::Select, Tool::Arrow, Tool::Text, Tool::Backdrop, Tool::Rectangle] {
                     let img = shot((w, h), dark, tool);

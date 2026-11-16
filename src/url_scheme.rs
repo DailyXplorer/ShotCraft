@@ -262,11 +262,35 @@ pub fn take() -> Vec<Route> {
     std::mem::take(&mut *INBOX.lock().unwrap())
 }
 
+/// Files the system asked the app to open (Finder's Open With, a file dropped on the app's icon,
+/// `open -a ShotCraft file.png`). Unlike a link this is the user's own act: it waits for no permission.
+static FILES: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// The system handed over a file to open (from any thread).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn submit_file(path: PathBuf) {
+    {
+        let mut files = FILES.lock().unwrap();
+        if files.len() >= MAX_PENDING {
+            return;
+        }
+        files.push(path);
+    }
+    if let Some(ctx) = WAKE.get() {
+        ctx.request_repaint();
+    }
+}
+
+/// The files handed over since the last call, oldest first.
+pub fn take_files() -> Vec<PathBuf> {
+    std::mem::take(&mut *FILES.lock().unwrap())
+}
+
 /// Lets a link that arrives while the app sleeps wake it up. Links that came earlier (the one
 /// that launched the app) are already waiting in the inbox.
 pub fn attach(ctx: &egui::Context) {
     let _ = WAKE.set(ctx.clone());
-    if !INBOX.lock().unwrap().is_empty() {
+    if !INBOX.lock().unwrap().is_empty() || !FILES.lock().unwrap().is_empty() {
         ctx.request_repaint();
     }
 }
@@ -288,8 +312,13 @@ mod mac {
 
     /// 'GURL': the class and the id of the "open this URL" Apple event.
     const GURL: u32 = 0x4755_524C;
-    /// '----': the keyword of the event's main parameter, here the link.
+    /// '----': the keyword of the event's main parameter: the link, or the list of files.
     const KEY_DIRECT_OBJECT: u32 = 0x2D2D_2D2D;
+    /// 'aevt' and 'odoc': the class and the id of the "open these documents" Apple event.
+    const CORE_EVENT_CLASS: u32 = 0x6165_7674;
+    const OPEN_DOCUMENTS: u32 = 0x6F64_6F63;
+    /// 'furl': a file URL, the type every item of the list is turned into.
+    const TYPE_FILE_URL: u32 = 0x6675_726C;
 
     define_class!(
         /// Receives the "open URL" Apple events the system sends for `shotcraft://` links.
@@ -309,6 +338,33 @@ mod mac {
                     super::submit(&text.to_string());
                 }
             }
+
+            /// Without this, AppKit looks for a document class, finds none and tells the user that
+            /// ShotCraft "cannot open files in the PNG image format".
+            #[unsafe(method(handleOpenDocuments:withReplyEvent:))]
+            fn handle_open_documents(&self, event: &AnyObject, _reply: &AnyObject) {
+                let list: Option<Retained<AnyObject>> = unsafe { msg_send![event, paramDescriptorForKeyword: KEY_DIRECT_OBJECT] };
+                let Some(list) = list else { return };
+                let count: isize = unsafe { msg_send![&*list, numberOfItems] };
+                // Apple event lists count from 1.
+                for i in 1..=count {
+                    let item: Option<Retained<AnyObject>> = unsafe { msg_send![&*list, descriptorAtIndex: i] };
+                    let file: Option<Retained<AnyObject>> = item.and_then(|d| unsafe { msg_send![&*d, coerceToDescriptorType: TYPE_FILE_URL] });
+                    let url: Option<Retained<AnyObject>> = file.and_then(|d| unsafe { msg_send![&*d, fileURLValue] });
+                    let path: Option<Retained<NSString>> = url.and_then(|u| unsafe { msg_send![&*u, path] });
+                    if let Some(path) = path {
+                        super::submit_file(path.to_string().into());
+                    }
+                }
+            }
+
+            /// While the app starts, AppKit sets its own handler for "open documents". This runs
+            /// right after that and before the event that launched the app is delivered, so a file
+            /// that starts the app reaches `handle_open_documents` too.
+            #[unsafe(method(appWillFinishLaunching:))]
+            fn app_will_finish_launching(&self, _notification: &AnyObject) {
+                self.listen();
+            }
         }
     );
 
@@ -320,17 +376,29 @@ mod mac {
     impl UrlHandler {
         fn new(mtm: MainThreadMarker) -> Retained<Self> {
             let this = mtm.alloc::<Self>().set_ivars(());
-            unsafe { msg_send![super(this), init] }
+            let this: Retained<Self> = unsafe { msg_send![super(this), init] };
+            // The notification centre does not retain its observer either; `HANDLER` keeps it.
+            let center: Retained<AnyObject> = unsafe { msg_send![objc2::class!(NSNotificationCenter), defaultCenter] };
+            let name = NSString::from_str("NSApplicationWillFinishLaunchingNotification");
+            unsafe {
+                let _: () = msg_send![&*center, addObserver: &*this, selector: sel!(appWillFinishLaunching:), name: &*name, object: Option::<&AnyObject>::None];
+            }
+            this
+        }
+
+        /// Makes this object the one the system calls for links and for files to open.
+        fn listen(&self) {
+            let manager: Retained<AnyObject> = unsafe { msg_send![objc2::class!(NSAppleEventManager), sharedAppleEventManager] };
+            unsafe {
+                let _: () = msg_send![&*manager, setEventHandler: self, andSelector: sel!(handleUrlEvent:withReplyEvent:), forEventClass: GURL, andEventID: GURL];
+                let _: () = msg_send![&*manager, setEventHandler: self, andSelector: sel!(handleOpenDocuments:withReplyEvent:), forEventClass: CORE_EVENT_CLASS, andEventID: OPEN_DOCUMENTS];
+            }
         }
     }
 
     pub fn install() {
         let Some(mtm) = MainThreadMarker::new() else { return };
-        let handler = HANDLER.with(|h| h.get_or_init(|| UrlHandler::new(mtm)).clone());
-        let manager: Retained<AnyObject> = unsafe { msg_send![objc2::class!(NSAppleEventManager), sharedAppleEventManager] };
-        unsafe {
-            let _: () = msg_send![&*manager, setEventHandler: &*handler, andSelector: sel!(handleUrlEvent:withReplyEvent:), forEventClass: GURL, andEventID: GURL];
-        }
+        HANDLER.with(|h| h.get_or_init(|| UrlHandler::new(mtm)).listen());
     }
 }
 

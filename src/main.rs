@@ -30,6 +30,8 @@ mod headless;
 #[cfg(test)]
 mod addcap_shots;
 mod icons;
+#[cfg(target_os = "macos")]
+mod macgrab;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod menu_model;
 mod model;
@@ -324,9 +326,6 @@ mod helper_window_tests {
         assert!(super::helper_window_wanted(false));
     }
 }
-
-const WINDOW_MARGIN: f32 = 48.0;
-const WINDOW_MIN_HEIGHT_RATIO: f32 = 0.9;
 
 pub struct Pin {
     id: u64,
@@ -1119,13 +1118,15 @@ impl App {
             let d = self.doc.as_ref().unwrap();
             (d.base.w as f32 / scale.max(1.0), d.base.h as f32 / scale.max(1.0))
         };
+        // macOS: the options bar is not counted, the window grows by it when it shows
+        // (`OptionsRoom` in `editor.rs`).
         #[cfg(target_os = "macos")]
-        let chrome = editor::TOOLBAR_H + editor::OPTIONS_H + editor::STATUS_H;
+        let chrome = editor::TOOLBAR_H;
         // Windows and Linux: the editor's own menu bar too.
         #[cfg(not(target_os = "macos"))]
         let chrome = editor::MENUBAR_H + editor::TOOLBAR_H + editor::OPTIONS_H + editor::STATUS_H;
         system::center_main_window(&self.ctx, |screen_w, screen_h| {
-            sizing::editor_window((w, h), chrome, WINDOW_MARGIN, sizing::full_toolbar_width(), WINDOW_MIN_HEIGHT_RATIO, (screen_w, screen_h))
+            sizing::CHROME.editor_window((w, h), chrome, (screen_w, screen_h))
         });
     }
 
@@ -1579,10 +1580,7 @@ impl App {
         use url_scheme::Route;
         match route {
             Route::Delayed(Some(secs)) => self.start_capture_after(CaptureMode::Delayed, false, Some(secs)),
-            Route::LoadFile(path) => match url_scheme::check_file(&path).and_then(|real| system::load_image_file(&real)) {
-                Ok(img) => self.open_image(img, 1.0, false),
-                Err(e) => self.error(e),
-            },
+            Route::LoadFile(path) => self.open_path(&path),
             other => {
                 if let Some(action) = other.simple_action() {
                     self.handle(action);
@@ -1590,6 +1588,14 @@ impl App {
             }
         }
         true
+    }
+
+    /// Opens an image file named from outside the app (a link, Finder's Open With) in the editor.
+    fn open_path(&mut self, path: &std::path::Path) {
+        match url_scheme::check_file(path).and_then(|real| system::load_image_file(&real)) {
+            Ok(img) => self.open_image(img, 1.0, false),
+            Err(e) => self.error(e),
+        }
     }
 
     fn ask_allow_links(&mut self) -> bool {
@@ -2027,6 +2033,15 @@ impl eframe::App for App {
     }
 
     fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Once, as soon as the editor window exists.
+        #[cfg(target_os = "macos")]
+        {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static UNIFIED: AtomicBool = AtomicBool::new(false);
+            if !UNIFIED.load(Ordering::Relaxed) && app_mode::unify_title_bar() {
+                UNIFIED.store(true, Ordering::Relaxed);
+            }
+        }
         self.drain();
         // Links wait until the menu bar item exists: the first one may ask a question.
         if self.started {
@@ -2035,6 +2050,10 @@ impl eframe::App for App {
                 if !self.handle_url(route) {
                     break;
                 }
+            }
+            // Several files at once: the editor holds one picture, so the last one stays.
+            for path in url_scheme::take_files() {
+                self.open_path(&path);
             }
         }
         #[cfg(target_os = "macos")]

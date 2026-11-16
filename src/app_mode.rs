@@ -90,6 +90,28 @@ mod mac {
         target.is_some() && (!focus || NSApplication::sharedApplication(mtm).isActive())
     }
 
+    /// Gives the editor window the title bar of a window with a unified toolbar, as the reference
+    /// app has: AppKit then centres the window buttons 26 points below the top (16 without it), in
+    /// the middle of the editor's own 52 point bar (`sizing::TOOLBAR_H`). The toolbar is empty: the
+    /// editor draws the bar. Returns whether the window was there to change.
+    pub fn unify_title_bar() -> bool {
+        use objc2::runtime::AnyObject;
+        use objc2::{msg_send, rc::Allocated};
+        /// `NSWindowToolbarStyleUnified`.
+        const UNIFIED: isize = 3;
+        let Some(mtm) = MainThreadMarker::new() else { return false };
+        let Some(w) = windows(mtm).into_iter().find(|w| w.title().to_string() == EDITOR_TITLE) else { return false };
+        let name = objc2_foundation::NSString::from_str("editor");
+        // SAFETY: plain AppKit calls on the main thread; the window retains its toolbar.
+        unsafe {
+            let fresh: Allocated<AnyObject> = msg_send![objc2::class!(NSToolbar), alloc];
+            let toolbar: Retained<AnyObject> = msg_send![fresh, initWithIdentifier: &*name];
+            let _: () = msg_send![&*w, setToolbar: &*toolbar];
+            let _: () = msg_send![&*w, setToolbarStyle: UNIFIED];
+        }
+        true
+    }
+
     /// Activates the app, so that its windows, and the ones Sparkle opens, can come forward.
     pub fn activate() {
         let Some(mtm) = MainThreadMarker::new() else { return };
@@ -105,7 +127,7 @@ mod mac {
 }
 
 #[cfg(target_os = "macos")]
-pub use mac::{activate, bring_to_front, set_editor_alpha};
+pub use mac::{activate, bring_to_front, set_editor_alpha, unify_title_bar};
 
 #[cfg(not(target_os = "macos"))]
 pub fn set_editor_alpha(_alpha: f64) {}

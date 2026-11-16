@@ -4,7 +4,7 @@ Rules that shape the app. Change one only on purpose, and say so in the pull req
 
 ## Menu bar only: nothing opens at launch
 
-Starting ShotCraft (Finder, `open`, a login item) shows the menu bar icon and no window. A window appears only when the user acts: a capture, opening a file, Preferences, a pin, an update dialog. Starting with an image file as argument opens it in the editor. Opening the app again while it runs does not open the editor.
+Starting ShotCraft (Finder, `open`, a login item) shows the menu bar icon and no window. A window appears only when the user acts: a capture, opening a file, Preferences, a pin, an update dialog. Starting with an image file as argument opens it in the editor, and so does a file the system hands over: Finder's Open With, a file dropped on the app's icon, `open -a ShotCraft file.png`. Opening the app again while it runs does not open the editor.
 
 Why: a capture tool runs all day and must not take over the screen at login.
 
@@ -32,7 +32,7 @@ ShotCraft keeps no history or library of past screenshots. A capture is copied, 
 
 ## Scrolling capture has no on-screen control: Esc finishes and keeps the capture (owner decision)
 
-While a scrolling capture runs (down or up, automatic or by hand) no ShotCraft window is on screen: there is no HUD, no Done or Cancel button, and Return is not a hotkey. `Esc`, registered as a global hotkey only for the length of the capture and always given back when it ends, finishes the capture and keeps it: the result opens the normal way (after-capture action, editor). Esc with nothing captured yet ends silently. The capture also ends by itself at the end of the content, at the height limit, and in manual mode 3 seconds after the page stops moving. What a window used to say (Accessibility permission missing, scroll slower, the page did not move) is at most one macOS notification per capture, and only when the user has to act.
+While a scrolling capture runs (down or up, automatic or by hand) no ShotCraft window is on screen: there is no HUD, no Done or Cancel button, and Return is not a hotkey. `Esc`, registered as a global hotkey only for the length of the capture and always given back when it ends, finishes the capture and keeps it: the result opens the normal way (after-capture action, editor). Esc with nothing captured yet ends silently. The capture also ends by itself at the end of the content, at the height limit, and in manual mode 3 seconds after the page stops moving. A page that never moved at all (it cannot scroll, or nobody scrolled it) ends the capture after 10 seconds, and what the area showed opens like any other capture. This last rule is proposed, for the owner's approval: without it such a capture waited for Esc with nothing on screen to say so. What a window used to say (Accessibility permission missing, scroll slower, the page did not move) is at most one macOS notification per capture, and only when the user has to act.
 
 Why: the owner wants it to work like the best-known tools of its kind: select, let it scroll, press Esc, get the picture, with nothing drawn over the page that is being captured.
 
@@ -44,6 +44,30 @@ No Preferences tab (General, Hotkeys, Advanced) draws grey explanatory lines und
 * A new preference gets its explanation as a tooltip (`tip_row` in `src/prefs.rs`), never as a line under the row.
 
 Why: the lines crowded the window; the owner wants a plain page with help one hover away.
+
+## macOS: one bar in the title bar, no status bar (proposed, for the owner's approval)
+
+On macOS the editor has a single bar, in the title bar, laid out like the reference app's: the window buttons, then Copy, Save, Pin, the drag handle and the tools from the left, and at the right the colour, size and zoom cells. The bar has no Preferences button, as the reference app's has none: Preferences is in the menu bar icon menu and on Cmd+,. The buttons have no frame, and the selected tool sits on a grey tile. There is no status bar at the bottom. The options bar under it is unchanged.
+
+* The bar is 52 points tall and white in the light appearance.
+* A window 836 points wide, the smallest one a capture opens in, shows eight tools and the three cells. As the window narrows the tools move into the More menu, then the size cell goes. The colour and zoom cells, Copy, Save, Pin, the drag handle and More stay down to the smallest window.
+* The size cell says "Image size" when nothing is selected. With a selection it says "Selection Size", or the contrast of the selection when there is one to show: the bar has no room for a contrast cell.
+* A long colour format is cut short in its cell. The colour popover shows it whole.
+* Windows and Linux keep the centred tools and the status bar (`sizing::Chrome`).
+
+Why: the owner wants the Mac app to look like the reference app, where all of this lives in one bar.
+
+## macOS: the editor window fits the picture (proposed, for the owner's approval)
+
+On macOS a picture opens in a window of its own size, with the bar above it: a picture of 1000 × 600 points opens in a window of 1000 × 652. These are the reference app's sizes, measured on a screen of 1512 × 982 points.
+
+* The window is at least 836 × 470 points. A smaller picture sits in the middle of it.
+* The window is at most 80% of the screen's width, and the screen's free height less 112 points. A larger picture is shrunk to fit, with 9 points free around it.
+* The window opens a little above the middle of the screen, where AppKit centres a window.
+* The options bar is not counted. When it shows, the window grows by its 48 points at the bottom edge, and it gives them back when the bar goes, so the picture neither moves nor changes zoom. A window that has no room to grow shows the bar inside its own height.
+* Windows and Linux keep the wide, near-square window with a margin around the picture (`sizing::Chrome::editor_window`).
+
+Why: the window used to be 1244 points wide for every picture, mostly empty around a small capture.
 
 ## Windows and Linux (proposed, for the owner's approval)
 
