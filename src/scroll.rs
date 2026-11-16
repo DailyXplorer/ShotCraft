@@ -2,8 +2,13 @@
 //! when it cannot), grabs the area again and again and stitches the frames (see `stitch`).
 //!
 //! The capture runs on its own thread, at its own pace, whatever the UI does: `run` is a loop over a
-//! `Page` (grab, scroll, wait), which the app backs with `screencapture` and wheel events and the
-//! tests back with a simulated page.
+//! `Page` (grab, scroll, wait), which the app backs with the screen and wheel events and the tests
+//! back with a simulated page.
+//!
+//! Automatic scrolling goes by small, regular scrolls (`PACES`): each one moves the page by at most
+//! a third of the area, so two looks in a row share most of their rows and the stitcher always has
+//! plenty to match on. A look is cheap (macOS: `macgrab`, about 16 ms), so the page is looked at
+//! until two looks agree before a frame is kept.
 use crate::autoscroll;
 use crate::model::{Image, R};
 use crate::stitch::{frames_match, Push, Stitcher};
@@ -17,40 +22,44 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// Pause between two grabs in manual mode. Each grab runs `screencapture` (about 150 ms), so the real rate is
-/// about four frames per second.
-const FRAME_INTERVAL: Duration = Duration::from_millis(100);
+/// Pause between two grabs in manual mode. With the grab and the stitching this is about fifteen
+/// frames per second: a fast hand still leaves several frames per screenful.
+const FRAME_INTERVAL: Duration = Duration::from_millis(40);
 /// In manual mode the capture ends by itself when the page has not moved for this long (once something
 /// was stitched), so the user does not have to press Esc.
 pub const IDLE_FINISH: Duration = Duration::from_secs(3);
+/// ... and this long after the last change on screen when the page was never followed at all (it
+/// can't scroll, or nobody scrolled it): time to read the notification and start scrolling by hand.
+pub const NEVER_MOVED_FINISH: Duration = Duration::from_secs(10);
 /// Consecutive failed grabs before the capture gives up (usually a missing Screen Recording permission).
 const MAX_FAILURES: u32 = 3;
 /// Areas smaller than this (points) are refused.
 const MIN_SIDE: f32 = 48.0;
 
-/// Share of the area height the page is scrolled by between two grabs.
-const STEP_SHARE: f32 = 0.5;
-/// Bounds of one scroll step, in points.
-const STEP_MIN: i32 = 40;
-const STEP_MAX: i32 = 700;
-/// After a scroll, wait this long before the first look: the page needs a moment to start moving.
-const SETTLE_FIRST: Duration = Duration::from_millis(110);
-/// Then look again after this, until two looks agree (the page has stopped moving)...
-const SETTLE_POLL: Duration = Duration::from_millis(60);
+/// By speed level: the time one scroll gets, in milliseconds, and the points it moves the page by.
+/// Levels 0, 1, 2 and 4 are the four speeds of the app this one is modelled on (100 points every
+/// 0.8 s, 0.2 s and 0.12 s, then 300 points every 0.1 s; its default is the third). Level 3 sits
+/// between its last two.
+const PACES: [(u64, i32); 5] = [(800, 100), (200, 100), (120, 100), (100, 200), (100, 300)];
+/// One scroll moves the page by at most this share of the area height (1/n), whatever the level.
+const STEP_DIVISOR: u32 = 3;
+/// The smallest scroll, in points: a third of the smallest area (`MIN_SIDE`).
+const STEP_MIN: i32 = 16;
+/// After a scroll, the page gets this share of its pace (n/10) before the first look...
+const FIRST_LOOK_TENTHS: u32 = 3;
+/// ... then it is looked at again after a sixth of the pace, within these bounds (milliseconds),
+/// until two looks agree (the page has stopped moving and is drawn)...
+const NEXT_LOOK_MS: (u64, u64) = (15, 60);
 /// ... or this many looks have been taken (a page that never stops: a video, an animation).
 const SETTLE_MAX_LOOKS: u32 = 15;
-/// Before the page is declared unable to move, look once more after this.
-const SETTLE_RETRY: Duration = Duration::from_millis(300);
+/// A page that does not move after a scroll gets three paces, and at least this long (milliseconds),
+/// to start moving before it is taken to be at its end.
+const END_WAIT_MIN_MS: u64 = 350;
 /// Frames dropped in a row before automatic scrolling gives up and leaves the scrolling to the user.
 const MAX_LOST_IN_ROW: u32 = 3;
 
 /// Memory a stitched picture may take, in bytes (4 per pixel): a wide picture stops short of the height limit.
 const MAX_BYTES: u64 = 1_000_000_000;
-/// How long the page gets to settle after a scroll, by speed level (see `Limits::wait`): slow levels give it
-/// more time, fast ones less.
-const WAIT_SCALE: [f32; 5] = [2.0, 1.4, 1.0, 0.7, 0.5];
-/// Share of the area height scrolled between two grabs, by speed level. Level 2 is `STEP_SHARE`.
-const STEP_SHARES: [f32; 5] = [0.3, 0.4, STEP_SHARE, 0.6, 0.7];
 
 /// What the scrolling settings ask of a capture.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -82,14 +91,33 @@ impl Limits {
         self.max_height.min(by_memory.min(u32::MAX as u64) as u32).max(1)
     }
 
-    /// `base` stretched or shrunk for the speed level.
-    pub fn wait(&self, base: Duration) -> Duration {
-        base.mul_f32(WAIT_SCALE[self.speed.min(4) as usize])
+    fn pace(&self) -> (u64, i32) {
+        PACES[(self.speed as usize).min(PACES.len() - 1)]
     }
 
-    /// Points to scroll between two grabs for an area `area_h` points tall.
+    /// The time one scroll gets at this speed level.
+    pub fn interval(&self) -> Duration {
+        Duration::from_millis(self.pace().0)
+    }
+
+    /// How long the page gets after a scroll before it is first looked at.
+    fn first_look(&self) -> Duration {
+        self.interval() * FIRST_LOOK_TENTHS / 10
+    }
+
+    /// The pause between two looks at a page that may still be moving.
+    fn next_look(&self) -> Duration {
+        Duration::from_millis((self.pace().0 / 6).clamp(NEXT_LOOK_MS.0, NEXT_LOOK_MS.1))
+    }
+
+    /// How long a page that did not move gets to start moving.
+    fn end_wait(&self) -> Duration {
+        Duration::from_millis((self.pace().0 * 3).max(END_WAIT_MIN_MS))
+    }
+
+    /// Points to scroll between two frames for an area `area_h` points tall.
     pub fn step(&self, area_h: u32) -> i32 {
-        ((area_h as f32 * STEP_SHARES[self.speed.min(4) as usize]) as i32).clamp(STEP_MIN, STEP_MAX)
+        self.pace().1.min((area_h / STEP_DIVISOR) as i32).max(STEP_MIN)
     }
 
     /// The wheel amount that moves the page down by `dy`.
@@ -364,13 +392,18 @@ fn grab_retrying(page: &mut dyn Page) -> Result<RgbaImage, String> {
 /// Waits for the page to stop moving after a scroll and returns how it looks then: the last of two
 /// looks that agree, or the last look when the page never settles.
 fn settle(page: &mut dyn Page, lp: &Loop) -> Result<RgbaImage, String> {
-    page.sleep(lp.limits.wait(SETTLE_FIRST));
-    let mut prev = grab_retrying(page)?;
+    page.sleep(lp.limits.first_look());
+    let first = grab_retrying(page)?;
+    settle_from(page, lp, first)
+}
+
+/// `settle` for a page that was just looked at.
+fn settle_from(page: &mut dyn Page, lp: &Loop, mut prev: RgbaImage) -> Result<RgbaImage, String> {
     for _ in 0..SETTLE_MAX_LOOKS {
         if lp.state() != RUNNING {
             break;
         }
-        page.sleep(lp.limits.wait(SETTLE_POLL));
+        page.sleep(lp.limits.next_look());
         let cur = grab_retrying(page)?;
         if frames_match(&prev, &cur) {
             return Ok(cur);
@@ -378,6 +411,21 @@ fn settle(page: &mut dyn Page, lp: &Loop) -> Result<RgbaImage, String> {
         prev = cur;
     }
     Ok(prev)
+}
+
+/// The page still looks like `seen` after a scroll: watches it for `Limits::end_wait` and returns
+/// how it looks once it has moved and settled, or `None` when it stays as it is (the end of the
+/// page, or a page that takes no scrolling).
+fn wait_for_movement(page: &mut dyn Page, lp: &Loop, seen: &RgbaImage) -> Result<Option<RgbaImage>, String> {
+    let until = page.now() + lp.limits.end_wait();
+    while page.now() < until && lp.state() == RUNNING {
+        page.sleep(lp.limits.next_look());
+        let cur = grab_retrying(page)?;
+        if !frames_match(seen, &cur) {
+            return settle_from(page, lp, cur).map(Some);
+        }
+    }
+    Ok(None)
 }
 
 /// The capture loop. `area_w` is the area width in points, to know the display scale. Scrolling up
@@ -410,6 +458,8 @@ pub fn run_with(page: &mut dyn Page, area_w: u32, area_h: u32, mode: Mode, dir: 
     let mut lost_in_row = 0u32;
     let mut undid = false;
     let mut last_move = page.now();
+    // Manual mode: the previous look, to tell a screen that changes from one that stands still.
+    let mut seen: Option<RgbaImage> = None;
     loop {
         let state = lp.state();
         let note;
@@ -445,9 +495,16 @@ pub fn run_with(page: &mut dyn Page, area_w: u32, area_h: u32, mode: Mode, dir: 
                 if state == DONE || stitcher.is_capped() {
                     break;
                 }
-                if matches!(note, Note::Capturing | Note::AboveStart | Note::BelowStart | Note::ScrollSlower | Note::SizeChanged) || stitcher.frames_used() <= 1 {
+                // The capture ends by itself once the screen has stood still: soon after a page
+                // that was followed, later when nothing came after the first look. A frame that fits
+                // nowhere on a screen that no longer changes is no movement either, so a capture
+                // with nothing on screen to show for it never waits for good.
+                let still = seen.as_ref().map_or(false, |s| frames_match(s, &frame));
+                seen = Some(frame);
+                let patience = if stitcher.frames_used() <= 1 { NEVER_MOVED_FINISH } else { IDLE_FINISH };
+                if !still || matches!(note, Note::Capturing | Note::AboveStart | Note::BelowStart) {
                     last_move = page.now();
-                } else if page.now().saturating_sub(last_move) >= IDLE_FINISH {
+                } else if page.now().saturating_sub(last_move) >= patience {
                     break;
                 }
                 // Sleep in short slices so that Esc reacts at once.
@@ -481,8 +538,14 @@ pub fn run_with(page: &mut dyn Page, area_w: u32, area_h: u32, mode: Mode, dir: 
                 let hint = Some((step as f32 * scale * ratio).round() as i32);
                 let mut result = stitcher.push_hinted(&frame, hint);
                 if matches!(result, Push::Unchanged | Push::Revisited { .. }) && !undid {
-                    // Not moving yet? Give a slow page one more moment before calling it the end.
-                    page.sleep(limits.wait(SETTLE_RETRY));
+                    // Not moving yet? A slow page gets a moment to start before this is called the end.
+                    if let Ok(Some(frame)) = wait_for_movement(page, &lp, &frame) {
+                        result = stitcher.push_hinted(&frame, hint);
+                    }
+                } else if matches!(result, Push::Lost) {
+                    // A frame that fits nowhere is often a page still loading or fading something in:
+                    // one more look, a pace later, before stepping back.
+                    page.sleep(limits.interval());
                     if let Ok(frame) = settle(page, &lp) {
                         result = stitcher.push_hinted(&frame, hint);
                     }
@@ -550,9 +613,19 @@ pub fn run_with(page: &mut dyn Page, area_w: u32, area_h: u32, mode: Mode, dir: 
     Ok(Some(Outcome { img: Image { w, h, px: Arc::new(img.into_raw()) }, scale, frames, lost, capped, max_height }))
 }
 
-/// One look at the area, as pixels.
+/// One look at the area, as pixels: taken in the process when macOS allows it (`macgrab`), by
+/// `screencapture` otherwise.
 #[cfg(target_os = "macos")]
 fn grab(rect: &GrabRect) -> Result<RgbaImage, String> {
+    match crate::macgrab::area(rect) {
+        Some(frame) => Ok(frame),
+        None => grab_with_screencapture(rect),
+    }
+}
+
+/// One look at the area through `screencapture`: about 150 ms, and it works for any area.
+#[cfg(target_os = "macos")]
+fn grab_with_screencapture(rect: &GrabRect) -> Result<RgbaImage, String> {
     let path = system::temp_png("scroll");
     let _ = std::fs::remove_file(&path);
     let status = Command::new("/usr/sbin/screencapture")
@@ -654,6 +727,10 @@ mod tests {
         clock: Duration,
         /// Scroll events do nothing (no permission, or an app that ignores them).
         deaf: bool,
+        /// A scroll shows on screen this long after it was sent (a busy page).
+        lag: Duration,
+        /// Scrolls sent and not yet shown: when each one shows, and by how much.
+        pending: Vec<(Duration, i32)>,
         /// Scripted positions for manual mode: the nth grab sees `script[n]` (the last one repeats).
         script: Vec<i32>,
         /// Press Esc after this many grabs.
@@ -661,9 +738,12 @@ mod tests {
         scrolls: Vec<i32>,
     }
 
+    /// What one look costs on the virtual clock: the time `macgrab` takes for a Retina-sized area.
+    const GRAB_COST: Duration = Duration::from_millis(16);
+
     impl FakePage {
         fn new(page: RgbaImage, area_h: u32) -> FakePage {
-            FakePage { page, area_h, pos: 0, target: 0, ease: 1.0, header: None, footer: None, grabs: 0, clock: Duration::ZERO, deaf: false, script: vec![], done_after: None, scrolls: vec![] }
+            FakePage { page, area_h, pos: 0, target: 0, ease: 1.0, header: None, footer: None, grabs: 0, clock: Duration::ZERO, deaf: false, lag: Duration::ZERO, pending: vec![], script: vec![], done_after: None, scrolls: vec![] }
         }
 
         /// The page is scrolled to its bottom, where a capture that goes up starts.
@@ -681,12 +761,16 @@ mod tests {
     impl Page for FakePage {
         fn grab(&mut self) -> Result<RgbaImage, String> {
             self.grabs += 1;
-            self.clock += Duration::from_millis(150);
+            self.clock += GRAB_COST;
             if let Some((n, stop)) = &self.done_after {
                 if self.grabs >= *n {
                     stop.store(DONE, Ordering::SeqCst);
                 }
             }
+            let (now, max) = (self.clock, self.max_pos());
+            let shown: i32 = self.pending.iter().filter(|(at, _)| *at <= now).map(|(_, dy)| dy).sum();
+            self.pending.retain(|(at, _)| *at > now);
+            self.target = (self.target + shown).clamp(0, max);
             if !self.script.is_empty() {
                 self.pos = self.script[(self.grabs as usize - 1).min(self.script.len() - 1)];
             } else if self.pos != self.target {
@@ -705,8 +789,10 @@ mod tests {
 
         fn scroll(&mut self, dy: i32) -> Result<(), String> {
             self.scrolls.push(dy);
+            // The wheel events of one scroll go out 8 ms apart (`autoscroll::Scroller`).
+            self.clock += Duration::from_millis(8) * crate::autoscroll::chunks(dy).len() as u32;
             if !self.deaf {
-                self.target = (self.target + dy).clamp(0, self.max_pos());
+                self.pending.push((self.clock + self.lag, dy));
             }
             Ok(())
         }
@@ -751,8 +837,8 @@ mod tests {
         assert_eq!(o.img.h, page.height());
         assert_eq!(o.img.px.as_slice(), page.as_raw().as_slice(), "stitched image is the page");
         assert_eq!(p.lock().unwrap().note, Note::EndOfPage);
-        // Steps are half the area, never more than 90%.
-        assert!(fake.scrolls.iter().all(|&s| s.abs() <= 180), "{:?}", fake.scrolls);
+        // Steps are a third of the area at most.
+        assert!(fake.scrolls.iter().all(|&s| s > 0 && s <= 66), "{:?}", fake.scrolls);
         assert_eq!(fake.scrolls[0], step_points(200));
     }
 
@@ -768,8 +854,8 @@ mod tests {
         assert_eq!(o.img.h, page.height());
         assert_eq!(o.img.px.as_slice(), page.as_raw().as_slice(), "stitched image is the page");
         assert_eq!(p.lock().unwrap().note, Note::EndOfPage);
-        // It scrolls up by half the area at a time.
-        assert!(fake.scrolls.iter().all(|&s| s < 0 && s.abs() <= 180), "{:?}", fake.scrolls);
+        // It scrolls up by a third of the area at most.
+        assert!(fake.scrolls.iter().all(|&s| s < 0 && s.abs() <= 66), "{:?}", fake.scrolls);
         assert_eq!(fake.scrolls[0], -step_points(200));
     }
 
@@ -907,6 +993,31 @@ mod tests {
     }
 
     #[test]
+    fn a_page_that_never_moves_ends_the_capture_by_itself_after_ten_seconds() {
+        let mut fake = FakePage::new(inbox(300, 40, 40), 200);
+        fake.deaf = true;
+        let stop = AtomicU8::new(RUNNING);
+        let (r, p) = capture(&mut fake, Mode::Auto, &stop);
+        let o = r.unwrap().unwrap();
+        assert_eq!((o.frames, o.img.h), (1, 200), "what the area showed is kept");
+        assert_eq!(p.lock().unwrap().mode, Mode::Manual);
+        assert!(fake.clock >= NEVER_MOVED_FINISH && fake.clock <= NEVER_MOVED_FINISH + Duration::from_secs(2), "{:?}", fake.clock);
+    }
+
+    #[test]
+    fn a_capture_that_lost_the_page_ends_once_the_screen_stands_still() {
+        let mut fake = FakePage::new(inbox(300, 60, 40), 200);
+        // By hand: one step that is followed, then a jump too far to follow, and nothing more.
+        fake.script = vec![0, 60, 1000];
+        let stop = AtomicU8::new(RUNNING);
+        let (r, _) = capture(&mut fake, Mode::Manual, &stop);
+        let o = r.unwrap().unwrap();
+        assert_eq!(o.img.h, 260);
+        assert!(o.lost > 0);
+        assert!(fake.clock >= IDLE_FINISH && fake.clock <= IDLE_FINISH + Duration::from_secs(2), "{:?}", fake.clock);
+    }
+
+    #[test]
     fn auto_scrolling_stops_at_the_height_limit() {
         // 40 rows of 10 px per screen: the page is much taller than the limit.
         let page = inbox(120, 2200, 10);
@@ -955,8 +1066,8 @@ mod tests {
         assert_eq!(o.img.h, 540 + 200);
         assert_eq!(o.img.px.as_slice(), &page.as_raw()[..(o.img.w * o.img.h * 4) as usize]);
         // Virtual time spent after the last movement: about the idle delay, not much more.
-        assert!(fake.clock >= Duration::from_millis(150 * 10) + IDLE_FINISH);
-        assert!(fake.clock <= Duration::from_millis(150 * 10) + IDLE_FINISH + Duration::from_secs(2), "{:?}", fake.clock);
+        assert!(fake.clock >= GRAB_COST * 10 + IDLE_FINISH);
+        assert!(fake.clock <= (GRAB_COST + FRAME_INTERVAL) * 10 + IDLE_FINISH + Duration::from_secs(1), "{:?}", fake.clock);
         assert_eq!(p.lock().unwrap().mode, Mode::Manual);
     }
 
@@ -1065,12 +1176,13 @@ mod tests {
     }
 
     #[test]
-    fn the_scroll_step_is_half_the_area_within_bounds() {
-        assert_eq!(step_points(400), 200);
+    fn a_scroll_is_a_hundred_points_and_never_more_than_a_third_of_the_area() {
+        assert_eq!(step_points(400), 100);
+        assert_eq!(step_points(5000), 100);
+        assert_eq!(step_points(240), 80);
         assert_eq!(step_points(20), STEP_MIN);
-        assert_eq!(step_points(5000), STEP_MAX);
         for h in [48, 100, 400, 984, 3000] {
-            assert!(step_points(h) as f32 <= h as f32 * 0.9 || step_points(h) == STEP_MIN);
+            assert!(step_points(h) as u32 * STEP_DIVISOR <= h, "{h}");
         }
     }
 
@@ -1083,11 +1195,11 @@ mod tests {
     }
 
     #[test]
-    fn the_default_limits_are_the_old_behaviour() {
+    fn the_default_pace_is_a_hundred_points_every_120_ms() {
         let l = Limits::default();
         assert_eq!((l.max_height, l.speed, l.reverse, l.manual), (20_000, 2, false, false));
-        assert_eq!(l.step(400), 200);
-        assert_eq!(l.wait(SETTLE_FIRST), SETTLE_FIRST);
+        assert_eq!((l.step(900), l.interval()), (100, Duration::from_millis(120)));
+        assert_eq!((l.first_look(), l.next_look(), l.end_wait()), (Duration::from_millis(36), Duration::from_millis(20), Duration::from_millis(360)));
         assert_eq!(l.wheel(120), 120);
         assert_eq!(Limits::from_settings(&crate::settings::Settings::default()), l);
     }
@@ -1114,14 +1226,14 @@ mod tests {
     }
 
     #[test]
-    fn faster_levels_scroll_further_and_wait_less() {
-        let steps: Vec<i32> = (0..=4).map(|speed| Limits { speed, ..Limits::default() }.step(400)).collect();
-        assert!(steps.windows(2).all(|w| w[0] < w[1]), "{steps:?}");
-        assert_eq!(steps[2], step_points(400));
-        let waits: Vec<Duration> = (0..=4).map(|speed| Limits { speed, ..Limits::default() }.wait(Duration::from_millis(100))).collect();
-        assert!(waits.windows(2).all(|w| w[0] > w[1]), "{waits:?}");
-        assert!(steps.iter().all(|&s| s as f32 <= 400.0 * 0.9));
-        assert_eq!(Limits { speed: 250, ..Limits::default() }.step(400), steps[4], "out of range counts as the fastest");
+    fn every_level_covers_more_points_per_second_than_the_one_before() {
+        let level = |speed| Limits { speed, ..Limits::default() };
+        let per_second: Vec<u128> = (0..=4).map(|s| level(s).step(1200) as u128 * 1000 / level(s).interval().as_millis()).collect();
+        assert_eq!(per_second, [125, 500, 833, 2000, 3000]);
+        let waits: Vec<Duration> = (0..=4).map(|s| level(s).first_look() + level(s).next_look()).collect();
+        assert!(waits.windows(2).all(|w| w[0] >= w[1]), "{waits:?}");
+        assert_eq!(level(4).step(600), 200, "a third of the area at most");
+        assert_eq!((level(250).step(1200), level(250).interval()), (level(4).step(1200), level(4).interval()), "out of range counts as the fastest");
     }
 
     #[test]
@@ -1145,19 +1257,301 @@ mod tests {
     }
 
     #[test]
-    fn the_speed_level_changes_how_far_each_step_goes() {
-        let page = inbox(300, 90, 40);
-        let (mut slow, mut fast) = (FakePage::new(page.clone(), 200), FakePage::new(page.clone(), 200));
+    fn the_speed_level_changes_how_far_each_step_goes_and_how_long_the_page_takes() {
+        let page = inbox(300, 120, 40);
+        let (mut slow, mut fast) = (FakePage::new(page.clone(), 900), FakePage::new(page.clone(), 900));
         let stop = AtomicU8::new(RUNNING);
         let a = capture_with(&mut slow, Mode::Auto, &Limits { speed: 0, ..Limits::default() }, &stop);
         let b = capture_with(&mut fast, Mode::Auto, &Limits { speed: 4, ..Limits::default() }, &stop);
-        assert_eq!(slow.scrolls[0], Limits { speed: 0, ..Limits::default() }.step(200));
-        assert_eq!(fast.scrolls[0], Limits { speed: 4, ..Limits::default() }.step(200));
-        assert!(slow.scrolls[0] < fast.scrolls[0]);
-        assert!(slow.grabs > fast.grabs, "{} vs {}", slow.grabs, fast.grabs);
+        assert_eq!((slow.scrolls[0], fast.scrolls[0]), (100, 300));
+        assert!(slow.clock > fast.clock * 5, "{:?} vs {:?}", slow.clock, fast.clock);
         for o in [a, b] {
             assert_eq!(o.img.px.as_slice(), page.as_raw().as_slice(), "every speed gets the whole page");
         }
+    }
+
+    #[test]
+    fn the_default_speed_covers_a_page_at_about_a_hundred_points_every_120_ms() {
+        // 12,000 rows behind a 900-row area: about 111 scrolls of 100 points.
+        let page = inbox(300, 300, 40);
+        let mut fake = FakePage::new(page.clone(), 900);
+        let stop = AtomicU8::new(RUNNING);
+        let o = capture_with(&mut fake, Mode::Auto, &Limits::default(), &stop);
+        assert_eq!(o.img.px.as_slice(), page.as_raw().as_slice());
+        assert_eq!(o.lost, 0);
+        let per_second = (page.height() - 900) as f32 / fake.clock.as_secs_f32();
+        assert!((700.0..=950.0).contains(&per_second), "{per_second} points per second, {:?} in all", fake.clock);
+    }
+
+    #[test]
+    fn a_page_that_answers_late_is_not_taken_for_its_end() {
+        // Each scroll shows on screen 200 ms after it was sent: later than the first two looks.
+        let page = inbox(300, 60, 40);
+        let mut fake = FakePage::new(page.clone(), 300);
+        fake.lag = Duration::from_millis(200);
+        let stop = AtomicU8::new(RUNNING);
+        let (r, p) = capture(&mut fake, Mode::Auto, &stop);
+        let o = r.unwrap().unwrap();
+        assert_eq!(o.img.px.as_slice(), page.as_raw().as_slice());
+        assert_eq!(p.lock().unwrap().note, Note::EndOfPage);
+    }
+
+    // A real page on a real screen. `tests/live/scroll-page.html` writes each row's number next to
+    // it as a strip of cells, so a program can say what a capture of it holds.
+
+    /// The page rows a capture of the test page shows, top to bottom: row number and pixel rows.
+    /// Pixel rows without a strip (the header, the footer) are left out.
+    fn strips(img: &RgbaImage) -> Vec<(u32, u32)> {
+        let is = |p: &Rgba<u8>, c: usize| p.0[c] > 170 && (0..3).filter(|&o| o != c).all(|o| p.0[o] < 100);
+        let mut runs: Vec<(u32, u32)> = Vec::new();
+        for y in 0..img.height() {
+            let Some(x0) = (0..img.width()).find(|&x| is(img.get_pixel(x, y), 0)) else { continue };
+            let cell = (x0..img.width()).take_while(|&x| is(img.get_pixel(x, y), 0)).count() as u32;
+            let at = |i: u32| x0 + cell * i + cell / 2;
+            if cell < 4 || at(13) >= img.width() || !is(img.get_pixel(at(13), y), 2) {
+                continue;
+            }
+            let number = (1..=12).fold(0, |n, i| {
+                let p = img.get_pixel(at(i), y).0;
+                n << 1 | (p[0] as u32 + p[1] as u32 + p[2] as u32 > 384) as u32
+            });
+            match runs.last_mut() {
+                Some((n, rows)) if *n == number => *rows += 1,
+                _ => runs.push((number, 1)),
+            }
+        }
+        runs
+    }
+
+    /// What is wrong with a capture of the test page, in words. Empty when rows 0 to the last one
+    /// are all there once, in order and `row_px` pixel rows tall.
+    fn faults(runs: &[(u32, u32)], row_px: u32) -> Vec<String> {
+        let mut out = Vec::new();
+        if runs.first().map(|r| r.0) != Some(0) {
+            out.push(format!("starts at row {:?}, not 0", runs.first().map(|r| r.0)));
+        }
+        for w in runs.windows(2) {
+            if w[1].0 != w[0].0 + 1 {
+                out.push(format!("row {} is followed by row {}", w[0].0, w[1].0));
+            }
+        }
+        // The first row may start under a sticky header and the last one may end at the bottom of
+        // the area; every other row is whole.
+        let last = runs.len().saturating_sub(1);
+        for (i, (number, rows)) in runs.iter().enumerate().skip(1) {
+            if *rows != row_px && !(i == last && *rows < row_px) {
+                out.push(format!("row {number} is {rows} px tall, not {row_px}"));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_capture_of_the_test_page_is_read_back_from_its_strips() {
+        // Three rows of 8 px drawn the way the page draws them, with 4 px cells.
+        let mut img = RgbaImage::from_pixel(80, 30, Rgba([255, 255, 255, 255]));
+        for (i, number) in [0u32, 1, 2].into_iter().enumerate() {
+            for y in 4 + i as u32 * 8..12 + i as u32 * 8 {
+                for c in 0..14u32 {
+                    let colour = match c {
+                        0 => [234, 51, 35, 255],
+                        13 => [0, 0, 245, 255],
+                        _ if number >> (12 - c) & 1 == 1 => [255, 255, 255, 255],
+                        _ => [0, 0, 0, 255],
+                    };
+                    for x in 5 + c * 4..9 + c * 4 {
+                        img.put_pixel(x, y, Rgba(colour));
+                    }
+                }
+            }
+        }
+        let runs = strips(&img);
+        assert_eq!(runs, [(0, 8), (1, 8), (2, 8)]);
+        assert!(faults(&runs, 8).is_empty());
+        assert_eq!(faults(&[(0, 8), (1, 5), (3, 8), (3, 5)], 8), ["row 1 is followed by row 3", "row 3 is followed by row 3", "row 1 is 5 px tall, not 8"]);
+        assert_eq!(faults(&[(0, 8), (1, 8), (2, 9)], 8), ["row 2 is 9 px tall, not 8"]);
+        assert_eq!(faults(&[(4, 8), (5, 8)], 8), ["starts at row Some(4), not 0"]);
+    }
+
+    /// A page that keeps what the capture saw of it and asked from it, so that a capture that went
+    /// wrong on a real screen can be run again without one (`a_recorded_capture_replayed`).
+    struct Recorded<P: Page> {
+        page: P,
+        frames: Vec<RgbaImage>,
+        calls: Vec<String>,
+    }
+
+    impl<P: Page> Recorded<P> {
+        /// The first frames are kept, whole and in memory: enough for a capture of a few screens.
+        const MAX_FRAMES: usize = 60;
+
+        fn save(&self, dir: &std::path::Path) {
+            std::fs::create_dir_all(dir).expect("the folder for the frames can be made");
+            for (i, f) in self.frames.iter().enumerate() {
+                f.save(dir.join(format!("{i:04}.png"))).expect("a frame can be written");
+            }
+            std::fs::write(dir.join("calls.txt"), self.calls.join("\n")).expect("the calls can be written");
+        }
+    }
+
+    impl<P: Page> Page for Recorded<P> {
+        fn grab(&mut self) -> Result<RgbaImage, String> {
+            let frame = self.page.grab()?;
+            self.calls.push(format!("{} ms: grab {}", self.page.now().as_millis(), self.frames.len()));
+            if self.frames.len() < Self::MAX_FRAMES {
+                self.frames.push(frame.clone());
+            }
+            Ok(frame)
+        }
+
+        fn scroll(&mut self, dy: i32) -> Result<(), String> {
+            self.calls.push(format!("{} ms: scroll {dy}", self.page.now().as_millis()));
+            self.page.scroll(dy)
+        }
+
+        fn sleep(&mut self, d: Duration) {
+            self.page.sleep(d)
+        }
+
+        fn now(&self) -> Duration {
+            self.page.now()
+        }
+    }
+
+    /// The frames of a recorded capture, handed out in the order they were seen; the last one
+    /// stays once they are used up, like a page at its end.
+    struct Replay {
+        frames: Vec<RgbaImage>,
+        next: usize,
+        clock: Duration,
+    }
+
+    impl Page for Replay {
+        fn grab(&mut self) -> Result<RgbaImage, String> {
+            let i = self.next.min(self.frames.len() - 1);
+            self.next += 1;
+            Ok(self.frames[i].clone())
+        }
+
+        fn scroll(&mut self, _dy: i32) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn sleep(&mut self, d: Duration) {
+            self.clock += d;
+        }
+
+        fn now(&self) -> Duration {
+            self.clock
+        }
+    }
+
+    /// The height limit of a replay, in pixel rows.
+    const REPLAY_MAX_ROWS: u32 = 60_000;
+
+    /// Runs the frames SHOTCRAFT_LIVE_FRAMES kept of a live capture through the stitcher again and
+    /// says what it makes of each one:
+    ///
+    ///   SHOTCRAFT_REPLAY=folder cargo test a_recorded_capture_replayed -- --ignored --nocapture
+    ///
+    /// SHOTCRAFT_REPLAY_OUT names a PNG for the stitched result.
+    #[test]
+    #[ignore = "needs the frames of a recorded capture"]
+    fn a_recorded_capture_replayed() {
+        let dir = std::path::PathBuf::from(std::env::var("SHOTCRAFT_REPLAY").expect("set SHOTCRAFT_REPLAY=folder"));
+        let mut names: Vec<_> = std::fs::read_dir(&dir).expect("the folder can be read").filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().map_or(false, |x| x == "png")).collect();
+        names.sort();
+        let frames: Vec<RgbaImage> = names.iter().map(|p| image::open(p).expect("a frame can be read").to_rgba8()).collect();
+        assert!(!frames.is_empty(), "no frame in {dir:?}");
+        let mut stitcher = Stitcher::with_direction(REPLAY_MAX_ROWS, Direction::Down);
+        for (i, f) in frames.iter().enumerate() {
+            println!("frame {i}: {:?}", stitcher.push(f));
+        }
+        let img = stitcher.finish().expect("something was stitched");
+        println!("stitched {} x {} px from {} frames", img.width(), img.height(), frames.len());
+        if let Ok(path) = std::env::var("SHOTCRAFT_REPLAY_OUT") {
+            img.save(&path).expect("SHOTCRAFT_REPLAY_OUT can be written");
+        }
+    }
+
+    /// Captures the area of the screen that shows `tests/live/scroll-page.html`, scrolled to its
+    /// top, and says how long it took and what the picture holds:
+    ///
+    ///   SHOTCRAFT_LIVE_SCROLL=x,y,w,h cargo test live_scroll -- --ignored --nocapture
+    ///
+    /// The area is in points from the top left of the main display and must show the strips.
+    /// SHOTCRAFT_LIVE_SPEED sets the speed level, SHOTCRAFT_LIVE_OUT a PNG to write and
+    /// SHOTCRAFT_LIVE_FRAMES a folder for the frames the capture saw (`a_recorded_capture_replayed`
+    /// reads them). SHOTCRAFT_LIVE_ANY=1 captures any page: the picture is not read for strips. With
+    /// SHOTCRAFT_LIVE_CHECK=file.png nothing is captured: that picture (from any app) is read instead.
+    #[test]
+    #[ignore = "needs a screen that shows tests/live/scroll-page.html"]
+    fn live_scroll_capture_of_the_test_page() {
+        // A test has no NSApplication, and Core Graphics aborts a process that moves the pointer
+        // before it has a window server connection. Asking for the main display opens one, and
+        // the process stays a plain command line tool: macOS then applies the terminal's Screen
+        // Recording permission to it instead of asking for one of its own.
+        #[cfg(target_os = "macos")]
+        {
+            #[link(name = "CoreGraphics", kind = "framework")]
+            extern "C" {
+                fn CGMainDisplayID() -> u32;
+            }
+            // SAFETY: takes no argument and returns a display id.
+            unsafe { CGMainDisplayID() };
+        }
+        let var = |name: &str| std::env::var(name).ok();
+        let (img, row_px) = if let Some(path) = var("SHOTCRAFT_LIVE_CHECK") {
+            let img = image::open(&path).expect("SHOTCRAFT_LIVE_CHECK names a picture").to_rgba8();
+            let row_px = var("SHOTCRAFT_LIVE_ROW_PX").and_then(|v| v.parse().ok()).unwrap_or(80);
+            (img, row_px)
+        } else {
+            let spec = var("SHOTCRAFT_LIVE_SCROLL").expect("set SHOTCRAFT_LIVE_SCROLL=x,y,w,h");
+            let v: Vec<i32> = spec.split(',').map(|n| n.trim().parse().expect("whole numbers")).collect();
+            let rect = GrabRect { x: v[0], y: v[1], w: v[2] as u32, h: v[3] as u32 };
+            let speed = var("SHOTCRAFT_LIVE_SPEED").and_then(|v| v.parse().ok()).unwrap_or(crate::settings::SCROLL_SPEED_DEFAULT);
+            let limits = Limits { speed, max_height: crate::settings::SCROLL_MAX_HEIGHT_RANGE.1, ..Limits::default() };
+            let mut page = Recorded { page: ScreenPage { rect, scroller: autoscroll::Scroller::new(rect), started: Instant::now(), limits }, frames: Vec::new(), calls: Vec::new() };
+            let (stop, p) = (AtomicU8::new(RUNNING), progress(Mode::Auto));
+            let notes = Mutex::new(Vec::new());
+            let started = Instant::now();
+            // Nobody is there to scroll by hand or to press Esc: a hand-over ends the capture.
+            let hand_over = |n: &Note| matches!(n, Note::NeedsAccessibility | Note::PageDidNotMove | Note::CheckScreenRecording | Note::LostTrack | Note::SizeChanged);
+            let note = |n: Note| {
+                if hand_over(&n) {
+                    stop.store(DONE, Ordering::SeqCst);
+                }
+                notes.lock().unwrap().push(n);
+            };
+            let o = run_with(&mut page, rect.w, rect.h, Mode::Auto, Direction::Down, &limits, &stop, &p, &note).expect("the capture ran").expect("something was captured");
+            let took = started.elapsed();
+            if let Some(dir) = var("SHOTCRAFT_LIVE_FRAMES") {
+                page.save(std::path::Path::new(&dir));
+            }
+            drop(page);
+            let points = o.img.h as f32 / o.scale;
+            println!("captured {} x {} px ({points:.0} points) in {:.2} s: {:.0} points per second, {} frames, {} lost, speed level {speed}", o.img.w, o.img.h, took.as_secs_f32(), (points - rect.h as f32) / took.as_secs_f32(), o.frames, o.lost);
+            let mut seen = notes.into_inner().unwrap();
+            seen.dedup();
+            println!("notes: {seen:?}");
+            let img = RgbaImage::from_raw(o.img.w, o.img.h, o.img.px.to_vec()).unwrap();
+            if let Some(path) = var("SHOTCRAFT_LIVE_OUT") {
+                img.save(&path).expect("SHOTCRAFT_LIVE_OUT can be written");
+            }
+            if var("SHOTCRAFT_LIVE_ANY").is_some() {
+                return;
+            }
+            assert!(!seen.iter().any(hand_over), "automatic scrolling handed over: is the page at its top and under the area, and may this program post events and see the screen?");
+            (img, (40.0 * o.scale).round() as u32)
+        };
+        let runs = strips(&img);
+        let found = faults(&runs, row_px);
+        println!("{} x {} px, rows {:?} to {:?} ({} runs), {} faults", img.width(), img.height(), runs.first().map(|r| r.0), runs.last().map(|r| r.0), runs.len(), found.len());
+        for f in found.iter().take(20) {
+            println!("  {f}");
+        }
+        assert!(!runs.is_empty(), "no strip was found: is the page in the area?");
+        assert!(found.is_empty(), "{} faults", found.len());
     }
 
     fn area(x0: f32, y0: f32, x1: f32, y1: f32) -> R {

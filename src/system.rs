@@ -534,7 +534,9 @@ pub fn center_main_window(_ctx: &eframe::egui::Context, size: impl Fn(f32, f32) 
     let area = screen.visibleFrame();
     let (w, h) = size(area.size.width as f32, area.size.height as f32);
     let (w, h) = (w as f64, h as f64);
-    let origin = NSPoint::new(area.origin.x + (area.size.width - w) / 2.0, area.origin.y + (area.size.height - h) / 2.0);
+    // AppKit counts from the bottom of the screen: the space under the window is what is not above it.
+    let below = (area.size.height - h) * (1.0 - crate::sizing::OPEN_SPACE_ABOVE as f64);
+    let origin = NSPoint::new(area.origin.x + (area.size.width - w) / 2.0, area.origin.y + below);
     let frame = NSRect::new(origin, NSSize::new(w, h));
     let windows = NSApplication::sharedApplication(mtm).windows();
     // The editor is the only large window named ShotCraft; the helper window is 1×1.
@@ -542,6 +544,30 @@ pub fn center_main_window(_ctx: &eframe::egui::Context, size: impl Fn(f32, f32) 
     if let Some(win) = editor {
         win.setFrame_display(frame, true);
     }
+}
+
+/// Makes the editor window `dy` points taller at its bottom edge (shorter for a negative `dy`),
+/// so that what it shows stays where it is on screen. Returns the points really added: a window
+/// can't get taller than its screen, one that would end below the screen moves up, and a window
+/// in full screen is left alone.
+#[cfg(target_os = "macos")]
+pub fn grow_main_window(dy: f32) -> f32 {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSWindowStyleMask};
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
+    let Some(mtm) = MainThreadMarker::new() else { return 0.0 };
+    let windows = NSApplication::sharedApplication(mtm).windows();
+    let Some(win) = windows.iter().find(|win| win.title().to_string() == "ShotCraft" && win.frame().size.width > 100.0) else { return 0.0 };
+    if win.styleMask().contains(NSWindowStyleMask::FullScreen) {
+        return 0.0;
+    }
+    let frame = win.frame();
+    let area = win.screen().map_or(frame, |s| s.visibleFrame());
+    let height = (frame.size.height + dy as f64).min(area.size.height.max(frame.size.height)).max(crate::sizing::EDITOR_MIN_SIZE.1 as f64);
+    let top = frame.origin.y + frame.size.height;
+    let y = if dy > 0.0 { (top - height).max(area.origin.y.min(frame.origin.y)) } else { top - height };
+    win.setFrame_display(NSRect::new(NSPoint::new(frame.origin.x, y), NSSize::new(frame.size.width, height)), true);
+    (height - frame.size.height) as f32
 }
 
 /// Sizes the editor for its screen and centres it there. The screen size includes the taskbar or
