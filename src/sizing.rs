@@ -252,31 +252,53 @@ pub const UNIFIED_FIT_MARGIN: f32 = 18.0;
 /// the screen, where AppKit's own `center` puts a window.
 pub const OPEN_SPACE_ABOVE: f32 = 5.0 / 11.0;
 
+/// What the unified bar starts with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lead {
+    /// macOS: the window buttons. The bar is the window's title bar, and the system draws them in it.
+    WindowButtons,
+    /// Windows: the button that opens the menus. The window buttons are in the system's title
+    /// bar, above the bar.
+    Menu,
+}
+
 /// How the editor's chrome is arranged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Chrome {
-    /// macOS: one bar in the title bar, as in the app this one is modelled on. The window buttons,
-    /// then the tools from the left; the colour, size and zoom cells at the right.
-    /// There is no status bar.
-    Unified,
-    /// Windows and Linux: the tools centred in their bar, the cells in a status bar at the bottom.
+    /// macOS and Windows: one bar, as in the app this one is modelled on. Its `Lead`, then the
+    /// tools from the left; the colour, size and zoom cells at the right. There is no status bar.
+    Unified(Lead),
+    /// Linux: a menu bar, the tools centred in their bar, the cells in a status bar at the bottom.
     Split,
 }
 
 /// The arrangement on this system.
-pub const CHROME: Chrome = if cfg!(target_os = "macos") { Chrome::Unified } else { Chrome::Split };
+pub const CHROME: Chrome = if cfg!(target_os = "macos") {
+    Chrome::Unified(Lead::WindowButtons)
+} else if cfg!(target_os = "windows") {
+    Chrome::Unified(Lead::Menu)
+} else {
+    Chrome::Split
+};
 
-/// Editor chrome, in points. The toolbar sits in the title bar (traffic lights on its left), the
-/// options bar under it holds the active tool's settings, the status bar is the bottom strip.
-/// The unified bar is as tall as the reference app's: a 24 pt row with 14 pt above and below.
+/// Editor chrome, in points. The options bar under the toolbar holds the active tool's settings,
+/// the status bar is the bottom strip. The unified bar is as tall as the reference app's: a 24 pt
+/// row with 14 pt above and below.
 pub const TOOLBAR_H: f32 = match CHROME {
-    Chrome::Unified => 52.0,
+    Chrome::Unified(_) => 52.0,
     Chrome::Split => 38.0,
 };
 pub const OPTIONS_H: f32 = 48.0;
 pub const STATUS_H: f32 = match CHROME {
-    Chrome::Unified => 0.0,
+    Chrome::Unified(_) => 0.0,
     Chrome::Split => STATUS_CELL_H,
+};
+/// The split arrangement's menu bar, above the toolbar: at 24 points its labels sat 1 px above
+/// the line under the bar. The unified one has none: macOS keeps its menus in the menu bar icon,
+/// Windows behind the bar's menu button.
+pub const MENUBAR_H: f32 = match CHROME {
+    Chrome::Unified(_) => 0.0,
+    Chrome::Split => 30.0,
 };
 /// Height of the colour, size and zoom cells, wherever they are.
 pub const STATUS_CELL_H: f32 = 34.0;
@@ -296,7 +318,7 @@ pub const TOOLBAR_TOOL_ITEMS: usize = crate::model::Tool::TOOLBAR.len();
 pub const TOOLBAR_ACTION_ITEMS: usize = 7;
 
 /// Width of a segmented control of `items` segments (a 2 pt frame on each side).
-pub fn seg_group_w(items: usize) -> f32 {
+pub const fn seg_group_w(items: usize) -> f32 {
     TOOLBAR_SEG_W * items as f32 + 4.0
 }
 
@@ -378,7 +400,7 @@ impl Chrome {
     pub fn editor_window(self, content: Size, bars: f32, screen: Size) -> Size {
         match self {
             Chrome::Split => editor_window(content, bars, SPLIT_FIT_MARGIN, self.full_toolbar_width(), SPLIT_MIN_HEIGHT_RATIO, screen),
-            Chrome::Unified => {
+            Chrome::Unified(_) => {
                 let max = ((screen.0 * UNIFIED_OPEN_WIDTH_SHARE).round(), screen.1 - UNIFIED_OPEN_FREE_HEIGHT);
                 let min = (UNIFIED_OPEN_MIN.0.min(max.0), UNIFIED_OPEN_MIN.1.min(max.1));
                 (content.0.clamp(min.0, max.0), (content.1 + bars).clamp(min.1, max.1))
@@ -388,21 +410,24 @@ impl Chrome {
 
     /// What stays free around a picture fitted to a canvas, both sides together. `fits` says
     /// whether the picture fits in the canvas at its own size.
-    pub fn fit_margin(self, fits: bool) -> f32 {
+    pub const fn fit_margin(self, fits: bool) -> f32 {
         match self {
             Chrome::Split => SPLIT_FIT_MARGIN,
-            Chrome::Unified if fits => 0.0,
-            Chrome::Unified => UNIFIED_FIT_MARGIN,
+            Chrome::Unified(_) if fits => 0.0,
+            Chrome::Unified(_) => UNIFIED_FIT_MARGIN,
         }
     }
 
-    /// What the toolbar leaves free before its first group. The unified bar keeps it for the
-    /// window buttons, which end 79 points from the left edge in a window with a unified toolbar
-    /// (`app_mode::unify_title_bar`). The split one has no buttons there, but its groups are
-    /// centred, so the margin must be as wide as the one that holds the Preferences button on the right.
+    /// What the toolbar leaves free before its first group. On macOS the unified bar keeps it for
+    /// the window buttons, which end 79 points from the left edge in a window with a unified
+    /// toolbar (`app_mode::unify_title_bar`); on Windows for the menu button, between the bar's
+    /// edge and the gap before the first group. The split one has nothing there, but its groups
+    /// are centred, so the margin must be as wide as the one that holds the Preferences button on
+    /// the right.
     pub const fn lead(self) -> f32 {
         match self {
-            Chrome::Unified => 86.0,
+            Chrome::Unified(Lead::WindowButtons) => 86.0,
+            Chrome::Unified(Lead::Menu) => TOOLBAR_EDGE + seg_group_w(1) + TOOLBAR_GROUP_GAP,
             Chrome::Split => 56.0,
         }
     }
@@ -412,13 +437,13 @@ impl Chrome {
     /// whose cells are as narrow as their texts allow so that the tools keep the room.
     pub const fn cell_widths(self) -> [f32; 3] {
         match self {
-            Chrome::Unified => [104.0, 100.0, 56.0],
+            Chrome::Unified(_) => [104.0, 100.0, 56.0],
             Chrome::Split => [140.0, 104.0, 64.0],
         }
     }
 
     /// What the unified bar keeps free after its cells. It has no Preferences button, like the
-    /// reference app's: Preferences is in the menu bar icon menu and on its shortcut.
+    /// reference app's: Preferences is in the menus and on its shortcut.
     const UNIFIED_END_W: f32 = TOOLBAR_EDGE;
 
     /// The cells a window this wide has room for. The unified bar gives them up as it narrows, the
@@ -427,7 +452,7 @@ impl Chrome {
     pub fn status_cells(self, window_width: f32) -> StatusCells {
         match self {
             Chrome::Split => StatusCells::ALL,
-            Chrome::Unified => {
+            Chrome::Unified(_) => {
                 let room = window_width - self.lead() - ToolbarFit { visible: 0 }.cluster_width() - TOOLBAR_GROUP_GAP - Self::UNIFIED_END_W;
                 [StatusCells::ALL, StatusCells { size: false, ..StatusCells::ALL }, StatusCells { size: false, zoom: false, color: true }]
                     .into_iter()
@@ -440,10 +465,10 @@ impl Chrome {
     /// Width the groups of tools may take in a toolbar of `window_width`.
     fn cluster_room(self, window_width: f32) -> f32 {
         match self {
-            // Centred in the window: between two margins as wide as the traffic lights' (the
-            // Preferences button sits in the right one).
+            // Centred in the window: between two margins of the same width (the Preferences
+            // button sits in the right one).
             Chrome::Split => window_width - 2.0 * self.lead(),
-            Chrome::Unified => window_width - self.lead() - TOOLBAR_GROUP_GAP - self.status_cells(window_width).width(self) - Self::UNIFIED_END_W,
+            Chrome::Unified(_) => window_width - self.lead() - TOOLBAR_GROUP_GAP - self.status_cells(window_width).width(self) - Self::UNIFIED_END_W,
         }
     }
 
@@ -459,15 +484,14 @@ impl Chrome {
     }
 
     /// Where the groups of tools start, from the left edge of the toolbar. Split: centred in the
-    /// window, never under the traffic lights nor into the Preferences button. Unified: right after
-    /// the window buttons.
+    /// window, never into the Preferences button. Unified: right after its lead.
     pub fn cluster_left(self, window_width: f32, fit: ToolbarFit) -> f32 {
         match self {
             Chrome::Split => {
                 let last_left = window_width - TOOLBAR_EDGE - seg_group_w(1) - TOOLBAR_GROUP_GAP - fit.cluster_width();
                 ((window_width - fit.cluster_width()) / 2.0).min(last_left).max(self.lead())
             }
-            Chrome::Unified => self.lead(),
+            Chrome::Unified(_) => self.lead(),
         }
     }
 
@@ -476,7 +500,7 @@ impl Chrome {
         let cluster = ToolbarFit { visible: ToolbarFit::ALL }.cluster_width();
         match self {
             Chrome::Split => cluster + 2.0 * self.lead(),
-            Chrome::Unified => self.lead() + cluster + TOOLBAR_GROUP_GAP + StatusCells::ALL.width(self) + Self::UNIFIED_END_W,
+            Chrome::Unified(_) => self.lead() + cluster + TOOLBAR_GROUP_GAP + StatusCells::ALL.width(self) + Self::UNIFIED_END_W,
         }
     }
 }
@@ -596,7 +620,7 @@ mod tests {
     fn the_unified_window_is_the_picture_under_its_bar() {
         // The reference app's windows, measured on a screen with 1512 x 949 points free.
         let (screen, bar) = ((1512.0, 949.0), 52.0);
-        let open = |w: f32, h: f32| Chrome::Unified.editor_window((w, h), bar, screen);
+        let open = |w: f32, h: f32| MAC.editor_window((w, h), bar, screen);
         assert_eq!(open(1000.0, 600.0), (1000.0, 652.0));
         assert_eq!(open(1200.0, 700.0), (1200.0, 752.0));
         assert_eq!(open(800.0, 500.0), (836.0, 552.0), "narrower than the smallest window");
@@ -608,11 +632,15 @@ mod tests {
         }
         assert_eq!(open(300.0, 1500.0), (836.0, 837.0), "a tall one");
         assert_eq!(open(3000.0, 400.0).0, 1210.0, "a wide one");
+        // Windows opens the same windows: the lead changes the bar, not the window.
+        for picture in [(1000.0, 600.0), (200.0, 100.0), (2000.0, 1200.0), (300.0, 1500.0)] {
+            assert_eq!(WINDOWS.editor_window(picture, bar, screen), open(picture.0, picture.1), "{picture:?}");
+        }
     }
 
     #[test]
     fn the_unified_window_fits_a_screen_smaller_than_its_smallest_size() {
-        let (w, h) = Chrome::Unified.editor_window((300.0, 200.0), 52.0, (800.0, 500.0));
+        let (w, h) = MAC.editor_window((300.0, 200.0), 52.0, (800.0, 500.0));
         assert!(w <= 800.0 * 0.8 + 1.0 && h <= 500.0 - 112.0, "{w} x {h}");
     }
 
@@ -626,8 +654,10 @@ mod tests {
 
     #[test]
     fn a_picture_that_fits_touches_the_edges_only_in_the_unified_arrangement() {
-        assert_eq!(Chrome::Unified.fit_margin(true), 0.0);
-        assert_eq!(Chrome::Unified.fit_margin(false), UNIFIED_FIT_MARGIN);
+        for unified in [MAC, WINDOWS] {
+            assert_eq!(unified.fit_margin(true), 0.0);
+            assert_eq!(unified.fit_margin(false), UNIFIED_FIT_MARGIN);
+        }
         assert_eq!((Chrome::Split.fit_margin(true), Chrome::Split.fit_margin(false)), (SPLIT_FIT_MARGIN, SPLIT_FIT_MARGIN));
     }
 
@@ -813,8 +843,12 @@ mod tests {
         assert_eq!(OPTIONS_H, 48.0);
     }
 
-    // The split arrangement (Windows and Linux): the tools centred, the cells in the status bar.
+    // The split arrangement (Linux): the tools centred, the cells in the status bar.
     const SPLIT: Chrome = Chrome::Split;
+    // The unified arrangement: everything in one bar, after the window buttons (macOS) or the
+    // menu button (Windows).
+    const MAC: Chrome = Chrome::Unified(Lead::WindowButtons);
+    const WINDOWS: Chrome = Chrome::Unified(Lead::Menu);
 
     #[test]
     fn toolbar_shows_every_tool_when_the_window_is_wide_enough() {
@@ -850,20 +884,21 @@ mod tests {
         assert_eq!(SPLIT.toolbar_fit(0.0).visible, 0);
     }
 
-    // The unified arrangement (macOS): everything in one bar.
-
     #[test]
-    fn the_unified_bar_lays_out_from_the_window_buttons_to_the_cells_without_overlap() {
-        let unified = Chrome::Unified;
-        let mut w = 2000.0;
-        while w >= EDITOR_MIN_SIZE.0 {
-            let (fit, cells) = (unified.toolbar_fit(w), unified.status_cells(w));
-            let left = unified.cluster_left(w, fit);
-            assert_eq!(left, 86.0, "the tools start right after the window buttons");
-            let needed = left + fit.cluster_width() + TOOLBAR_GROUP_GAP + cells.width(unified) + TOOLBAR_EDGE;
-            assert!(needed <= w + 0.01, "fits at {w}: {fit:?} {cells:?} need {needed}");
-            assert!(cells.color, "the colour cell stays down to the smallest window ({w})");
-            w -= 7.0;
+    fn the_unified_bar_lays_out_from_its_lead_to_the_cells_without_overlap() {
+        assert_eq!(MAC.lead(), 86.0, "the window buttons");
+        assert_eq!(WINDOWS.lead(), TOOLBAR_EDGE + seg_group_w(1) + TOOLBAR_GROUP_GAP, "the menu button, set like a group of its own");
+        for unified in [MAC, WINDOWS] {
+            let mut w = 2000.0;
+            while w >= EDITOR_MIN_SIZE.0 {
+                let (fit, cells) = (unified.toolbar_fit(w), unified.status_cells(w));
+                let left = unified.cluster_left(w, fit);
+                assert_eq!(left, unified.lead(), "the tools start right after the lead");
+                let needed = left + fit.cluster_width() + TOOLBAR_GROUP_GAP + cells.width(unified) + TOOLBAR_EDGE;
+                assert!(needed <= w + 0.01, "{unified:?} fits at {w}: {fit:?} {cells:?} need {needed}");
+                assert!(cells.color, "the colour cell stays down to the smallest window ({w})");
+                w -= 7.0;
+            }
         }
     }
 
@@ -871,22 +906,27 @@ mod tests {
     fn the_unified_bar_gives_up_the_size_cell_first_and_then_the_zoom() {
         // A cell that goes leaves its room to the tools: the bar shows more of them just under
         // the width where the cell went.
-        assert!(Chrome::Unified.toolbar_fit(565.0).tools() > Chrome::Unified.toolbar_fit(570.0).tools());
-        let cells = |w: f32| Chrome::Unified.status_cells(w);
+        assert!(MAC.toolbar_fit(565.0).tools() > MAC.toolbar_fit(570.0).tools());
+        let cells = |w: f32| MAC.status_cells(w);
         assert_eq!(cells(1180.0), StatusCells::ALL);
         assert_eq!(cells(UNIFIED_OPEN_MIN.0), StatusCells::ALL);
         assert_eq!(cells(568.0), StatusCells::ALL);
         assert_eq!(cells(567.0), StatusCells { color: true, size: false, zoom: true });
         assert_eq!(cells(EDITOR_MIN_SIZE.0), StatusCells { color: true, size: false, zoom: true });
         assert_eq!(cells(461.0), StatusCells { color: true, size: false, zoom: false });
-        assert_eq!(StatusCells::ALL.width(Chrome::Unified), 272.0);
+        assert_eq!(StatusCells::ALL.width(MAC), 272.0);
+        // Windows has 30 points more before the cells, so each one goes 30 points later: the
+        // smallest window still shows the zoom.
+        assert_eq!(WINDOWS.status_cells(538.0), StatusCells::ALL);
+        assert_eq!(WINDOWS.status_cells(537.0), StatusCells { color: true, size: false, zoom: true });
+        assert_eq!(WINDOWS.status_cells(EDITOR_MIN_SIZE.0), StatusCells { color: true, size: false, zoom: true });
         assert_eq!(StatusCells::ALL.width(Chrome::Split), 320.0);
         assert_eq!(Chrome::Split.status_cells(EDITOR_MIN_SIZE.0), StatusCells::ALL, "a status bar always has room");
     }
 
     #[test]
     fn the_unified_bar_shows_every_tool_from_1152_points_and_eight_in_the_smallest_window_it_opens() {
-        let unified = Chrome::Unified;
+        let unified = MAC;
         assert_eq!(unified.full_toolbar_width(), 1152.0);
         assert!(!unified.toolbar_fit(1152.0).overflows() && unified.toolbar_fit(1151.0).overflows());
         // The reference app shows seven tools and its More button next to its three cells in a
@@ -894,6 +934,14 @@ mod tests {
         let smallest = unified.toolbar_fit(UNIFIED_OPEN_MIN.0);
         assert_eq!((smallest.tools(), smallest.actions()), (8, 0));
         assert_eq!(unified.toolbar_fit(EDITOR_MIN_SIZE.0).visible, 0, "the smallest window keeps Copy, Save, Pin, the handle and More");
+    }
+
+    #[test]
+    fn the_windows_bar_has_room_for_one_more_tool() {
+        assert_eq!(WINDOWS.full_toolbar_width(), 1122.0);
+        assert!(!WINDOWS.toolbar_fit(1122.0).overflows() && WINDOWS.toolbar_fit(1121.0).overflows());
+        let smallest = WINDOWS.toolbar_fit(UNIFIED_OPEN_MIN.0);
+        assert_eq!((smallest.tools(), smallest.actions()), (9, 0));
     }
 
     #[test]

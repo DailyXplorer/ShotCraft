@@ -551,7 +551,7 @@ pub fn center_main_window(_ctx: &eframe::egui::Context, size: impl Fn(f32, f32) 
 /// can't get taller than its screen, one that would end below the screen moves up, and a window
 /// in full screen is left alone.
 #[cfg(target_os = "macos")]
-pub fn grow_main_window(dy: f32) -> f32 {
+pub fn grow_main_window(_ctx: &eframe::egui::Context, dy: f32) -> f32 {
     use objc2::MainThreadMarker;
     use objc2_app_kit::{NSApplication, NSWindowStyleMask};
     use objc2_foundation::{NSPoint, NSRect, NSSize};
@@ -570,9 +570,85 @@ pub fn grow_main_window(dy: f32) -> f32 {
     (height - frame.size.height) as f32
 }
 
-/// Sizes the editor for its screen and centres it there. The screen size includes the taskbar or
+/// Windows: the part of a screen that windows may use (the screen without the taskbar), in
+/// pixels, for the screen holding a desktop point, or the main screen when none holds it.
+#[cfg(target_os = "windows")]
+fn work_area_at(x: f32, y: f32) -> Option<(i32, i32, u32, u32)> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTOPRIMARY};
+    let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+    // SAFETY: the point goes by value, and GetMonitorInfoW writes only into `info`, whose size it is told.
+    let found = unsafe {
+        let monitor = MonitorFromPoint(POINT { x: x.round() as i32, y: y.round() as i32 }, MONITOR_DEFAULTTOPRIMARY);
+        GetMonitorInfoW(monitor, &mut info).as_bool()
+    };
+    let area = info.rcWork;
+    found.then(|| (area.left, area.top, (area.right - area.left).max(0) as u32, (area.bottom - area.top).max(0) as u32))
+}
+
+/// Windows: what the system adds around the editor's own area, in points: the borders, and the
+/// title bar on top. Measured on the window; a window that can't be measured (minimized) gets
+/// the sizes of Windows 10 and 11.
+#[cfg(target_os = "windows")]
+fn window_frame(info: &eframe::egui::ViewportInfo) -> eframe::egui::Vec2 {
+    use eframe::egui::vec2;
+    const USUAL: eframe::egui::Vec2 = vec2(16.0, 39.0);
+    match (info.outer_rect, info.inner_rect) {
+        (Some(outer), Some(inner)) => Some(outer.size() - inner.size()).filter(|f| (0.0..=64.0).contains(&f.x) && (0.0..=120.0).contains(&f.y)).unwrap_or(USUAL),
+        _ => USUAL,
+    }
+}
+
+/// Windows: sizes the editor for its screen and puts it there, centred and a little above the
+/// middle, as on macOS. `size` gets what the screen has free for the editor's own area: the screen
+/// without the taskbar, less the window's title bar and borders.
+#[cfg(target_os = "windows")]
+pub fn center_main_window(ctx: &eframe::egui::Context, size: impl Fn(f32, f32) -> (f32, f32)) {
+    use eframe::egui::{pos2, vec2, ViewportCommand};
+    let info = ctx.input(|i| i.viewport().clone());
+    let frame = window_frame(&info);
+    let ppp = ctx.pixels_per_point().max(0.5);
+    // A window parked out of sight (the editor before its first show) is on no screen: it goes to the main one.
+    let centre = info.outer_rect.map_or(pos2(1.0, 1.0), |r| r.center());
+    let Some((x, y, w, h)) = work_area_at(centre.x * ppp, centre.y * ppp) else { return };
+    let (x, y, free_w, free_h) = (x as f32 / ppp, y as f32 / ppp, w as f32 / ppp, h as f32 / ppp);
+    let (w, h) = size((free_w - frame.x).max(1.0), (free_h - frame.y).max(1.0));
+    ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(w, h)));
+    let above = (free_h - h - frame.y).max(0.0) * crate::sizing::OPEN_SPACE_ABOVE;
+    ctx.send_viewport_cmd(ViewportCommand::OuterPosition(pos2(x + ((free_w - w - frame.x) / 2.0).max(0.0), y + above)));
+}
+
+/// Windows: makes the editor window `dy` points taller at its bottom edge (shorter for a negative
+/// `dy`), so that what it shows stays where it is on screen. Returns the points really added: a
+/// window can't get taller than its screen has room, one that would end below the taskbar moves
+/// up, and a maximized, full-screen or minimized window is left alone.
+#[cfg(target_os = "windows")]
+pub fn grow_main_window(ctx: &eframe::egui::Context, dy: f32) -> f32 {
+    use eframe::egui::{pos2, vec2, ViewportCommand};
+    let info = ctx.input(|i| i.viewport().clone());
+    let (Some(outer), Some(inner)) = (info.outer_rect, info.inner_rect) else { return 0.0 };
+    if [info.maximized, info.fullscreen, info.minimized].contains(&Some(true)) {
+        return 0.0;
+    }
+    let ppp = ctx.pixels_per_point().max(0.5);
+    let Some((_, y, _, h)) = work_area_at(outer.center().x * ppp, outer.center().y * ppp) else { return 0.0 };
+    let (free_top, free_h) = (y as f32 / ppp, h as f32 / ppp);
+    let frame = window_frame(&info);
+    let tallest = (free_h - frame.y).max(inner.height());
+    let height = (inner.height() + dy).min(tallest).max(crate::sizing::EDITOR_MIN_SIZE.1);
+    ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(inner.width(), height)));
+    // A window that already ends below the taskbar's edge is not pulled up for that.
+    let lowest = (free_top + free_h).max(outer.bottom());
+    let top = lowest - (outer.height() - inner.height() + height);
+    if dy > 0.0 && top < outer.top() {
+        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(pos2(outer.left(), top)));
+    }
+    height - inner.height()
+}
+
+/// Linux: sizes the editor for its screen and centres it there. The screen size includes the
 /// panel and the window's own title bar, so `CHROME` is kept free for them.
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 pub fn center_main_window(ctx: &eframe::egui::Context, size: impl Fn(f32, f32) -> (f32, f32)) {
     use eframe::egui::{pos2, vec2, ViewportCommand};
     const CHROME: f32 = 90.0;

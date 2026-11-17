@@ -1118,13 +1118,12 @@ impl App {
             let d = self.doc.as_ref().unwrap();
             (d.base.w as f32 / scale.max(1.0), d.base.h as f32 / scale.max(1.0))
         };
-        // macOS: the options bar is not counted, the window grows by it when it shows
-        // (`OptionsRoom` in `editor.rs`).
-        #[cfg(target_os = "macos")]
-        let chrome = editor::TOOLBAR_H;
-        // Windows and Linux: the editor's own menu bar too.
-        #[cfg(not(target_os = "macos"))]
-        let chrome = editor::MENUBAR_H + editor::TOOLBAR_H + editor::OPTIONS_H + editor::STATUS_H;
+        let chrome = match sizing::CHROME {
+            // The options bar is not counted, the window grows by it when it shows (`OptionsRoom`
+            // in `editor.rs`).
+            sizing::Chrome::Unified(_) => editor::TOOLBAR_H,
+            sizing::Chrome::Split => editor::MENUBAR_H + editor::TOOLBAR_H + editor::OPTIONS_H + editor::STATUS_H,
+        };
         system::center_main_window(&self.ctx, |screen_w, screen_h| {
             sizing::CHROME.editor_window((w, h), chrome, (screen_w, screen_h))
         });

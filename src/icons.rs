@@ -62,6 +62,9 @@ pub enum Icon {
     ZoomIn,
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     ZoomOut,
+    // Drawn for the unified bar's menu button (Windows).
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    Menu,
     DragFile,
     Info,
 }
@@ -145,6 +148,7 @@ fn svg(icon: Icon) -> Option<&'static str> {
         Icon::Redo => Some(include_str!("../assets/icons/redo.svg")),
         Icon::ZoomIn => Some(include_str!("../assets/icons/zoom_in.svg")),
         Icon::ZoomOut => Some(include_str!("../assets/icons/zoom_out.svg")),
+        Icon::Menu => Some(include_str!("../assets/icons/menu.svg")),
         Icon::DragFile => Some(include_str!("../assets/icons/drag_file.svg")),
         Icon::Info => Some(include_str!("../assets/icons/info.svg")),
         _ => None,
