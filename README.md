@@ -167,7 +167,8 @@ ShotCraft makes no network connections of its own: the source contains no networ
 ## Requirements
 
 * macOS 12 or later (`LSMinimumSystemVersion` in `packaging/Info.plist`).
-* The [Rust](https://rustup.rs) toolchain to build from source.
+* On Windows: Windows 10 version 1809 or later, or Windows 11, 64-bit. Nothing else has to be installed.
+* The [Rust](https://rustup.rs) toolchain to build from source. ShotCraft itself needs no Rust on the computer that runs it.
 
 ## Install
 
@@ -180,9 +181,23 @@ ShotCraft is signed with its own certificate, not an Apple Developer ID, and it 
 
 You only need to do this the first time.
 
+### Install on Windows
+
+Download `ShotCraft-<version>-Setup.exe` from the [Releases page](https://github.com/DailyXplorer/ShotCraft/releases/latest) and run it. Releases after 0.2.3 have it.
+
+* The installer asks for no administrator rights: it installs ShotCraft for your Windows account, in `%LOCALAPPDATA%\Programs\ShotCraft`. To install it for every account, run it from an administrator prompt with `/ALLUSERS`.
+* Nothing else has to be installed first. `shotcraft.exe` is a native Windows program: it needs no Rust, no .NET and no Visual C++ runtime.
+* ShotCraft reads text in pictures with Windows' own text recognition. If Windows has none for your language, the installer says so and offers to install it. Windows then asks for administrator rights and downloads it. If you answer no, everything else works, and you can add it later in Settings > Time & language > Language & region.
+* Explorer then lists ShotCraft under Open with for PNG, JPEG, GIF, BMP, TIFF and WebP pictures. It does not become the default app for them.
+* The installer is not signed with a code signing certificate, so Windows SmartScreen may stop it the first time with "Windows protected your PC". Click More info, then Run anyway.
+
+To update, run the installer of the newer version: it asks before it closes ShotCraft, replaces it and keeps your settings. To remove ShotCraft, use Settings > Apps > Installed apps. The uninstaller asks whether to remove your settings too.
+
 ## Windows and Linux
 
-ShotCraft also runs on Windows 10 and 11 and on Linux (X11; Wayland with limits, below). It lives in the system tray instead of the menu bar: start `shotcraft.exe` (Windows) or `shotcraft` (Linux) and its icon appears there, with every command in its menu. Starting it again while it runs changes nothing, as on macOS.
+ShotCraft also runs on Windows 10 and 11 and on Linux (X11; Wayland with limits, below). It lives in the system tray instead of the menu bar: start ShotCraft from the Start menu (Windows) or run `shotcraft` (Linux) and its icon appears there, with every command in its menu. Starting it again while it runs changes nothing, as on macOS.
+
+**The editor.** On Windows the editor has the same single bar as on macOS, and its window opens at the size of the picture. The button at the left end of the bar opens the menus (ShotCraft, Capture, File, Edit, Draw, Zoom, Help). On Linux the editor has a menu bar, the tools centred under it and a status bar at the bottom.
 
 **Keep the tray icon in sight (Windows 11).** Windows puts every new tray icon in the hidden overflow, the ^ next to the clock, and lets no app pin itself. To see ShotCraft's icon, and the check mark it shows for a moment after a copy or a save, turn it on in Settings > Personalization > Taskbar > Other system tray icons > ShotCraft ("Taskbar corner overflow" on older versions of Windows 11), or drag the icon from the ^ panel onto the taskbar. On Windows 10 the setting is Settings > Personalization > Taskbar > Select which icons appear on the taskbar.
 
@@ -201,6 +216,12 @@ ShotCraft also runs on Windows 10 and 11 and on Linux (X11; Wayland with limits,
 
 The script runs `cargo build --release`, assembles the app bundle and signs it ad hoc (no developer certificate).
 
+On Windows, `cargo build --release` builds `target\release\shotcraft.exe`, which runs as it is. To build the installer too, install [Inno Setup 6](https://jrsoftware.org/isinfo.php) (`winget install JRSoftware.InnoSetup`) and run:
+
+```powershell
+scripts\windows\make-installer.ps1   # builds target\dist\ShotCraft-<version>-Setup.exe
+```
+
 The app icon, window icon and menu bar icon are drawn in `assets/logo/*.svg`. After changing them, run `node scripts/make-icons.mjs` on a Mac (it needs Playwright and `iconutil`) to rewrite `assets/AppIcon.icns`, `assets/window-icon.png` and `assets/menubar.png`.
 
 ## Permissions
@@ -217,9 +238,11 @@ Releases are signed with a ShotCraft certificate rather than an Apple Developer 
 
 Updates come through [Sparkle](https://sparkle-project.org), which installs a new version only if its Ed25519 signature matches the key inside the app. On the second launch the app asks whether to check automatically. A check tells GitHub your IP address and the app version, and sends nothing else. Change your choice with Check for Updates Automatically in the menu bar icon menu, or use Check for Updates there at any time. Builds from `make-app.sh` do not include Sparkle.
 
+The Windows and Linux versions have no updater and connect to nothing. On Windows, run the installer of the newer version.
+
 ## Releasing
 
-Set the version in `Cargo.toml`, then push a tag such as `v0.2.3`. The Release workflow tests, signs and publishes the app. The tag must match the version.
+Set the version in `Cargo.toml`, then push a tag such as `v0.2.3`. The Release workflow tests on macOS and on Windows, signs the macOS app, builds the Windows installer and publishes both. The tag must match the version.
 
 ## Credits
 
