@@ -84,6 +84,62 @@ jobs:
           path: target/dist/
           retention-days: 1
 
+  # Windows: the same tests, on a real desktop. No secret is used here.
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Cache the Rust build
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: windows
+          save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'pull_request' }}
+
+      - name: Test
+        run: cargo test
+
+      - name: Time one look of a scrolling capture
+        if: ${{ !cancelled() }}
+        run: cargo test how_long_a_look_takes -- --ignored --nocapture
+
+      - name: Compare the app's windows with the reference pictures
+        if: ${{ !cancelled() }}
+        run: cargo test --test ui_snapshots -- --ignored
+
+      - name: Draw the app's windows again, to look at
+        if: ${{ !cancelled() }}
+        env:
+          SHOTCRAFT_UPDATE_REFERENCES: "1"
+        run: cargo test --test ui_snapshots -- --ignored
+
+      - name: Show the editor on the desktop
+        if: ${{ !cancelled() }}
+        run: |
+          $app = Start-Process target\debug\shotcraft.exe -PassThru -ArgumentList tests\reference\export\tour.png
+          Start-Sleep -Seconds 8
+          scripts\windows\desktop-shot.ps1 -Path target\looks\editor-on-the-desktop.png
+          Stop-Process -Id $app.Id -Force
+
+      - name: Scrolling capture of a real page
+        if: ${{ !cancelled() }}
+        run: scripts\windows\live-scroll.ps1 -Out target\looks\live-scroll
+
+      - name: Keep the pictures
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-looks
+          path: |
+            tests/reference/ui-windows/
+            target/tmp/visual-diffs/
+            target/looks/
+          retention-days: 7
+
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: package
