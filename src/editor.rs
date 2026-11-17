@@ -147,7 +147,7 @@ pub struct Editor {
     custom_color: Color32,
     canvas: Rect,
     options_w: f32,
-    /// macOS: where the options bar stands with the window that makes room for it.
+    /// Unified arrangement: where the options bar stands with the window that makes room for it.
     #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
     options_room: OptionsRoom,
     ruler_sensitivity: f32,
@@ -2507,8 +2507,8 @@ impl App {
         let Some(doc) = &self.doc else { return };
         let content = self.ed.rect_screen(&self.ed.view_area(doc));
         let rect = self.ed.canvas;
-        let dx = scroll_limit(rect.left(), rect.right(), content.left(), content.right(), d.x, SCROLL_MARGIN);
-        let dy = scroll_limit(rect.top(), rect.bottom(), content.top(), content.bottom(), d.y, SCROLL_MARGIN);
+        let dx = scroll_limit(rect.left(), rect.right(), content.left(), content.right(), d.x, SCROLL_MARGIN, SCROLL_SLACK);
+        let dy = scroll_limit(rect.top(), rect.bottom(), content.top(), content.bottom(), d.y, SCROLL_MARGIN, SCROLL_SLACK);
         if dx != 0.0 || dy != 0.0 {
             self.ed.pan += vec2(dx, dy);
             self.ed.fit = false;
@@ -4818,8 +4818,9 @@ mod scrollbar_tests {
 
     #[test]
     fn a_scroll_stops_at_the_ends_of_the_picture() {
-        // A window 0..600 with a margin of 24 and a picture 0..6000 tall, its top at the margin.
-        let limit = |c_lo: f32, c_hi: f32, d: f32| scroll_limit(0.0, 600.0, c_lo, c_hi, d, 24.0);
+        // A window 0..600 with a margin of 24, as the split arrangement has, and a picture 0..6000
+        // tall, its top at the margin.
+        let limit = |c_lo: f32, c_hi: f32, d: f32| scroll_limit(0.0, 600.0, c_lo, c_hi, d, 24.0, 48.0);
         assert_eq!(limit(24.0, 6024.0, 100.0), 0.0, "nothing above the top");
         assert_eq!(limit(24.0, 6024.0, -100.0), -100.0);
         // Near the end: only as far as the bottom edge at 576.
@@ -4829,8 +4830,12 @@ mod scrollbar_tests {
         // Already past the end (dragged there): it may come back, not go further.
         assert_eq!(limit(-5600.0, 400.0, -10.0), 0.0);
         assert_eq!(limit(-5600.0, 400.0, 50.0), 50.0);
-        // A smaller margin lets the edge go that much nearer the window's.
-        assert_eq!(scroll_limit(0.0, 600.0, 9.0, 6009.0, -6000.0, 9.0), -5418.0);
+        // The unified arrangement: a picture that fills the window stays put, and a longer one
+        // stops 9 points from the window's edges.
+        let unified = |c_lo: f32, c_hi: f32, d: f32| scroll_limit(0.0, 600.0, c_lo, c_hi, d, 9.0, 0.0);
+        assert_eq!(unified(0.0, 600.0, -50.0), 0.0, "as tall as the window");
+        assert_eq!(unified(9.0, 591.0, 50.0), 0.0, "shrunk to fit");
+        assert_eq!(unified(9.0, 6009.0, -6000.0), -5418.0);
     }
     #[test]
     fn a_picture_that_fits_has_no_bars() {
@@ -4864,15 +4869,20 @@ mod scrollbar_tests {
 /// at its first stop.
 #[cfg(not(target_os = "macos"))]
 const SCROLL_MARGIN: f32 = CHROME.fit_margin(false) / 2.0;
+/// ... and how much shorter than the window a picture is, at most, when the fit shows it whole at
+/// its own size. Such a picture does not scroll: in the unified arrangement it fills the window.
+#[cfg(not(target_os = "macos"))]
+const SCROLL_SLACK: f32 = CHROME.fit_margin(true);
 
 /// How far a scroll of `d` may move a picture spanning `c_lo..c_hi` on screen, in a window
-/// spanning `lo..hi`, along one axis. A picture longer than the window stops with its edge
-/// `margin` from the window's; one that fits doesn't scroll. A picture already past a stop
-/// (moved with Space+drag, or zoomed) may come back but never go further.
+/// spanning `lo..hi`, along one axis. A picture no longer than the window less `slack` is whole
+/// in it and doesn't scroll. A longer one stops with its edge `margin` from the window's. A
+/// picture already past a stop (moved with Space+drag, or zoomed) may come back but never go
+/// further.
 #[cfg(not(target_os = "macos"))]
-fn scroll_limit(lo: f32, hi: f32, c_lo: f32, c_hi: f32, d: f32, margin: f32) -> f32 {
+fn scroll_limit(lo: f32, hi: f32, c_lo: f32, c_hi: f32, d: f32, margin: f32, slack: f32) -> f32 {
     let size = c_hi - c_lo;
-    if size <= hi - lo - 2.0 * margin {
+    if size <= hi - lo - slack {
         return 0.0;
     }
     // Where the picture's first edge may be: from showing its end to showing its start.
