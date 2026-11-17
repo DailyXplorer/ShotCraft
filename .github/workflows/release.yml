@@ -100,6 +100,12 @@ jobs:
           shared-key: windows
           save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'pull_request' }}
 
+      # The reference pictures of the app's windows are larger than the runner's 1024 x 768 screen.
+      - name: Set the display to 1920 x 1080
+        run: |
+          Set-DisplayResolution -Width 1920 -Height 1080 -Force
+          Get-DisplayResolution
+
       - name: Test
         run: cargo test
 
@@ -109,35 +115,40 @@ jobs:
 
       - name: Compare the app's windows with the reference pictures
         if: ${{ !cancelled() }}
-        run: cargo test --test ui_snapshots -- --ignored
-
-      - name: Draw the app's windows again, to look at
-        if: ${{ !cancelled() }}
+        continue-on-error: true
         env:
-          SHOTCRAFT_UPDATE_REFERENCES: "1"
+          SHOTCRAFT_UI_PICTURES: target/looks/windows
         run: cargo test --test ui_snapshots -- --ignored
 
-      - name: Show the editor on the desktop
+      - name: The editor window on the desktop
         if: ${{ !cancelled() }}
-        run: |
-          $app = Start-Process target\debug\shotcraft.exe -PassThru -ArgumentList tests\reference\export\tour.png
-          Start-Sleep -Seconds 8
-          scripts\windows\desktop-shot.ps1 -Path target\looks\editor-on-the-desktop.png
-          Stop-Process -Id $app.Id -Force
+        run: scripts\windows\check-editor.ps1 -Out target\looks\editor
 
       - name: Scrolling capture of a real page
         if: ${{ !cancelled() }}
         run: scripts\windows\live-scroll.ps1 -Out target\looks\live-scroll
+
+      - name: What this machine has (temporary)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        shell: powershell
+        run: |
+          [void][Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime]
+          $languages = [Windows.Media.Ocr.OcrEngine]::AvailableRecognizerLanguages
+          "OCR languages: $($languages.Count) $($languages | ForEach-Object LanguageTag)"
+          "User languages: $((Get-WinUserLanguageList).LanguageTag)"
+          Get-WindowsCapability -Online -Name 'Language.OCR*' | Format-Table Name, State
+          "winget: $(try { winget --version } catch { 'none' })"
+          "Inno Setup: $(Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe") $((Get-Command iscc -ErrorAction SilentlyContinue).Source)"
+          "choco: $((Get-Command choco -ErrorAction SilentlyContinue).Source)"
+          [System.Environment]::OSVersion.Version
 
       - name: Keep the pictures
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-looks
-          path: |
-            tests/reference/ui-windows/
-            target/tmp/visual-diffs/
-            target/looks/
+          path: target/looks/
           retention-days: 7
 
   publish:

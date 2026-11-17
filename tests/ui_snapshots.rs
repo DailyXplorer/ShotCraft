@@ -9,6 +9,8 @@
 //! References live in `tests/reference/ui-<system>/`; a system without any is skipped. After a change
 //! on purpose, rewrite them with `SHOTCRAFT_UPDATE_REFERENCES=1` and look at them before committing.
 //! A failure leaves the new picture and a red-marked difference in `target/tmp/visual-diffs/`.
+//! `SHOTCRAFT_UI_PICTURES=folder` keeps every picture drawn, passing or not: a build machine has
+//! no screen to watch.
 #[path = "../src/visual.rs"]
 mod visual;
 
@@ -78,6 +80,7 @@ fn windows_match_the_reference_pictures() {
     std::fs::create_dir_all(&work).unwrap();
     let pic = sample(&work);
     let pic = Some(pic.as_path());
+    let keep = std::env::var_os("SHOTCRAFT_UI_PICTURES").map(PathBuf::from);
 
     // (name, hook, with a picture open). Every hook is the app's own `SHOTCRAFT_*` test switch.
     let cases: &[(&str, &[(&str, &str)], bool)] = &[
@@ -105,6 +108,10 @@ fn windows_match_the_reference_pictures() {
         match shoot(&work, name, env, with_picture.then_some(pic).flatten()) {
             // A few pixels of leeway for text smoothing; a changed letter, a moved or missing control is more.
             Ok(img) => {
+                if let Some(dir) = &keep {
+                    std::fs::create_dir_all(dir).expect("the folder for the pictures");
+                    img.save(dir.join(format!("{name}.png"))).expect("keep the picture");
+                }
                 if let Err(e) = visual::check(name, &img, &refs, 8, 0.00001) {
                     failures.push(e);
                 }
