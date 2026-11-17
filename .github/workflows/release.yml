@@ -84,75 +84,62 @@ jobs:
           path: target/dist/
           retention-days: 1
 
-  # Windows: the same tests, on a real desktop. No secret is used here.
+  # Windows: the tests, then the checks that need a real desktop, then the installer. No secret is
+  # used here.
   windows:
     runs-on: windows-2025
-    timeout-minutes: 60
+    timeout-minutes: 75
     steps:
       - name: Check out
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
 
+      # A desktop check that fails must not cost the next run its build.
       - name: Cache the Rust build
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: windows
+          cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'pull_request' }}
 
       # The reference pictures of the app's windows are larger than the runner's 1024 x 768 screen.
       - name: Set the display to 1920 x 1080
-        run: |
-          Set-DisplayResolution -Width 1920 -Height 1080 -Force
-          Get-DisplayResolution
+        run: Set-DisplayResolution -Width 1920 -Height 1080 -Force
 
       - name: Test
         run: cargo test
 
       - name: Time one look of a scrolling capture
-        if: ${{ !cancelled() }}
         run: cargo test how_long_a_look_takes -- --ignored --nocapture
 
       - name: Compare the app's windows with the reference pictures
         if: ${{ !cancelled() }}
         continue-on-error: true
+        timeout-minutes: 12
         env:
           SHOTCRAFT_UI_PICTURES: target/looks/windows
         run: cargo test --test ui_snapshots -- --ignored
 
       - name: The editor window on the desktop
         if: ${{ !cancelled() }}
+        timeout-minutes: 5
         run: scripts\windows\check-editor.ps1 -Out target\looks\editor
 
       - name: Scrolling capture of a real page
         if: ${{ !cancelled() }}
+        timeout-minutes: 5
         run: scripts\windows\live-scroll.ps1 -Out target\looks\live-scroll
 
-      - name: What this machine has (temporary)
-        if: ${{ !cancelled() }}
-        continue-on-error: true
-        shell: powershell
-        run: |
-          [void][Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime]
-          $languages = [Windows.Media.Ocr.OcrEngine]::AvailableRecognizerLanguages
-          "OCR languages: $($languages.Count) $($languages | ForEach-Object LanguageTag)"
-          "User languages: $((Get-WinUserLanguageList).LanguageTag)"
-          Get-WindowsCapability -Online -Name 'Language.OCR*' | Format-Table Name, State
-          "winget: $(try { winget --version } catch { 'none' })"
-          "Inno Setup: $(Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe") $((Get-Command iscc -ErrorAction SilentlyContinue).Source)"
-          "choco: $((Get-Command choco -ErrorAction SilentlyContinue).Source)"
-          [System.Environment]::OSVersion.Version
-
       - name: Build the installer
-        run: |
-          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup --no-progress -y }
-          scripts\windows\make-installer.ps1
+        run: scripts\windows\make-installer.ps1
 
       - name: Install, update and uninstall ShotCraft
-        run: scripts\windows\check-installer.ps1 -Out target\looks\installer
+        timeout-minutes: 20
+        run: scripts\windows\check-installer.ps1 -Out target\looks\installer -TextRecognition
 
       - name: Keep the pictures
-        if: ${{ !cancelled() }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-looks

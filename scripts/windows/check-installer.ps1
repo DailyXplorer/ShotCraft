@@ -6,7 +6,15 @@
 #   4. uninstalling removes all of that, with what ShotCraft registered by itself, and keeps the
 #      user's settings.
 # Do not run it on a PC where ShotCraft is installed: it uninstalls it.
-param([string]$Setup = (Get-ChildItem 'target\dist\ShotCraft-*-Setup.exe' | Select-Object -Last 1).FullName, [string]$Out = 'target\check-installer')
+#
+# -TextRecognition also tries the installer's offer of Windows' text recognition. It is for a
+# build machine only: it makes French the account's only language for a moment and has Windows
+# install text recognition for it, which needs administrator rights and Windows Update.
+param(
+    [string]$Setup = (Get-ChildItem 'target\dist\ShotCraft-*-Setup.exe' | Select-Object -Last 1).FullName,
+    [string]$Out = 'target\check-installer',
+    [switch]$TextRecognition
+)
 $ErrorActionPreference = 'Stop'
 Add-Type @'
 using System;
@@ -57,9 +65,21 @@ function Check([bool]$ok, [string]$what) {
     if ($ok) { Write-Host "ok    $what" } else { Write-Host "FAIL  $what"; $script:failed += $what }
 }
 function Running { @(Get-Process shotcraft -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe }) }
-function Install([string]$log) {
-    $run = Start-Process $Setup -PassThru -Wait -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/TEXTRECOGNITION=skip', "/LOG=`"$Out\$log`""
-    $run.ExitCode
+# Runs a program and gives its exit code, or "still running" after ten minutes. Start-Process -Wait
+# would also wait for what the program starts, and an update starts ShotCraft again.
+function Run([string]$program, [string]$arguments) {
+    $start = New-Object System.Diagnostics.ProcessStartInfo $program, $arguments
+    $start.UseShellExecute = $false
+    $run = [System.Diagnostics.Process]::Start($start)
+    if ($run.WaitForExit(600000)) { $run.ExitCode } else { 'still running' }
+}
+function Install([string]$log, [string]$textRecognition = 'skip') {
+    Run $Setup "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TEXTRECOGNITION=$textRecognition /LOG=`"$Out\$log`""
+}
+# What the installer asks Windows: 0 when it reads text in the account's language, 3 when it does not.
+function ReadsText {
+    powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PSScriptRoot\..\..\packaging\windows\ocr.ps1" -Check | Out-Null
+    $LASTEXITCODE
 }
 
 try {
@@ -88,11 +108,25 @@ try {
     $after = (Running).Id
     Check ($after.Count -eq 1 -and $after -ne $before) 'the update stopped the running ShotCraft and started the new one'
 
+    if ($TextRecognition) {
+        # Windows PowerShell has the language commands; PowerShell 7 only borrows them.
+        $languages = powershell.exe -NoProfile -Command "(Get-WinUserLanguageList).LanguageTag -join ','"
+        try {
+            powershell.exe -NoProfile -Command "Set-WinUserLanguageList fr-FR -Force"
+            Check ((ReadsText) -eq 3) 'Windows has no text recognition for French on this machine'
+            Check ((Install 'no-text-recognition.log' 'ask') -eq 0) 'an unattended install takes the question about text recognition as a no'
+            Check ((ReadsText) -eq 3) 'and leaves Windows as it is'
+            Check ((Install 'text-recognition.log' 'install') -eq 0) 'the installer runs when told to install text recognition'
+            Check ((ReadsText) -eq 0) 'after it, Windows reads text in French'
+        } finally {
+            powershell.exe -NoProfile -Command "Set-WinUserLanguageList $languages -Force"
+        }
+    }
+
     $uninstaller = Get-ChildItem "$folder\unins*.exe" | Select-Object -First 1
     Check ($null -ne $uninstaller) 'the uninstaller is there'
     if ($uninstaller) {
-        $run = Start-Process $uninstaller.FullName -PassThru -Wait -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
-        Check ($run.ExitCode -eq 0) 'the uninstaller runs without a question'
+        Check ((Run $uninstaller.FullName '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART') -eq 0) 'the uninstaller runs without a question'
         # It finishes from a copy of itself in the temporary folder.
         $until = (Get-Date).AddSeconds(30)
         while ((Test-Path $folder) -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 500 }
