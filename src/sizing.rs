@@ -262,6 +262,26 @@ pub enum Lead {
     Menu,
 }
 
+/// Where a window of `outer` size opens in the free area of a screen (`origin` and `size`, the
+/// screen without its bars): centred, with `OPEN_SPACE_ABOVE` of the free height above it. A
+/// window larger than the area starts at its corner.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn open_origin(origin: Size, size: Size, outer: Size) -> Size {
+    (origin.0 + ((size.0 - outer.0) / 2.0).max(0.0), origin.1 + (size.1 - outer.1).max(0.0) * OPEN_SPACE_ABOVE)
+}
+
+/// The top and the height of a window that spans `top..top + height` once it is asked for `dy`
+/// more at its bottom edge (less for a negative `dy`). The screen has `free_height` for windows
+/// from `free_top` down. The window gets no taller than that (or than it already is) and no
+/// shorter than `smallest`. One that would end below the free area moves up instead; one that
+/// already ends below it is not pulled up, and a window that shrinks keeps its top.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn grow_at_bottom(top: f32, height: f32, dy: f32, smallest: f32, free_top: f32, free_height: f32) -> Size {
+    let grown = (height + dy).min(free_height.max(height)).max(smallest);
+    let lowest = (free_top + free_height).max(top + height);
+    (if dy > 0.0 { top.min(lowest - grown) } else { top }, grown)
+}
+
 /// How the editor's chrome is arranged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Chrome {
@@ -659,6 +679,31 @@ mod tests {
             assert_eq!(unified.fit_margin(false), UNIFIED_FIT_MARGIN);
         }
         assert_eq!((Chrome::Split.fit_margin(true), Chrome::Split.fit_margin(false)), (SPLIT_FIT_MARGIN, SPLIT_FIT_MARGIN));
+    }
+
+    #[test]
+    fn a_window_opens_centred_a_little_above_the_middle() {
+        // A screen of 1920 x 1040 free under a 40 point bar at its top.
+        let at = open_origin((0.0, 40.0), (1920.0, 1040.0), (920.0, 600.0));
+        assert_eq!(at.0, 500.0, "as much free on the left as on the right");
+        assert_eq!(at.1, 40.0 + 440.0 * OPEN_SPACE_ABOVE, "less free above than below");
+        assert!(at.1 - 40.0 < 220.0);
+        // A second screen to the left of the main one.
+        assert_eq!(open_origin((-1920.0, 0.0), (1920.0, 1080.0), (920.0, 580.0)).0, -1420.0);
+        assert_eq!(open_origin((0.0, 0.0), (800.0, 600.0), (900.0, 700.0)), (0.0, 0.0), "larger than the screen");
+    }
+
+    #[test]
+    fn a_window_grows_at_its_bottom_edge_and_stays_on_its_screen() {
+        // A screen with 1000 points free from the top; the window is 600 tall and at least 300.
+        let grow = |top: f32, height: f32, dy: f32| grow_at_bottom(top, height, dy, 300.0, 0.0, 1000.0);
+        assert_eq!(grow(100.0, 600.0, 48.0), (100.0, 648.0), "room below: the top stays");
+        assert_eq!(grow(100.0, 648.0, -48.0), (100.0, 600.0), "and the points come back");
+        assert_eq!(grow(380.0, 600.0, 48.0), (352.0, 648.0), "it would end below the screen: it moves up");
+        assert_eq!(grow(0.0, 980.0, 48.0), (0.0, 1000.0), "no taller than the screen");
+        assert_eq!(grow(0.0, 1000.0, 48.0), (0.0, 1000.0), "no room at all");
+        assert_eq!(grow(500.0, 600.0, 48.0), (452.0, 648.0), "already below the edge: not pulled up, only kept from going lower");
+        assert_eq!(grow(100.0, 320.0, -48.0), (100.0, 300.0), "no shorter than the smallest window");
     }
 
     #[test]

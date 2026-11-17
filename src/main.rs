@@ -2296,6 +2296,9 @@ fn main() -> eframe::Result {
                     // X11: the editor's window, to bring it to the front for a capture.
                     x11_front::remember(cc);
                 }
+                // The editor's window, to size it for a picture.
+                #[cfg(target_os = "windows")]
+                system::remember_editor_window(cc);
                 let app = App::new(cc, screenshot, show_at_start, open);
                 if let Some(i) = instance {
                     i.listen(app.queue.clone(), app.ctx.clone(), url_scheme::submit, url_scheme::submit_file);
