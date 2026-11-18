@@ -511,12 +511,29 @@ fn tool_group(ui: &mut Ui, items: &[(Icon, &str, bool)], t: &Th, seg_w: f32) -> 
         let (tile, ink) = button_colours(t, *sel, resp.hovered());
         ui.painter().rect_filled(r.shrink2(vec2(1.0, 0.0)), 6.0, tile);
         icons::draw(ui.painter(), Rect::from_center_size(r.center(), vec2(18.0, 18.0)), *icon, ink);
-        let resp = if tip.is_empty() { resp } else { resp.on_hover_text(*tip) };
-        if resp.clicked() {
+        if with_tip(resp, tip).clicked() {
             clicked = Some(i);
         }
     }
     clicked
+}
+
+/// What a toolbar button's tooltip says. The texts are written the macOS way ("Save (⌘S)"):
+/// Windows and Linux read ⌘ as Ctrl.
+fn tip_text(tip: &str) -> std::borrow::Cow<'_, str> {
+    #[cfg(target_os = "macos")]
+    return std::borrow::Cow::Borrowed(tip);
+    #[cfg(not(target_os = "macos"))]
+    crate::settings::keys(tip)
+}
+
+/// A toolbar button with its tooltip, in either arrangement.
+fn with_tip(resp: Response, tip: &str) -> Response {
+    if tip.is_empty() {
+        resp
+    } else {
+        resp.on_hover_text(tip_text(tip).into_owned())
+    }
 }
 
 /// A row of icon segments framed like a macOS segmented control; returns the clicked index.
@@ -538,12 +555,7 @@ fn segments(ui: &mut Ui, items: &[(Icon, &str, bool)], t: &Th, seg_w: f32) -> Op
         };
         ui.painter().rect_filled(r, 5.0, bg);
         icons::draw(ui.painter(), Rect::from_center_size(r.center(), vec2(17.0, 17.0)), *icon, if *sel { Color32::WHITE } else { t.text });
-        #[cfg(target_os = "macos")]
-        let resp = if tip.is_empty() { resp } else { resp.on_hover_text(*tip) };
-        // Windows and Linux: the tooltips' ⌘ keys read as Ctrl.
-        #[cfg(not(target_os = "macos"))]
-        let resp = if tip.is_empty() { resp } else { resp.on_hover_text(crate::settings::keys(tip).into_owned()) };
-        if resp.clicked() {
+        if with_tip(resp, tip).clicked() {
             clicked = Some(i);
         }
     }
@@ -4721,6 +4733,26 @@ mod toolbar_look_tests {
             rig.render_window(size, 2.0, vec![Event::PointerGone], |ui| app.editor_ui(ui));
             assert!(!egui::Popup::is_any_open(&rig.ctx), "the menus close after a command");
         });
+    }
+
+    /// The toolbar's tooltips name their keys the way the system writes them, in both
+    /// arrangements: ⌘ on macOS, Ctrl on Windows and Linux.
+    #[test]
+    fn toolbar_tooltips_name_the_keys_of_this_system() {
+        let tips = ["Copy (Esc or ⌘C)", "Save (⌘S)", "Pin to Screen (⌘P)", Tool::Ocr.tooltip(), Tool::Arrow.tooltip()];
+        for tip in tips {
+            let shown = tip_text(tip);
+            if cfg!(target_os = "macos") {
+                assert_eq!(shown, tip);
+            } else {
+                assert!(!shown.contains('⌘'), "{shown}");
+            }
+        }
+        if cfg!(not(target_os = "macos")) {
+            assert_eq!(tip_text("Save (⌘S)"), "Save (Ctrl+S)");
+            assert_eq!(tip_text("Copy (Esc or ⌘C)"), "Copy (Esc or Ctrl+C)");
+        }
+        assert_eq!(tip_text("Arrow (A)"), "Arrow (A)");
     }
 
     /// Where the drag handle sits in a toolbar of this width (under the menu bar, where there is one).
