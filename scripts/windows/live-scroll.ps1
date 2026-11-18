@@ -21,7 +21,17 @@ $profile = Join-Path ([IO.Path]::GetTempPath()) "shotcraft-live-scroll-$PID"
 $shown = Start-Process $browser -PassThru -ArgumentList '--kiosk', '--no-first-run', '--no-default-browser-check', "--user-data-dir=$profile", $url
 $code = 1
 try {
-    Start-Sleep -Seconds 10
+    # A browser's first start can take a while: wait for its window, which is named after the page.
+    $until = (Get-Date).AddSeconds(90)
+    do {
+        Start-Sleep -Milliseconds 500
+        $window = Get-Process (Split-Path -Leaf $browser).Replace('.exe', '') -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -like '*ShotCraft scrolling test page*' }
+    } until ($window -or (Get-Date) -gt $until)
+    if (-not $window) {
+        & "$PSScriptRoot\desktop-shot.ps1" -Path "$Out\no-browser.png"
+        throw 'The browser did not show the test page within 90 seconds: nothing was captured.'
+    }
+    Start-Sleep -Seconds 3
     & "$PSScriptRoot\desktop-shot.ps1" -Path "$Out\before.png"
     Add-Type -AssemblyName System.Windows.Forms
     $screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
