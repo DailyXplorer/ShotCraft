@@ -101,7 +101,7 @@ ShotCraft for Windows ships as `ShotCraft-<version>-Setup.exe`, built by `script
 
 * It installs for the current user, without administrator rights. Its one question is whether to add a desktop shortcut. `/ALLUSERS` on the command line installs for everyone.
 * Nothing has to be installed first. `shotcraft.exe` is a native Windows program: it needs no Rust, no .NET and no Visual C++ runtime on the PC. The C runtime is linked into it, and the installer build fails if that stops being true.
-* The one thing ShotCraft uses that a PC may lack is Windows' own text recognition for the user's language. When the installer finds none, it asks. On a yes, Windows installs it, which needs administrator rights and Windows Update. A no changes nothing else.
+* The one thing ShotCraft uses that a PC may lack is Windows' own text recognition for the user's language. When the installer finds none, it asks. On a yes, Windows installs it, which needs administrator rights and Windows Update. The installer waits five minutes for it at most, then leaves Windows to finish by itself. A no changes nothing else.
 * Explorer lists ShotCraft under Open with for PNG, JPEG, GIF, BMP, TIFF and WebP pictures. ShotCraft does not become their default app.
 * The installer does not turn on Launch at Startup. That stays ShotCraft's own setting, as on macOS, so the setting and what Windows does cannot disagree.
 * An update is the newer installer run over the old one. It asks before it closes a running ShotCraft. An update that runs unattended starts ShotCraft again.

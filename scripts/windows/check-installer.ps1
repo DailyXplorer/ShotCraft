@@ -12,11 +12,14 @@
 #   -TextRecognition          the installer sees that Windows reads no French there, and asks
 #   -InstallTextRecognition   told to, it has Windows install text recognition for French, which
 #                             needs administrator rights and Windows Update and can take minutes
+# -AllUsers also installs for every account (/ALLUSERS) and removes that again. Run it from an
+# administrator prompt, or Windows asks for the rights in the middle of the checks.
 param(
     [string]$Setup = (Get-ChildItem 'target\dist\ShotCraft-*-Setup.exe' | Select-Object -Last 1).FullName,
     [string]$Out = 'target\check-installer',
     [switch]$TextRecognition,
-    [switch]$InstallTextRecognition
+    [switch]$InstallTextRecognition,
+    [switch]$AllUsers
 )
 $ErrorActionPreference = 'Stop'
 Add-Type @'
@@ -158,6 +161,25 @@ try {
         Check (-not (Test-Path $openWithKey)) 'Open with no longer has ShotCraft'
         Check ($null -eq (Get-ItemProperty $runKey).ShotCraft) 'the login item ShotCraft made is gone'
         Check (Test-Path "$settings\settings.json") 'the settings are kept'
+    }
+
+    if ($AllUsers) {
+        $shared = "$env:ProgramFiles\ShotCraft"
+        $sharedShortcut = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\ShotCraft.lnk"
+        $sharedOpenWith = 'HKLM:\Software\Classes\Applications\shotcraft.exe'
+        Check ((Run $Setup "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /ALLUSERS /TEXTRECOGNITION=skip /LOG=`"$Out\all-users.log`"") -eq 0) 'the installer runs for every account with /ALLUSERS'
+        Check (Test-Path "$shared\shotcraft.exe") "shotcraft.exe is in $shared"
+        Check (Test-Path $sharedShortcut) 'the Start menu of every account has ShotCraft'
+        Check ((Get-ItemProperty "$sharedOpenWith\shell\open\command" -ErrorAction SilentlyContinue).'(default)' -eq "`"$shared\shotcraft.exe`" `"%1`"") 'Open with is set for every account'
+        Check (-not (Test-Path $exe)) 'nothing is put in the folder of the account itself'
+        $remove = Get-ChildItem "$shared\unins*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+        Check ($null -ne $remove) 'the uninstaller is there'
+        if ($remove) {
+            Check ((Run $remove.FullName '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART') -eq 0) 'the uninstaller runs'
+            $until = (Get-Date).AddSeconds(30)
+            while ((Test-Path $shared) -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 500 }
+            Check (-not (Test-Path $shared) -and -not (Test-Path $sharedShortcut) -and -not (Test-Path $sharedOpenWith)) 'and removes the program, the Start menu entry and Open with'
+        }
     }
 } finally {
     Running | Stop-Process -Force

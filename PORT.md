@@ -146,7 +146,10 @@ something shows up as a failing test with a picture of the difference.
 - The same job runs three checks on its real desktop: `scripts/windows/check-editor.ps1` (no window at launch, a
   picture handed to the running copy, the window's sizes), `scripts/windows/live-scroll.ps1` (a scrolling capture
   of `tests/live/scroll-page.html` in a browser) and `scripts/windows/check-installer.ps1` (install, update,
-  uninstall). Each one says what it needs at its top.
+  uninstall, for one account and for all, and the installer's question about text recognition). Each one says what
+  it needs at its top. Two things run on request only: `check-installer.ps1 -InstallTextRecognition`, which has
+  Windows Update install text recognition for real and takes minutes, and `scripts/windows/installer-pictures.ps1`,
+  which takes pictures of the installer's pages.
 - A failure leaves the new picture and a red-marked difference in `visual-diffs` (named in the message).
   After a change on purpose, `SHOTCRAFT_UPDATE_REFERENCES=1` rewrites the references; look at them first.
 - Not covered: the hand-drawn text (each system's own font), the tray icon's menu (Windows draws it) and

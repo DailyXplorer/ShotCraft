@@ -95,13 +95,13 @@ jobs:
         with:
           persist-credentials: false
 
-      # A desktop check that fails must not cost the next run its build.
+      # Only main saves it, as for macOS. A desktop check that fails must not cost the next run its build.
       - name: Cache the Rust build
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: windows
           cache-on-failure: true
-          save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'pull_request' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # The reference pictures of the app's windows are larger than the runner's 1024 x 768 screen.
       - name: Set the display to 1920 x 1080
@@ -115,7 +115,6 @@ jobs:
 
       - name: Compare the app's windows with the reference pictures
         if: ${{ !cancelled() }}
-        continue-on-error: true
         timeout-minutes: 12
         env:
           SHOTCRAFT_UI_PICTURES: target/looks/windows
@@ -138,15 +137,8 @@ jobs:
 
       - name: Install, update and uninstall ShotCraft
         if: ${{ !cancelled() }}
-        timeout-minutes: 35
-        run: scripts\windows\check-installer.ps1 -Out target\looks\installer -TextRecognition -InstallTextRecognition
-
-      # To look at, not a check: it presses the wizard's buttons by the clock.
-      - name: Take pictures of the installer's pages
-        if: ${{ !cancelled() }}
-        continue-on-error: true
-        timeout-minutes: 8
-        run: scripts\windows\installer-pictures.ps1 -Out target\looks\installer-pages
+        timeout-minutes: 15
+        run: scripts\windows\check-installer.ps1 -Out target\looks\installer -TextRecognition -AllUsers
 
       - name: Keep the pictures
         if: ${{ always() }}
@@ -163,36 +155,6 @@ jobs:
           name: release-windows
           path: target/dist/
           retention-days: 7
-
-  # TEMPORARY, removed before this pull request is ready: the Linux tests on main and on this
-  # branch, to compare, as this change touches code Linux shares and the workflow has no Linux job.
-  temporary-linux:
-    strategy:
-      fail-fast: false
-      matrix:
-        ref: [main, "${{ github.event.pull_request.head.sha }}"]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          ref: ${{ matrix.ref }}
-          persist-credentials: false
-      - run: xvfb-run -a cargo test
-
-  # TEMPORARY, removed before this pull request is ready: what the publish job would find.
-  temporary-release-files:
-    needs: windows
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          pattern: release*
-          merge-multiple: true
-          path: dist
-      - run: |
-          ls -la dist
-          test -f dist/ShotCraft-*-Setup.exe
 
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
