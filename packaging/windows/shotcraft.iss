@@ -231,7 +231,7 @@ begin
   PowerShell := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
   ExtractTemporaryFile('ocr.ps1');
   ListFile := ExpandConstant('{tmp}\languages.txt');
-  // The check runs as the user: it needs no rights and gets none.
+  // The check needs no rights. It runs as Setup does: as the user in an install for one account.
   if not Exec(PowerShell, '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + ExpandConstant('{tmp}\ocr.ps1') + '" -LanguagesFile "' + ListFile + '"', '', SW_HIDE, ewWaitUntilTerminated, Code) or (Code <> 3) then
     Exit;
   if not LoadStringFromFile(ListFile, Languages) then

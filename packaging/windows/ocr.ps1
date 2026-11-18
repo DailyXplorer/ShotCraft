@@ -1,6 +1,6 @@
 # Asks Windows whether it can read text (OCR) in one of the user's languages, which is what
-# ShotCraft needs to read the text in a picture. The installer runs this script as the user,
-# without administrator rights; it changes nothing.
+# ShotCraft needs to read the text in a picture. The installer runs this script. It needs no
+# administrator rights and changes nothing.
 #
 # Exits 0 when Windows can, 3 when it cannot, 1 when the question could not be asked. With
 # -LanguagesFile it writes the user's languages to that file, the preferred one first.

@@ -65,13 +65,16 @@ try {
         Get-Process shotcraft -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe } | Stop-Process -Force
     }
 } finally {
-    Get-Process | Where-Object { $_.ProcessName -like 'ShotCraft-*-Setup*' } | Stop-Process -Force -ErrorAction SilentlyContinue
-    $uninstaller = Get-ChildItem "$env:LOCALAPPDATA\Programs\ShotCraft\unins*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($uninstaller) {
-        Get-Process shotcraft -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe } | Stop-Process -Force
-        $remove = Start-Process $uninstaller.FullName -PassThru -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
-        [void]$remove.WaitForExit(60000)
+    try {
+        Get-Process | Where-Object { $_.ProcessName -like 'ShotCraft-*-Setup*' } | Stop-Process -Force -ErrorAction SilentlyContinue
+        $uninstaller = Get-ChildItem "$env:LOCALAPPDATA\Programs\ShotCraft\unins*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($uninstaller) {
+            Get-Process shotcraft -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe } | Stop-Process -Force
+            $remove = Start-Process $uninstaller.FullName -PassThru -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
+            [void]$remove.WaitForExit(60000)
+        }
+    } finally {
+        # Whatever the cleanup did. It throws when the account does not get its languages back.
+        SetLanguages $languages
     }
-    # Last, and it throws when the account does not get its languages back.
-    SetLanguages $languages
 }
