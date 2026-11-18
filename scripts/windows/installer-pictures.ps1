@@ -27,8 +27,8 @@ function Page([string]$name, [int]$seconds = 3) {
     & "$PSScriptRoot\desktop-shot.ps1" -Path "$Out\$name.png"
 }
 function Press([string]$keys) {
-    $wizard = Wizard
-    if ($wizard) { [void][Front]::SetForegroundWindow($wizard.MainWindowHandle) }
+    $window = Wizard
+    if ($window) { [void][Front]::SetForegroundWindow($window.MainWindowHandle) }
     Start-Sleep -Milliseconds 400
     [System.Windows.Forms.SendKeys]::SendWait($keys)
 }
@@ -39,7 +39,7 @@ try {
         # The French run meets a PC whose language Windows cannot read, and answers no.
         $asks = $language -eq 'fr'
         if ($asks) { powershell.exe -NoProfile -Command "Set-WinUserLanguageList de-DE -Force" }
-        $setup = Start-Process $Setup -PassThru -ArgumentList "/LANG=$language", $(if ($asks) { '/TEXTRECOGNITION=ask' } else { '/TEXTRECOGNITION=skip' })
+        $wizard = Start-Process $Setup -PassThru -ArgumentList "/LANG=$language", $(if ($asks) { '/TEXTRECOGNITION=ask' } else { '/TEXTRECOGNITION=skip' })
         Page "$language-1-welcome" 6
         Press '{ENTER}'
         Page "$language-2-options"
@@ -50,7 +50,7 @@ try {
         }
         Page "$language-4-finished" 12
         Press '{ENTER}'
-        [void]$setup.WaitForExit(30000)
+        [void]$wizard.WaitForExit(30000)
         Get-Process shotcraft -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe } | Stop-Process -Force
     }
 } finally {

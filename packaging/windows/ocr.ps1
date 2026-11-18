@@ -6,9 +6,10 @@
 #                                  the preferred one first, to <file>
 #   -Install -Languages a,b        adds text recognition for the first of these languages that
 #                                  Windows offers it for. Needs administrator rights and Windows
-#                                  Update. Exits 0 when it is there, 2 when Windows offers none
-#                                  of them, 1 on an error
-param([switch]$Check, [switch]$Install, [string]$Languages = '', [string]$LanguagesFile = '')
+#                                  Update. Exits 0 when it is there, 4 when Windows is still
+#                                  installing it after -WaitSeconds (it goes on by itself), 2 when
+#                                  Windows offers none of the languages, 1 on an error
+param([switch]$Check, [switch]$Install, [string]$Languages = '', [string]$LanguagesFile = '', [int]$WaitSeconds = 300)
 $ErrorActionPreference = 'Stop'
 try {
     if ($Check) {
@@ -28,12 +29,14 @@ try {
                 # The same language in another region: Belgian French is read with France's.
                 $capability = $offered | Where-Object { $_.Name -like "Language.OCR~~~$(($language -split '-')[0])-*" } | Select-Object -First 1
             }
-            if ($capability) {
-                if ($capability.State -ne 'Installed') {
-                    Add-WindowsCapability -Online -Name $capability.Name | Out-Null
-                }
-                exit 0
-            }
+            if (-not $capability) { continue }
+            if ($capability.State -eq 'Installed') { exit 0 }
+            # Windows Update decides how long this takes, and it can be long. The work runs in a
+            # process of its own, which goes on when this script stops waiting for it.
+            $work = Start-Process powershell.exe -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile', '-NonInteractive', '-Command', "Add-WindowsCapability -Online -Name '$($capability.Name)'"
+            if (-not $work.WaitForExit($WaitSeconds * 1000)) { exit 4 }
+            if ((Get-WindowsCapability -Online -Name $capability.Name).State -eq 'Installed') { exit 0 }
+            exit 1
         }
         exit 2
     }

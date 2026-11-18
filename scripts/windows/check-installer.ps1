@@ -7,13 +7,16 @@
 #      user's settings.
 # Do not run it on a PC where ShotCraft is installed: it uninstalls it.
 #
-# -TextRecognition also tries the installer's offer of Windows' text recognition. It is for a
-# build machine only: it makes French the account's only language for a moment and has Windows
-# install text recognition for it, which needs administrator rights and Windows Update.
+# Two more checks are for a build machine only, because they make French the account's only
+# language for a moment:
+#   -TextRecognition          the installer sees that Windows reads no French there, and asks
+#   -InstallTextRecognition   told to, it has Windows install text recognition for French, which
+#                             needs administrator rights and Windows Update and can take minutes
 param(
     [string]$Setup = (Get-ChildItem 'target\dist\ShotCraft-*-Setup.exe' | Select-Object -Last 1).FullName,
     [string]$Out = 'target\check-installer',
-    [switch]$TextRecognition
+    [switch]$TextRecognition,
+    [switch]$InstallTextRecognition
 )
 $ErrorActionPreference = 'Stop'
 Add-Type @'
@@ -74,7 +77,12 @@ function Run([string]$program, [string]$arguments) {
     if ($run.WaitForExit(600000)) { $run.ExitCode } else { 'still running' }
 }
 function Install([string]$log, [string]$textRecognition = 'skip') {
-    Run $Setup "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TEXTRECOGNITION=$textRecognition /LOG=`"$Out\$log`""
+    # In English, whatever the account's language: the checks read the installer's log.
+    Run $Setup "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LANG=en /TEXTRECOGNITION=$textRecognition /LOG=`"$Out\$log`""
+}
+# Whether the installer's log of a run has a line that matches.
+function Said([string]$log, [string]$pattern) {
+    [bool](Select-String -Path "$Out\$log" -Pattern $pattern -Quiet)
 }
 # What the installer asks Windows: 0 when it reads text in the account's language, 3 when it does not.
 function ReadsText {
@@ -108,16 +116,29 @@ try {
     $after = (Running).Id
     Check ($after.Count -eq 1 -and $after -ne $before) 'the update stopped the running ShotCraft and started the new one'
 
-    if ($TextRecognition) {
+    if ($TextRecognition -or $InstallTextRecognition) {
         # Windows PowerShell has the language commands; PowerShell 7 only borrows them.
         $languages = powershell.exe -NoProfile -Command "(Get-WinUserLanguageList).LanguageTag -join ','"
         try {
             powershell.exe -NoProfile -Command "Set-WinUserLanguageList fr-FR -Force"
             Check ((ReadsText) -eq 3) 'Windows has no text recognition for French on this machine'
-            Check ((Install 'no-text-recognition.log' 'ask') -eq 0) 'an unattended install takes the question about text recognition as a no'
-            Check ((ReadsText) -eq 3) 'and leaves Windows as it is'
-            Check ((Install 'text-recognition.log' 'install') -eq 0) 'the installer runs when told to install text recognition'
-            Check ((ReadsText) -eq 0) 'after it, Windows reads text in French'
+            Check ((Install 'no-text-recognition.log' 'ask') -eq 0) 'the installer finishes on a PC without text recognition'
+            Check (Said 'no-text-recognition.log' 'Defaulting to No for suppressed message box \(Yes/No\)') 'it asks whether to install text recognition (unattended, the answer is no)'
+            Check ((ReadsText) -eq 3) 'and after a no, Windows is as it was'
+            if ($InstallTextRecognition) {
+                $started = Get-Date
+                Check ((Install 'text-recognition.log' 'install') -eq 0) 'told to install text recognition, the installer finishes'
+                Write-Host "      it took $([int]((Get-Date) - $started).TotalSeconds) s"
+                if (Said 'text-recognition.log' 'Text recognition is installed') {
+                    Check ((ReadsText) -eq 0) 'the installer says text recognition is installed, and Windows reads French'
+                } else {
+                    Check (Said 'text-recognition.log' 'Windows is still installing text recognition') 'the installer says Windows is still installing it, and does not wait for ever'
+                    # How long Windows Update takes is not ShotCraft's to check: this only tells.
+                    $until = (Get-Date).AddMinutes(12)
+                    while ((ReadsText) -ne 0 -and (Get-Date) -lt $until) { Start-Sleep -Seconds 30 }
+                    Write-Host "      $([int]((Get-Date) - $started).TotalSeconds) s after the start, Windows $(if ((ReadsText) -eq 0) { 'reads French' } else { 'has not finished' })"
+                }
+            }
         } finally {
             powershell.exe -NoProfile -Command "Set-WinUserLanguageList $languages -Force"
         }

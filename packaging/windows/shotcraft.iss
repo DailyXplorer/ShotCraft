@@ -60,12 +60,14 @@ en.StillRunning=ShotCraft is running. Setup closes it to update it: a picture yo
 fr.StillRunning=ShotCraft est en cours d'exécution. L'installation le ferme pour le mettre à jour : une image en cours de modification et non enregistrée sera perdue.%n%nContinuer ?
 en.NotClosed=ShotCraft is still running. Quit it from its icon next to the clock, then run Setup again.
 fr.NotClosed=ShotCraft est toujours en cours d'exécution. Quittez-le depuis son icône à côté de l'horloge, puis relancez l'installation.
-en.OcrMissing=Windows has no text recognition installed for your language.%n%nShotCraft uses it to read the text in a picture (Recognize Text/QR, Blur Text). Install it now?%n%nWindows asks for administrator rights and downloads it. This can take a few minutes.
-fr.OcrMissing=Windows n'a pas de reconnaissance de texte installée pour votre langue.%n%nShotCraft s'en sert pour lire le texte d'une image (Recognize Text/QR, Blur Text). L'installer maintenant ?%n%nWindows demande les droits d'administrateur et la télécharge. Cela peut prendre quelques minutes.
+en.OcrMissing=Windows has no text recognition installed for your language.%n%nShotCraft uses it to read the text in a picture (Recognize Text/QR, Blur Text). Install it now?%n%nWindows asks for administrator rights and downloads it. Setup waits up to five minutes for it.
+fr.OcrMissing=Windows n'a pas de reconnaissance de texte installée pour votre langue.%n%nShotCraft s'en sert pour lire le texte d'une image (Recognize Text/QR, Blur Text). L'installer maintenant ?%n%nWindows demande les droits d'administrateur et la télécharge. L'installation l'attend cinq minutes au plus.
 en.OcrInstalling=Installing Windows' text recognition. This can take a few minutes...
 fr.OcrInstalling=Installation de la reconnaissance de texte de Windows. Cela peut prendre quelques minutes...
 en.OcrInstalled=Text recognition is installed.
 fr.OcrInstalled=La reconnaissance de texte est installée.
+en.OcrContinues=Windows is still installing text recognition. It goes on by itself: text recognition works in ShotCraft once Windows has finished.
+fr.OcrContinues=Windows installe encore la reconnaissance de texte. L'installation se poursuit toute seule : la reconnaissance de texte fonctionnera dans ShotCraft une fois qu'elle sera terminée.
 en.OcrFailed=Windows could not install text recognition. Everything else in ShotCraft works.%n%nTo add it later: Settings > Time & language > Language & region, choose your language > Language options > Optical character recognition.
 fr.OcrFailed=Windows n'a pas pu installer la reconnaissance de texte. Tout le reste de ShotCraft fonctionne.%n%nPour l'ajouter plus tard : Paramètres > Heure et langue > Langue et région, choisissez votre langue > Options linguistiques > Reconnaissance optique de caractères.
 en.RemoveSettings=Remove your ShotCraft settings too?
@@ -195,10 +197,16 @@ begin
     Exit;
   WizardForm.StatusLabel.Caption := CustomMessage('OcrInstalling');
   WizardForm.Refresh;
-  if ShellExec('runas', PowerShell, Params + ' -Install -Languages "' + Trim(String(Languages)) + '"', '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0) then
-    SuppressibleMsgBox(CustomMessage('OcrInstalled'), mbInformation, MB_OK, IDOK)
+  // False when the user turns the request for administrator rights down.
+  if not ShellExec('runas', PowerShell, Params + ' -Install -Languages "' + Trim(String(Languages)) + '"', '', SW_HIDE, ewWaitUntilTerminated, Code) then
+    Code := 1;
+  // The script waits five minutes for Windows Update, then leaves it to finish by itself (4).
+  case Code of
+    0: SuppressibleMsgBox(CustomMessage('OcrInstalled'), mbInformation, MB_OK, IDOK);
+    4: SuppressibleMsgBox(CustomMessage('OcrContinues'), mbInformation, MB_OK, IDOK);
   else
     SuppressibleMsgBox(CustomMessage('OcrFailed'), mbInformation, MB_OK, IDOK);
+  end;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
