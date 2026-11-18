@@ -64,7 +64,8 @@ Start it hidden in the tray with `--background`, as the login item does.
   on top of other windows and the thumbnail is placed by the desktop, because Wayland gives apps neither. The mouse
   pointer in screenshots is the desktop's choice. A minimized editor gets no frame callbacks, so nothing runs
   until it is restored; a hotkey or a tray click brings it back with the activation token the desktop sends, and so does
-  a link when its launcher passes one (`XDG_ACTIVATION_TOKEN`). A link without a token (Firefox as a snap) shows a
+  a link when its launcher passes one (`XDG_ACTIVATION_TOKEN`). A picture that a second launch hands over is not a
+  link: it brings no token and no notification, and opens once the editor is restored. A link without a token (Firefox as a snap) shows a
   "ShotCraft is waiting" notification instead, and a click on it, which carries a token, brings the editor back. A
   stall is detected by poking the UI (a repaint request that gets no pass within 400 ms), not by the queue, because a
   link's first pass starts the capture and the result then needs another. Closing the editor with ✕ avoids all this.

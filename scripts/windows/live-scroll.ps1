@@ -9,7 +9,7 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 New-Item -ItemType Directory -Force $Out | Out-Null
 $Out = (Resolve-Path $Out).Path
-$url = 'file:///' + ((Join-Path $root 'tests\live\scroll-page.html') -replace '\\', '/') + "?rows=$Rows"
+$url = 'file:///' + ((Join-Path $root 'tests\live\scroll-page.html') -replace '\\', '/' -replace ' ', '%20') + "?rows=$Rows"
 $browser = @(
     "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
     "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
@@ -18,7 +18,8 @@ $browser = @(
 if (-not $browser) { throw 'Neither Chrome nor Edge is installed to show the test page.' }
 # A profile of its own: the page opens in a new browser, not in one that is already running.
 $profile = Join-Path ([IO.Path]::GetTempPath()) "shotcraft-live-scroll-$PID"
-$shown = Start-Process $browser -PassThru -ArgumentList '--kiosk', '--no-first-run', '--no-default-browser-check', "--user-data-dir=$profile", $url
+# Start-Process joins the arguments with spaces: the two that hold a path carry their own quotes.
+$shown = Start-Process $browser -PassThru -ArgumentList '--kiosk', '--no-first-run', '--no-default-browser-check', "--user-data-dir=`"$profile`"", "`"$url`""
 $code = 1
 try {
     # A browser's first start can take a while: wait for its window, which is named after the page.

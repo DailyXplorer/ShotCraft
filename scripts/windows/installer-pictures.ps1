@@ -35,12 +35,20 @@ function Press([string]$keys) {
     [System.Windows.Forms.SendKeys]::SendWait($keys)
 }
 
-$languages = powershell.exe -NoProfile -Command "(Get-WinUserLanguageList).LanguageTag -join ','"
+# The account's languages, as a comma-separated list. Windows PowerShell has these commands;
+# PowerShell 7 only borrows them.
+function Languages { powershell.exe -NoProfile -Command "(Get-WinUserLanguageList).LanguageTag -join ','" }
+function SetLanguages([string]$tags) {
+    powershell.exe -NoProfile -Command "Set-WinUserLanguageList $tags -Force" | Out-Null
+    if ($LASTEXITCODE -or (Languages) -ne $tags) { throw "The account's languages could not be set to $tags. Set them in Settings > Time & language > Language & region." }
+}
+$languages = Languages
+if ($LASTEXITCODE -or -not $languages) { throw "The account's languages could not be read: nothing was changed." }
 try {
     foreach ($language in 'en', 'fr') {
         # The French run meets a PC whose language Windows cannot read, and answers no.
         $asks = $language -eq 'fr'
-        if ($asks) { powershell.exe -NoProfile -Command "Set-WinUserLanguageList de-DE -Force" }
+        if ($asks) { SetLanguages 'de-DE' }
         $wizard = Start-Process $Setup -PassThru -ArgumentList "/LANG=$language", $(if ($asks) { '/TEXTRECOGNITION=ask' } else { '/TEXTRECOGNITION=skip' })
         Page "$language-1-welcome" 6
         Press '{ENTER}'
@@ -57,7 +65,6 @@ try {
         Get-Process shotcraft -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe } | Stop-Process -Force
     }
 } finally {
-    powershell.exe -NoProfile -Command "Set-WinUserLanguageList $languages -Force"
     Get-Process | Where-Object { $_.ProcessName -like 'ShotCraft-*-Setup*' } | Stop-Process -Force -ErrorAction SilentlyContinue
     $uninstaller = Get-ChildItem "$env:LOCALAPPDATA\Programs\ShotCraft\unins*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($uninstaller) {
@@ -65,4 +72,6 @@ try {
         $remove = Start-Process $uninstaller.FullName -PassThru -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
         [void]$remove.WaitForExit(60000)
     }
+    # Last, and it throws when the account does not get its languages back.
+    SetLanguages $languages
 }

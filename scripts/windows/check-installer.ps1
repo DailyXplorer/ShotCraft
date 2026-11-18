@@ -83,13 +83,20 @@ function Install([string]$log, [string]$textRecognition = 'skip') {
     # In English, whatever the account's language: the checks read the installer's log.
     Run $Setup "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LANG=en /TEXTRECOGNITION=$textRecognition /LOG=`"$Out\$log`""
 }
+# The account's languages, as a comma-separated list. Windows PowerShell has these commands;
+# PowerShell 7 only borrows them.
+function Languages { powershell.exe -NoProfile -Command "(Get-WinUserLanguageList).LanguageTag -join ','" }
+function SetLanguages([string]$tags) {
+    powershell.exe -NoProfile -Command "Set-WinUserLanguageList $tags -Force" | Out-Null
+    if ($LASTEXITCODE -or (Languages) -ne $tags) { throw "The account's languages could not be set to $tags. Set them in Settings > Time & language > Language & region." }
+}
 # Whether the installer's log of a run has a line that matches.
 function Said([string]$log, [string]$pattern) {
     [bool](Select-String -Path "$Out\$log" -Pattern $pattern -Quiet)
 }
 # What the installer asks Windows: 0 when it reads text in the account's language, 3 when it does not.
 function ReadsText {
-    powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PSScriptRoot\..\..\packaging\windows\ocr.ps1" -Check | Out-Null
+    powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PSScriptRoot\..\..\packaging\windows\ocr.ps1" | Out-Null
     $LASTEXITCODE
 }
 
@@ -120,10 +127,10 @@ try {
     Check ($after.Count -eq 1 -and $after -ne $before) 'the update stopped the running ShotCraft and started the new one'
 
     if ($TextRecognition -or $InstallTextRecognition) {
-        # Windows PowerShell has the language commands; PowerShell 7 only borrows them.
-        $languages = powershell.exe -NoProfile -Command "(Get-WinUserLanguageList).LanguageTag -join ','"
+        $languages = Languages
+        if ($LASTEXITCODE -or -not $languages) { throw "The account's languages could not be read: nothing was changed." }
         try {
-            powershell.exe -NoProfile -Command "Set-WinUserLanguageList fr-FR -Force"
+            SetLanguages 'fr-FR'
             Check ((ReadsText) -eq 3) 'Windows has no text recognition for French on this machine'
             Check ((Install 'no-text-recognition.log' 'ask') -eq 0) 'the installer finishes on a PC without text recognition'
             Check (Said 'no-text-recognition.log' 'Defaulting to No for suppressed message box \(Yes/No\)') 'it asks whether to install text recognition (unattended, the answer is no)'
@@ -143,7 +150,8 @@ try {
                 }
             }
         } finally {
-            powershell.exe -NoProfile -Command "Set-WinUserLanguageList $languages -Force"
+            # Throws, and so fails the checks, when the account does not get its languages back.
+            SetLanguages $languages
         }
     }
 

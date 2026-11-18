@@ -26,7 +26,11 @@ $dumpbin = if (Test-Path $studio) {
     Get-ChildItem "$where\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" -ErrorAction SilentlyContinue | Select-Object -Last 1
 }
 if ($dumpbin) {
-    $needed = & $dumpbin.FullName /dependents $exe | Where-Object { $_ -match '^\s+\S+\.dll\s*$' } | ForEach-Object { $_.Trim() }
+    $listing = & $dumpbin.FullName /dependents $exe
+    if ($LASTEXITCODE) { throw "dumpbin could not read $exe (exit code $LASTEXITCODE)." }
+    $needed = @($listing | Where-Object { $_ -match '^\s+\S+\.dll\s*$' } | ForEach-Object { $_.Trim() })
+    # An exe that needs no library at all is a listing that was not understood, not a pass.
+    if (-not $needed) { throw "dumpbin named no library that $exe needs: the check could not be made." }
     $runtime = $needed | Where-Object { $_ -match '^(vcruntime|msvcp|ucrtbase|concrt|vccorlib|api-ms-win-crt)' }
     if ($runtime) { throw "shotcraft.exe needs the Visual C++ runtime ($($runtime -join ', ')): it would not start on a PC without it." }
     Write-Host "shotcraft.exe needs $($needed.Count) system libraries and no Visual C++ runtime."

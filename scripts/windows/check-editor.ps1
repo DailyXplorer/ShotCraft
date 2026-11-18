@@ -6,7 +6,7 @@
 #      points back;
 #   4. a picture that opens while a tool shows its options, or while the window is maximized or
 #      minimized, gets a window of its own size too.
-# -Out gets a picture of the desktop at each step. Do not touch the mouse or keyboard meanwhile.
+# -Out gets a picture of the desktop at each step, and one of a toolbar tooltip at the end. Do not touch the mouse or keyboard meanwhile.
 # The display must be at 100% scaling and 1280 x 800 or larger.
 param([string]$Exe = 'target\debug\shotcraft.exe', [string]$Out = 'target\check-editor')
 $ErrorActionPreference = 'Stop'
@@ -28,6 +28,15 @@ public static class ShotCraftWindows {
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr window, int how);
     [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr window);
     [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr window);
+    [StructLayout(LayoutKind.Sequential)] struct POINT { public int X, Y; }
+    [DllImport("user32.dll")] static extern bool ClientToScreen(IntPtr window, ref POINT point);
+    [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
+    // Puts the mouse pointer on a point of the window's own area.
+    public static void PointAt(IntPtr window, int x, int y) {
+        var point = new POINT { X = x, Y = y };
+        ClientToScreen(window, ref point);
+        SetCursorPos(point.X, point.Y);
+    }
     public static string ClientSize(IntPtr window) {
         RECT rect;
         GetClientRect(window, out rect);
@@ -131,6 +140,15 @@ try {
     [void](Open $wide)
     Sized '1000 x 600' 'a minimized window comes back for the next picture'
     & $shot -Path "$Out\5-back-from-minimized.png"
+
+    # To look at, not a check: the tooltip of the Copy button, the first one after the menu
+    # button. It names its key the Windows way (Ctrl+C).
+    [void][ShotCraftWindows]::SetForegroundWindow((Editor))
+    [ShotCraftWindows]::PointAt((Editor), 73, 26)
+    Start-Sleep -Milliseconds 300
+    [ShotCraftWindows]::PointAt((Editor), 74, 26)
+    Start-Sleep -Seconds 2
+    & $shot -Path "$Out\6-copy-tooltip.png"
 } finally {
     if (-not $app.HasExited) { Stop-Process -Id $app.Id -Force }
 }
