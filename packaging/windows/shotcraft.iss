@@ -173,11 +173,55 @@ begin
   Result := WasRunning and WizardSilent;
 end;
 
+// Whether S is a list of language tags and nothing else: letters, digits, hyphens and commas.
+// The list goes into a command that runs with administrator rights, and it is read from a file
+// that the user's other programs can write.
+function IsLanguageList(const S: String): Boolean;
+var
+  I: Integer;
+begin
+  Result := S <> '';
+  for I := 1 to Length(S) do
+    if Pos(S[I], 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-,') = 0 then
+      Result := False;
+end;
+
+// The PowerShell command that adds Windows' text recognition for the first of Languages that
+// Windows offers it for. It exits with 0 when text recognition is there, with 4 when Windows is
+// still installing it after five minutes (the work runs in a process of its own and goes on),
+// with 2 when Windows offers it for none of the languages, and with 1 on an error.
+//
+// It runs with administrator rights, so it is passed whole on the command line. A script file
+// would sit in Setup's temporary folder, where another program of the user could replace it
+// before the administrator says yes. In the command, \" is a double quote.
+function TextRecognitionCommand(const Languages: String): String;
+begin
+  Result :=
+    '$ErrorActionPreference = \"Stop\"; ' +
+    'try { ' +
+      '$offered = @(Get-WindowsCapability -Online -Name \"Language.OCR*\"); ' +
+      'foreach ($language in \"' + Languages + '\".Split(\",\")) { ' +
+        'if (-not $language) { continue } ' +
+        // The same language in another region: Belgian French is read with another French.
+        '$base = $language.Split(\"-\")[0]; ' +
+        '$capability = $offered | Where-Object { $_.Name -like \"Language.OCR~~~$language~*\" } | Select-Object -First 1; ' +
+        'if (-not $capability) { $capability = $offered | Where-Object { $_.Name -like \"Language.OCR~~~$base-*\" } | Select-Object -First 1 } ' +
+        'if (-not $capability) { continue } ' +
+        'if ($capability.State -eq \"Installed\") { exit 0 } ' +
+        '$work = Start-Process powershell.exe -PassThru -WindowStyle Hidden -ArgumentList \"-NoProfile\", \"-NonInteractive\", \"-Command\", \"Add-WindowsCapability -Online -Name $($capability.Name)\"; ' +
+        'if (-not $work.WaitForExit(300000)) { exit 4 } ' +
+        'if ((Get-WindowsCapability -Online -Name $capability.Name).State -eq \"Installed\") { exit 0 } ' +
+        'exit 1 ' +
+      '} ' +
+      'exit 2 ' +
+    '} catch { exit 1 }';
+end;
+
 // Asks Windows whether it can read text in the user's language, and offers to install that when
 // it cannot. Only a clear "no" is acted on: a PC where the check does not run is left alone.
 procedure OfferTextRecognition();
 var
-  Choice, PowerShell, Script, Params, ListFile: String;
+  Choice, PowerShell, ListFile, Tags: String;
   Languages: AnsiString;
   Code: Integer;
 begin
@@ -186,21 +230,22 @@ begin
     Exit;
   PowerShell := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
   ExtractTemporaryFile('ocr.ps1');
-  Script := ExpandConstant('{tmp}\ocr.ps1');
   ListFile := ExpandConstant('{tmp}\languages.txt');
-  Params := '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + Script + '"';
-  if not Exec(PowerShell, Params + ' -Check -LanguagesFile "' + ListFile + '"', '', SW_HIDE, ewWaitUntilTerminated, Code) or (Code <> 3) then
+  // The check runs as the user: it needs no rights and gets none.
+  if not Exec(PowerShell, '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + ExpandConstant('{tmp}\ocr.ps1') + '" -LanguagesFile "' + ListFile + '"', '', SW_HIDE, ewWaitUntilTerminated, Code) or (Code <> 3) then
     Exit;
-  if not LoadStringFromFile(ListFile, Languages) or (Trim(String(Languages)) = '') then
+  if not LoadStringFromFile(ListFile, Languages) then
+    Exit;
+  Tags := Trim(String(Languages));
+  if not IsLanguageList(Tags) then
     Exit;
   if (Choice <> 'install') and (SuppressibleMsgBox(CustomMessage('OcrMissing'), mbConfirmation, MB_YESNO, IDNO) <> IDYES) then
     Exit;
   WizardForm.StatusLabel.Caption := CustomMessage('OcrInstalling');
   WizardForm.Refresh;
   // False when the user turns the request for administrator rights down.
-  if not ShellExec('runas', PowerShell, Params + ' -Install -Languages "' + Trim(String(Languages)) + '"', '', SW_HIDE, ewWaitUntilTerminated, Code) then
+  if not ShellExec('runas', PowerShell, '-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "' + TextRecognitionCommand(Tags) + '"', '', SW_HIDE, ewWaitUntilTerminated, Code) then
     Code := 1;
-  // The script waits five minutes for Windows Update, then leaves it to finish by itself (4).
   case Code of
     0: SuppressibleMsgBox(CustomMessage('OcrInstalled'), mbInformation, MB_OK, IDOK);
     4: SuppressibleMsgBox(CustomMessage('OcrContinues'), mbInformation, MB_OK, IDOK);
