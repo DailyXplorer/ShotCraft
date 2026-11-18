@@ -46,7 +46,8 @@ try {
         Press '{ENTER}'
         if ($asks) {
             Page "$language-3-text-recognition" 12
-            Press 'n'
+            # To the No button, then Enter: a letter would depend on the language of Windows.
+            Press '{RIGHT}{ENTER}'
         }
         Page "$language-4-finished" 12
         Press '{ENTER}'

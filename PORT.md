@@ -49,8 +49,8 @@ cargo build --release
 - **Windows 10/11:** nothing else needed. Text recognition uses the languages installed in Settings → Time &
   language → Language & region (each language's *Optical character recognition* feature).
   `scripts\windows\make-installer.ps1` builds the installer (it needs Inno Setup 6). The C runtime is linked into
-  `shotcraft.exe` (`.cargo/config.toml`), so the PC that runs it needs no Visual C++ redistributable; the script fails
-  if the exe asks for one.
+  `shotcraft.exe` (`.cargo/config.toml`), so the PC that runs it needs no Visual C++ redistributable. The script
+  fails if the exe asks for one.
 - **Linux:** a desktop with a StatusNotifierItem host for the tray (KDE, most others; GNOME needs the AppIndicator
   extension) and `xdg-desktop-portal` for Wayland (screenshots, printing, hotkeys). No C libraries are linked: X11 and
   Wayland libraries are loaded at run time.
@@ -147,9 +147,9 @@ something shows up as a failing test with a picture of the difference.
   picture handed to the running copy, the window's sizes), `scripts/windows/live-scroll.ps1` (a scrolling capture
   of `tests/live/scroll-page.html` in a browser) and `scripts/windows/check-installer.ps1` (install, update,
   uninstall, for one account and for all, and the installer's question about text recognition). Each one says what
-  it needs at its top. Two things run on request only: `check-installer.ps1 -InstallTextRecognition`, which has
-  Windows Update install text recognition for real and takes minutes, and `scripts/windows/installer-pictures.ps1`,
-  which takes pictures of the installer's pages.
+  it needs at its top. `check-installer.ps1 -InstallTextRecognition` runs on request only: it has Windows
+  Update install text recognition for real, which takes minutes. On pull requests the job also takes pictures of the
+  installer's pages (`scripts/windows/installer-pictures.ps1`), to look at.
 - A failure leaves the new picture and a red-marked difference in `visual-diffs` (named in the message).
   After a change on purpose, `SHOTCRAFT_UPDATE_REFERENCES=1` rewrites the references; look at them first.
 - Not covered: the hand-drawn text (each system's own font), the tray icon's menu (Windows draws it) and

@@ -140,6 +140,13 @@ jobs:
         timeout-minutes: 15
         run: scripts\windows\check-installer.ps1 -Out target\looks\installer -TextRecognition -AllUsers
 
+      # To look at, not a check: it presses the wizard's buttons by the clock. A release skips it.
+      - name: Take pictures of the installer's pages
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        continue-on-error: true
+        timeout-minutes: 8
+        run: scripts\windows\installer-pictures.ps1 -Out target\looks\installer-pages
+
       - name: Keep the pictures
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

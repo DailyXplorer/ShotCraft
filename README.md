@@ -187,7 +187,7 @@ Download `ShotCraft-<version>-Setup.exe` from the [Releases page](https://github
 
 * The installer asks for no administrator rights: it installs ShotCraft for your Windows account, in `%LOCALAPPDATA%\Programs\ShotCraft`. To install it for every account, run it with `/ALLUSERS`: Windows then asks for administrator rights.
 * Nothing else has to be installed first. `shotcraft.exe` is a native Windows program: it needs no Rust, no .NET and no Visual C++ runtime.
-* ShotCraft reads text in pictures with Windows' own text recognition. If Windows has none for your language, the installer says so and offers to install it. Windows then asks for administrator rights and downloads it. The installer waits up to five minutes; when Windows needs longer, the installer finishes and Windows carries on by itself. If you answer no, everything else works, and you can add it later in Settings > Time & language > Language & region.
+* ShotCraft reads text in pictures with Windows' own text recognition. If Windows has none for your language, the installer says so and offers to install it. Windows then asks for administrator rights and downloads it. The installer waits up to five minutes. When Windows needs longer, the installer finishes and Windows carries on by itself. If you answer no, everything else works, and you can add it later in Settings > Time & language > Language & region.
 * Explorer then lists ShotCraft under Open with for PNG, JPEG, GIF, BMP, TIFF and WebP pictures. It does not become the default app for them.
 * The installer is not signed with a code signing certificate, so Windows SmartScreen may stop it the first time with "Windows protected your PC". Click More info, then Run anyway.
 
