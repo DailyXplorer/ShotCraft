@@ -1118,13 +1118,12 @@ impl App {
             let d = self.doc.as_ref().unwrap();
             (d.base.w as f32 / scale.max(1.0), d.base.h as f32 / scale.max(1.0))
         };
-        // macOS: the options bar is not counted, the window grows by it when it shows
-        // (`OptionsRoom` in `editor.rs`).
-        #[cfg(target_os = "macos")]
-        let chrome = editor::TOOLBAR_H;
-        // Windows and Linux: the editor's own menu bar too.
-        #[cfg(not(target_os = "macos"))]
-        let chrome = editor::MENUBAR_H + editor::TOOLBAR_H + editor::OPTIONS_H + editor::STATUS_H;
+        let chrome = match sizing::CHROME {
+            // The options bar is not counted, the window grows by it when it shows (`OptionsRoom`
+            // in `editor.rs`).
+            sizing::Chrome::Unified(_) => editor::TOOLBAR_H,
+            sizing::Chrome::Split => editor::MENUBAR_H + editor::TOOLBAR_H + editor::OPTIONS_H + editor::STATUS_H,
+        };
         system::center_main_window(&self.ctx, |screen_w, screen_h| {
             sizing::CHROME.editor_window((w, h), chrome, (screen_w, screen_h))
         });
@@ -2253,9 +2252,9 @@ fn main() -> eframe::Result {
     let instance = if screenshot.is_none() {
         match single::Instance::claim() {
             Some(i) => Some(i),
-            // A link goes to the copy that runs. Something else may hold the port: only a ShotCraft
-            // that answers counts.
-            None if link.as_deref().is_some_and(single::send_link) || single::ask_running(false) => return Ok(()),
+            // A link or a file to open goes to the copy that runs. Something else may hold the
+            // port: only a ShotCraft that answers counts.
+            None if link.as_deref().is_some_and(single::send_link) || open.as_deref().is_some_and(single::send_file) || single::ask_running(false) => return Ok(()),
             None => None,
         }
     } else {
@@ -2297,9 +2296,12 @@ fn main() -> eframe::Result {
                     // X11: the editor's window, to bring it to the front for a capture.
                     x11_front::remember(cc);
                 }
+                // The editor's window, to size it for a picture.
+                #[cfg(target_os = "windows")]
+                system::remember_editor_window(cc);
                 let app = App::new(cc, screenshot, show_at_start, open);
                 if let Some(i) = instance {
-                    i.listen(app.queue.clone(), app.ctx.clone(), url_scheme::submit);
+                    i.listen(app.queue.clone(), app.ctx.clone(), url_scheme::submit, url_scheme::submit_file);
                 }
                 Ok(Box::new(app))
             }),
@@ -2384,6 +2386,9 @@ mod single {
     const PING: &[u8] = b"shotcraft:ping\n";
     /// Then the link and a newline: the `shotcraft://` link a second launch was started with.
     const LINK: &[u8] = b"shotcraft:link ";
+    /// Then the path and a newline: the image file a second launch was started with (Open With,
+    /// a file dropped on the program).
+    const OPEN: &[u8] = b"shotcraft:open ";
     /// Linux (Wayland): the launcher's activation token, sent just before its link, so that a
     /// minimized editor can be brought back for it (`wayland_bridge`).
     #[cfg(target_os = "linux")]
@@ -2406,14 +2411,21 @@ mod single {
         }
 
         /// Answers later launches. `on_link` gets each link one hands over (the app passes
-        /// `url_scheme::submit`, which checks it like a link from anywhere else).
-        pub fn listen(self, queue: Queue, ctx: eframe::egui::Context, on_link: impl Fn(&str) + Send + 'static) {
+        /// `url_scheme::submit`, which checks it like a link from anywhere else), `on_file` each
+        /// image file (`url_scheme::submit_file`: it opens like one the first launch was given).
+        pub fn listen(self, queue: Queue, ctx: eframe::egui::Context, on_link: impl Fn(&str) + Send + 'static, on_file: impl Fn(std::path::PathBuf) + Send + 'static) {
             std::thread::spawn(move || {
                 for stream in self.0.incoming() {
                     let Ok(mut stream) = stream else { continue };
                     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
                     let msg = read_message(&mut stream);
-                    let link = msg.strip_prefix(LINK).and_then(|l| l.strip_suffix(b"\n")).and_then(|l| std::str::from_utf8(l).ok());
+                    let text = |prefix: &[u8]| msg.strip_prefix(prefix).and_then(|t| t.strip_suffix(b"\n")).and_then(|t| std::str::from_utf8(t).ok());
+                    let link = text(LINK);
+                    let file = text(OPEN);
+                    // Queued before the answer, like a link.
+                    if let Some(path) = file {
+                        on_file(path.into());
+                    }
                     #[cfg(target_os = "linux")]
                     let token = msg.strip_prefix(TOKEN).and_then(|t| t.strip_suffix(b"\n")).and_then(|t| std::str::from_utf8(t).ok());
                     #[cfg(not(target_os = "linux"))]
@@ -2433,7 +2445,7 @@ mod single {
                     if let Some(t) = token {
                         crate::wayland_bridge::offer_token(t);
                     }
-                    if msg == SHOW || msg == PING || link.is_some() || token.is_some() {
+                    if msg == SHOW || msg == PING || link.is_some() || token.is_some() || file.is_some() {
                         let _ = stream.write_all(OK);
                     }
                     if msg == SHOW {
@@ -2487,11 +2499,26 @@ mod single {
     }
 
     fn send_link_on(port: u16, link: &str) -> bool {
-        if link.contains('\n') || link.len() + LINK.len() + 1 > MAX_MSG {
+        send_text(port, LINK, link)
+    }
+
+    /// Hands an image file to the ShotCraft that is running; true when it took it.
+    pub fn send_file(path: &std::path::Path) -> bool {
+        send_file_on(PORT, path)
+    }
+
+    fn send_file_on(port: u16, path: &std::path::Path) -> bool {
+        // The copy that runs was started somewhere else: a relative path would name another file there.
+        std::path::absolute(path).ok().and_then(|p| p.to_str().map(|text| send_text(port, OPEN, text))).unwrap_or(false)
+    }
+
+    /// One message of `prefix`, `text` and a newline; true when a ShotCraft answered it.
+    fn send_text(port: u16, prefix: &[u8], text: &str) -> bool {
+        if text.contains('\n') || text.len() + prefix.len() + 1 > MAX_MSG {
             return false;
         }
-        let mut msg = LINK.to_vec();
-        msg.extend_from_slice(link.as_bytes());
+        let mut msg = prefix.to_vec();
+        msg.extend_from_slice(text.as_bytes());
         msg.push(b'\n');
         exchange(port, &msg)
     }
@@ -2525,7 +2552,7 @@ mod single {
                 "only one copy holds the port"
             );
             let queue = crate::Queue::default();
-            first.listen(queue.clone(), eframe::egui::Context::default(), |_| {});
+            first.listen(queue.clone(), eframe::egui::Context::default(), |_| {}, |_| {});
             assert!(ask_on(port, false), "a ping is answered");
             assert!(
                 queue.lock().map(|q| q.is_empty()).unwrap_or(false),
@@ -2551,7 +2578,7 @@ mod single {
             let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
             let sink = got.clone();
             let queue = crate::Queue::default();
-            first.listen(queue.clone(), eframe::egui::Context::default(), move |l| sink.lock().expect("links").push(l.to_string()));
+            first.listen(queue.clone(), eframe::egui::Context::default(), move |l| sink.lock().expect("links").push(l.to_string()), |_| {});
             // Longer than one read, so the listener has to put it together.
             let long = format!("shotcraft://load/file?path=C:%5C{}.png", "a".repeat(1500));
             assert!(send_link_on(port, "shotcraft://grab/area"));
@@ -2562,6 +2589,24 @@ mod single {
             assert!(!send_link_on(port, "shotcraft://grab/area\nshotcraft:show"));
             assert!(!send_link_on(port, &format!("shotcraft://{}", "x".repeat(MAX_MSG))), "too long");
             assert_eq!(got.lock().expect("links").len(), 2);
+        }
+
+        #[test]
+        fn a_second_launch_hands_its_file_to_the_first() {
+            let port = 47_366;
+            let first = Instance::claim_on(port).expect("port free");
+            let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::<std::path::PathBuf>::new()));
+            let sink = got.clone();
+            let queue = crate::Queue::default();
+            first.listen(queue.clone(), eframe::egui::Context::default(), |_| {}, move |p| sink.lock().expect("files").push(p));
+            // As Explorer names it, and as a command line may: relative to where the launch runs.
+            let whole = std::env::temp_dir().join("a picture.png");
+            assert!(send_file_on(port, &whole));
+            assert!(send_file_on(port, std::path::Path::new("beside.png")));
+            let beside = std::env::current_dir().expect("a current folder").join("beside.png");
+            assert_eq!(*got.lock().expect("files"), vec![whole, beside]);
+            assert!(queue.lock().map(|q| q.is_empty()).unwrap_or(false), "the file is not an action: the app opens it when it takes its files");
+            assert!(!send_file_on(47_367, std::path::Path::new("beside.png")), "nothing listening");
         }
 
         #[test]

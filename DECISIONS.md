@@ -53,7 +53,7 @@ On macOS the editor has a single bar, in the title bar, laid out like the refere
 * A window 836 points wide, the smallest one a capture opens in, shows eight tools and the three cells. As the window narrows the tools move into the More menu, then the size cell goes. The colour and zoom cells, Copy, Save, Pin, the drag handle and More stay down to the smallest window.
 * The size cell says "Image size" when nothing is selected. With a selection it says "Selection Size", or the contrast of the selection when there is one to show: the bar has no room for a contrast cell.
 * A long colour format is cut short in its cell. The colour popover shows it whole.
-* Windows and Linux keep the centred tools and the status bar (`sizing::Chrome`).
+* Windows has the same bar under its own title bar (see "Windows: the macOS bar, with a menu button", below). Linux keeps the centred tools and the status bar (`sizing::Chrome::Split`).
 
 Why: the owner wants the Mac app to look like the reference app, where all of this lives in one bar.
 
@@ -65,7 +65,7 @@ On macOS a picture opens in a window of its own size, with the bar above it: a p
 * The window is at most 80% of the screen's width, and the screen's free height less 112 points. A larger picture is shrunk to fit, with 9 points free around it.
 * The window opens a little above the middle of the screen, where AppKit centres a window.
 * The options bar is not counted. When it shows, the window grows by its 48 points at the bottom edge, and it gives them back when the bar goes, so the picture neither moves nor changes zoom. A window that has no room to grow shows the bar inside its own height.
-* Windows and Linux keep the wide, near-square window with a margin around the picture (`sizing::Chrome::editor_window`).
+* Windows opens the same windows. Its screen is the one without the taskbar, less the title bar and the borders Windows draws around the window. Linux keeps the wide, near-square window with a margin around the picture (`sizing::Chrome::editor_window`).
 
 Why: the window used to be 1244 points wide for every picture, mostly empty around a small capture.
 
@@ -79,11 +79,36 @@ On Windows and Linux the tray (notification area) icon does what the menu bar ic
 
 Why: without the tip a first-time user sees nothing at all after starting the app, because of "Menu bar only".
 
-### The editor has its own menu bar on Windows and Linux
+### The editor keeps its menus in the window on Windows and Linux
 
-macOS keeps no main menu bar ("No Dock icon"). Windows and Linux have no system menu bar to fall back on, so the editor window draws one across its top with the same menus and items as the macOS main menu. Its shortcuts use Ctrl where macOS uses Cmd.
+macOS keeps no main menu bar ("No Dock icon"). Windows and Linux have no system menu bar to fall back on, so the editor window holds the same menus and items as the macOS main menu. On Linux they are a menu bar across the top of the window. On Windows they are behind the menu button of the editor's bar (next entry). The shortcuts use Ctrl where macOS uses Cmd.
 
 Why: on those systems a window's commands are expected in the window; without it they would exist only as shortcuts.
+
+### Windows: the macOS bar, with a menu button where the window buttons are
+
+On Windows the editor has the one bar of the macOS editor: the same tools from the left, the same colour, size and zoom cells at the right, the same height, no status bar and no Preferences button. The window opens at the size of the picture and grows by the options bar, as on macOS. Windows draws its own title bar above the bar, with the window buttons at the right, so the left end of the bar is free. A menu button sits there. It opens ShotCraft, Capture, File, Edit, Draw, Zoom and Help as submenus.
+
+* The bar starts 30 points earlier than on macOS, so it has room for one more tool at every width.
+* The title bar stays the one Windows draws. It moves, snaps, maximizes and closes the window as in any Windows app. The tools are not in it: that needs a title bar ShotCraft draws and handles itself, which nobody could try on a real PC for this change.
+* Linux keeps its menu bar, its centred tools and its status bar. Nothing was changed there.
+
+Why: the owner wants the Windows app to be like the Mac app. The menu bar above the tools and the status bar under the picture were what a Windows user saw and a Mac user did not.
+
+### Windows: an installer, and nothing else to install
+
+ShotCraft for Windows ships as `ShotCraft-<version>-Setup.exe`, built by `scripts/windows/make-installer.ps1` and published with each release.
+
+* It installs for the current user, without administrator rights. Its one question is whether to add a desktop shortcut. `/ALLUSERS` on the command line installs for everyone.
+* Nothing has to be installed first. `shotcraft.exe` is a native Windows program: it needs no Rust, no .NET and no Visual C++ runtime on the PC. The C runtime is linked into it, and the installer build fails if that stops being true.
+* The one thing ShotCraft uses that a PC may lack is Windows' own text recognition for the user's language. When the installer finds none, it asks. On a yes, Windows installs it, which needs administrator rights and Windows Update. The installer waits five minutes for it at most, then leaves Windows to finish by itself. A no changes nothing else.
+* Explorer lists ShotCraft under Open with for PNG, JPEG, GIF, BMP, TIFF and WebP pictures. ShotCraft does not become their default app.
+* The installer does not turn on Launch at Startup. That stays ShotCraft's own setting, as on macOS, so the setting and what Windows does cannot disagree.
+* An update is the newer installer run over the old one. It asks before it closes a running ShotCraft. An update that runs unattended starts ShotCraft again.
+* Uninstalling removes the program, its Start menu entry, its Open with entry, and what ShotCraft registered by itself while it ran from there: the login item and the `shotcraft://` link type. It asks before it removes the settings, and keeps them when it runs unattended.
+* The installer is not signed, so Windows SmartScreen warns about it the first time, as macOS warns about the app.
+
+Why: the owner wants an installer that leaves a PC ready, without sending the user to fetch something else first.
 
 ### Default hotkeys are Ctrl+Shift+1 to 4
 
@@ -91,9 +116,9 @@ Full screen, Area, Active window and Text recognition default to Ctrl+Shift+1, 2
 
 ### shotcraft:// is registered only while links are allowed
 
-There is no installer on Windows and Linux to declare the URL scheme, so ShotCraft registers it itself for the current user (Windows: `HKCU\Software\Classes\shotcraft`; Linux: a desktop entry and `xdg-mime`) when the user allows links in Preferences, and removes it when they turn links off. Everything in "URL scheme shotcraft:// added" still applies.
+The Windows installer does not declare the URL scheme and Linux has no installer, so ShotCraft registers the scheme itself for the current user (Windows: `HKCU\Software\Classes\shotcraft`; Linux: a desktop entry and `xdg-mime`) when the user allows links in Preferences, and removes it when they turn links off. The Windows uninstaller removes a registration that points at the copy it removes. Everything in "URL scheme shotcraft:// added" still applies.
 
-Why: an app without an installer should leave nothing behind in the system that the user did not turn on. The difference from macOS: a link can start ShotCraft only after links are allowed, so the "first link asks" question does not come up there.
+Why: ShotCraft should put nothing in the system that the user did not turn on. The difference from macOS: a link can start ShotCraft only after links are allowed, so the "first link asks" question does not come up there.
 
 ### The mouse wheel scrolls the picture; Ctrl+wheel zooms
 
@@ -103,4 +128,4 @@ Why: a mouse on those systems usually has a wheel and no trackpad, and long scro
 
 ### One copy per user session
 
-On Windows and Linux a second start of ShotCraft does not run a second copy. It tells the running one to show itself (or passes on the `shotcraft://` link it was started with) and quits. macOS does this for the app bundle by itself.
+On Windows and Linux a second start of ShotCraft does not run a second copy. It tells the running one to show itself (or passes on the `shotcraft://` link or the picture it was started with) and quits. macOS does this for the app bundle by itself.

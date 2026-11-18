@@ -19,7 +19,10 @@ Windows, pure-Rust X11 and D-Bus crates on Linux), as the Mac build does with `o
 | Vision text recognition | `Windows.Media.Ocr`, every language with its OCR feature installed | `ocrs` with built-in models (Latin script) |
 | Vision barcodes | `rxing` (QR, Aztec, Data Matrix, PDF417, 1D codes) | `rxing` |
 | Menu bar icon | tray icon (`tray-icon`) | StatusNotifierItem tray (`ksni`) |
-| App menu bar | the same menus in a menu bar across the top of the editor (ShotCraft, Capture, File, Edit, Draw, Zoom, Help) | same |
+| App menu bar | the same menus (ShotCraft, Capture, File, Edit, Draw, Zoom, Help) as submenus of the menu button at the left end of the editor's bar | the same menus in a menu bar across the top of the editor |
+| One bar in the title bar, in a window that fits the picture and grows by the options bar | the same bar under the title bar Windows draws (`sizing::Chrome::Unified(Lead::Menu)`), the same window sizes on the screen without the taskbar; the window is placed with `SetWindowPos` (`system::center_main_window`, `grow_main_window`) | the split arrangement (`sizing::Chrome::Split`): menu bar, centred tools, status bar, a wide window with a margin around the picture |
+| Open With: the bundle names the picture types, a file arrives as an Apple event | the installer lists ShotCraft under Open with (`Software\Classes\Applications\shotcraft.exe`); a launch with a picture while a copy runs hands it over on the single-instance port (`shotcraft:open`) | a launch with a picture while a copy runs hands it over the same way; nothing is registered |
+| A zip of `ShotCraft.app`, updated by Sparkle | `ShotCraft-<version>-Setup.exe` (Inno Setup, `packaging/windows/shotcraft.iss`), updated by running the newer one | no package |
 | ⌘ shortcuts | Ctrl (shown as Ctrl+…) | Ctrl |
 | Global hotkeys (`global-hotkey`) | same crate | X11: same crate. Wayland: the GlobalShortcuts portal (`portal_hotkeys.rs`; GNOME asks once for each changed set of keys, and the shortcut id carries the key) |
 | `osascript` notification | Windows toast (`notify-rust`) | desktop notification over D-Bus (`notify-rust`) |
@@ -45,6 +48,9 @@ cargo build --release
 
 - **Windows 10/11:** nothing else needed. Text recognition uses the languages installed in Settings → Time &
   language → Language & region (each language's *Optical character recognition* feature).
+  `scripts\windows\make-installer.ps1` builds the installer (it needs Inno Setup 6). The C runtime is linked into
+  `shotcraft.exe` (`.cargo/config.toml`), so the PC that runs it needs no Visual C++ redistributable. The script
+  fails if the exe asks for one.
 - **Linux:** a desktop with a StatusNotifierItem host for the tray (KDE, most others; GNOME needs the AppIndicator
   extension) and `xdg-desktop-portal` for Wayland (screenshots, printing, hotkeys). No C libraries are linked: X11 and
   Wayland libraries are loaded at run time.
@@ -58,7 +64,8 @@ Start it hidden in the tray with `--background`, as the login item does.
   on top of other windows and the thumbnail is placed by the desktop, because Wayland gives apps neither. The mouse
   pointer in screenshots is the desktop's choice. A minimized editor gets no frame callbacks, so nothing runs
   until it is restored; a hotkey or a tray click brings it back with the activation token the desktop sends, and so does
-  a link when its launcher passes one (`XDG_ACTIVATION_TOKEN`). A link without a token (Firefox as a snap) shows a
+  a link when its launcher passes one (`XDG_ACTIVATION_TOKEN`). A picture that a second launch hands over is not a
+  link: it brings no token and no notification, and opens once the editor is restored. A link without a token (Firefox as a snap) shows a
   "ShotCraft is waiting" notification instead, and a click on it, which carries a token, brings the editor back. A
   stall is detected by poking the UI (a repaint request that gets no pass within 400 ms), not by the queue, because a
   link's first pass starts the capture and the result then needs another. Closing the editor with ✕ avoids all this.
@@ -71,7 +78,9 @@ Start it hidden in the tray with `--background`, as the login item does.
   another GPU, and other X11 desktops (GNOME on Xorg, KDE, Xfce).
 - The Mac-only option "Trim shadow" is hidden: Windows and Linux capture a window without a shadow (Wallpaper draws one).
 - **Updates:** Sparkle (Check for Updates…) is macOS-only; Windows and Linux builds have no updater and never
-  connect to anything.
+  connect to anything. On Windows the installer of a newer version updates the app.
+- **The editor's bar:** on Windows the bar is under the title bar that Windows draws, not in it, and starts with a
+  menu button where macOS has the window buttons (DECISIONS.md). Linux keeps the split arrangement.
 - **Menu bar only (DECISIONS.md):** like macOS, starting ShotCraft on Windows or Linux shows the tray icon and no
   window; a window appears when you act (a capture, Open, Preferences…). Starting it again while it runs does not open
   the editor either, and the tray menu now holds every command (Current Image: Undo, Redo, Reset Crop, Rasterize, Save
@@ -89,7 +98,8 @@ Start it hidden in the tray with `--background`, as the login item does.
 ## Commands
 
 Every command lives once in `src/commands.rs` (Windows and Linux): id, label, icon, shortcuts, global hotkey,
-action, when it's enabled and whether it shows a check mark. The editor's menu bar, the tray menu, the editor's
+action, when it's enabled and whether it shows a check mark. The editor's menus (a menu bar on Linux, the submenus
+of the menu button on Windows), the tray menu, the editor's
 keys, the toolbar's tooltips, the empty-state buttons and the Keyboard Shortcuts window are all built from it; macOS
 keeps the author's menus and keys. Its tests check that ids are unique, no two commands share a shortcut, and each
 shortcut finds its own command.
@@ -118,7 +128,7 @@ shortcut finds its own command.
   [wayland-client, wayland-backend and wayland-protocols](https://github.com/Smithay/wayland-rs) (MIT; already in
   the tree through winit), [flate2](https://github.com/rust-lang/flate2-rs) (MIT/Apache-2.0).
 - Menu icons drawn for this port, in the same 24-px outline style: `assets/icons/folder.svg`, `info.svg`,
-  `timer.svg`, `window.svg`, `display.svg`, `undo.svg`, `redo.svg`, `zoom_in.svg`, `zoom_out.svg`.
+  `timer.svg`, `window.svg`, `display.svg`, `undo.svg`, `redo.svg`, `zoom_in.svg`, `zoom_out.svg`, `menu.svg`.
 
 ## Visual tests
 
@@ -130,9 +140,17 @@ something shows up as a failing test with a picture of the difference.
   `tests/reference/export/`. Pure CPU, the same on every system. Colour steps of a few levels are ignored.
 - `cargo test --test ui_snapshots -- --ignored` (on request): runs the app's `--screenshot` hooks for the
   menus, Preferences tabs, About, Keyboard Shortcuts, the empty editor and the capture crosshair, and compares
-  them with `tests/reference/ui-<system>/` (only Windows has references so far). It opens windows for about a
-  minute and the references are for 100% display scaling; screenshot runs always use the dark theme and the
-  default settings, whatever the computer uses.
+  them with `tests/reference/ui-<system>/` (only Windows has references so far). It opens windows for a few
+  minutes and the references are for 100% display scaling; screenshot runs always use the dark theme and the
+  default settings, whatever the computer uses. The workflow's Windows job runs it on a 1920 × 1080 display,
+  where the references were drawn, and keeps every picture (`SHOTCRAFT_UI_PICTURES`).
+- The same job runs three checks on its real desktop: `scripts/windows/check-editor.ps1` (no window at launch, a
+  picture handed to the running copy, the window's sizes), `scripts/windows/live-scroll.ps1` (a scrolling capture
+  of `tests/live/scroll-page.html` in a browser) and `scripts/windows/check-installer.ps1` (install, update,
+  uninstall, for one account and for all, and the installer's question about text recognition). Each one says what
+  it needs at its top. `check-installer.ps1 -InstallTextRecognition` runs on request only: it has Windows
+  Update install text recognition for real, which takes minutes. On pull requests the job also takes pictures of the
+  installer's pages (`scripts/windows/installer-pictures.ps1`), to look at.
 - A failure leaves the new picture and a red-marked difference in `visual-diffs` (named in the message).
   After a change on purpose, `SHOTCRAFT_UPDATE_REFERENCES=1` rewrites the references; look at them first.
 - Not covered: the hand-drawn text (each system's own font), the tray icon's menu (Windows draws it) and

@@ -13,10 +13,13 @@ use eframe::egui::{
 use std::collections::HashMap;
 use tiny_skia::Pixmap;
 
-pub use crate::sizing::{OPTIONS_H, STATUS_H, TOOLBAR_H};
+pub use crate::sizing::{MENUBAR_H, OPTIONS_H, STATUS_H, TOOLBAR_H};
 use crate::sizing::{seg_group_w, toolbar_cluster_left, toolbar_fit, Chrome, StatusCells, CHROME, STATUS_CELL_H, TOOLBAR_DRAG_W, TOOLBAR_EDGE, TOOLBAR_GROUP_GAP as GROUP_GAP, TOOLBAR_SEG_W as SEG_W};
 /// The unified bar draws its buttons without frames and holds the colour, size and zoom cells.
-const UNIFIED: bool = matches!(CHROME, Chrome::Unified);
+const UNIFIED: bool = matches!(CHROME, Chrome::Unified(_));
+// The window that grows for the options bar (`OptionsRoom`) needs `system::grow_main_window`,
+// which exists on the systems with the unified arrangement and only there.
+const _: () = assert!(UNIFIED == cfg!(any(target_os = "macos", target_os = "windows")));
 /// Narrowest width the editor window can have.
 pub const MIN_W: f32 = crate::sizing::EDITOR_MIN_SIZE.0;
 pub const MIN_H: f32 = crate::sizing::EDITOR_MIN_SIZE.1;
@@ -24,12 +27,6 @@ pub const MIN_H: f32 = crate::sizing::EDITOR_MIN_SIZE.1;
 /// far as a notch moves a page in a browser.
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 const WHEEL_SCROLL_BOOST: f32 = 2.5;
-/// Windows and Linux: the menu bar above the toolbar (macOS has the system's). Linux gets 6 px
-/// more: at 24 px its labels sat 1 px above the line under the bar.
-#[cfg(target_os = "windows")]
-pub const MENUBAR_H: f32 = 24.0;
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-pub const MENUBAR_H: f32 = 30.0;
 
 #[derive(Clone, Copy)]
 pub struct Th {
@@ -150,8 +147,8 @@ pub struct Editor {
     custom_color: Color32,
     canvas: Rect,
     options_w: f32,
-    /// macOS: where the options bar stands with the window that makes room for it.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    /// Unified arrangement: where the options bar stands with the window that makes room for it.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
     options_room: OptionsRoom,
     ruler_sensitivity: f32,
     wheel_acc: f32,
@@ -264,7 +261,7 @@ const FONTS: [FontKind; 2] = [FontKind::Sans, FontKind::Goofy];
 /// size on a later pass, so the bar comes only once the window has grown and goes only once the
 /// window has shrunk: the canvas keeps its size on every pass in between.
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 enum OptionsRoom {
     /// No bar; the window is as tall as it opened.
     Closed,
@@ -276,7 +273,7 @@ enum OptionsRoom {
     Closing { from: f32, passes: u8 },
 }
 
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 impl OptionsRoom {
     /// A window that has not reported its new height after this many passes will not: the bar
     /// stops waiting for it.
@@ -514,12 +511,29 @@ fn tool_group(ui: &mut Ui, items: &[(Icon, &str, bool)], t: &Th, seg_w: f32) -> 
         let (tile, ink) = button_colours(t, *sel, resp.hovered());
         ui.painter().rect_filled(r.shrink2(vec2(1.0, 0.0)), 6.0, tile);
         icons::draw(ui.painter(), Rect::from_center_size(r.center(), vec2(18.0, 18.0)), *icon, ink);
-        let resp = if tip.is_empty() { resp } else { resp.on_hover_text(*tip) };
-        if resp.clicked() {
+        if with_tip(resp, tip).clicked() {
             clicked = Some(i);
         }
     }
     clicked
+}
+
+/// What a toolbar button's tooltip says. The texts are written the macOS way ("Save (⌘S)"):
+/// Windows and Linux read ⌘ as Ctrl.
+fn tip_text(tip: &str) -> std::borrow::Cow<'_, str> {
+    #[cfg(target_os = "macos")]
+    return std::borrow::Cow::Borrowed(tip);
+    #[cfg(not(target_os = "macos"))]
+    crate::settings::keys(tip)
+}
+
+/// A toolbar button with its tooltip, in either arrangement.
+fn with_tip(resp: Response, tip: &str) -> Response {
+    if tip.is_empty() {
+        resp
+    } else {
+        resp.on_hover_text(tip_text(tip).into_owned())
+    }
 }
 
 /// A row of icon segments framed like a macOS segmented control; returns the clicked index.
@@ -541,12 +555,7 @@ fn segments(ui: &mut Ui, items: &[(Icon, &str, bool)], t: &Th, seg_w: f32) -> Op
         };
         ui.painter().rect_filled(r, 5.0, bg);
         icons::draw(ui.painter(), Rect::from_center_size(r.center(), vec2(17.0, 17.0)), *icon, if *sel { Color32::WHITE } else { t.text });
-        #[cfg(target_os = "macos")]
-        let resp = if tip.is_empty() { resp } else { resp.on_hover_text(*tip) };
-        // Windows and Linux: the tooltips' ⌘ keys read as Ctrl.
-        #[cfg(not(target_os = "macos"))]
-        let resp = if tip.is_empty() { resp } else { resp.on_hover_text(crate::settings::keys(tip).into_owned()) };
-        if resp.clicked() {
+        if with_tip(resp, tip).clicked() {
             clicked = Some(i);
         }
     }
@@ -1207,29 +1216,31 @@ impl App {
             self.keyboard(ui);
         }
         #[cfg(not(target_os = "macos"))]
-        egui::Panel::top("menubar")
-            .exact_size(MENUBAR_H)
-            .frame(egui::Frame::new().fill(t.bar).inner_margin(egui::Margin {
-                left: 6,
-                right: 6,
-                top: 3,
-                bottom: 0,
-            }))
-            .show(ui, |ui| self.menu_bar(ui, &t));
-        // The unified bar is the window's title bar: white in the light appearance, as the
-        // reference app's is.
+        if !UNIFIED {
+            egui::Panel::top("menubar")
+                .exact_size(MENUBAR_H)
+                .frame(egui::Frame::new().fill(t.bar).inner_margin(egui::Margin {
+                    left: 6,
+                    right: 6,
+                    top: 3,
+                    bottom: 0,
+                }))
+                .show(ui, |ui| self.menu_bar(ui, &t));
+        }
+        // The unified bar is white in the light appearance, as the reference app's is.
         let toolbar_fill = if UNIFIED && !dark { Color32::WHITE } else { t.bar };
         egui::Panel::top("toolbar")
             .exact_size(TOOLBAR_H)
             .frame(egui::Frame::new().fill(toolbar_fill))
             .show(ui, |ui| self.toolbar(ui, &t));
         let options = self.doc.is_some() && (self.selected_image().is_some() || !matches!(self.context_tool(), Tool::Select | Tool::Cut | Tool::Ocr));
-        // macOS: the window opens as tall as the picture and its bar, so the options bar has no
+        // Unified: the window opens as tall as the picture and its bar, so the options bar has no
         // room of its own. The window grows by the bar when it comes and gives the points back
         // when it goes: the picture under it neither moves nor changes zoom.
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         let options = {
-            let drawn = self.ed.options_room.step(options, ui.max_rect().height(), crate::system::grow_main_window);
+            let ctx = ui.ctx().clone();
+            let drawn = self.ed.options_room.step(options, ui.max_rect().height(), |dy| crate::system::grow_main_window(&ctx, dy));
             if self.ed.options_room.waits() {
                 ui.ctx().request_repaint();
             }
@@ -1341,10 +1352,16 @@ impl App {
         // Every tool is shown when the window is wide enough; a narrower one moves the last ones
         // (the selection actions first) into the "More" menu.
         let fit = toolbar_fit(rect.width());
+        // Windows: the menus behind one button, where the macOS bar has the window buttons.
+        #[cfg(not(target_os = "macos"))]
+        if matches!(CHROME, Chrome::Unified(crate::sizing::Lead::Menu)) {
+            let centre = pos2(rect.left() + TOOLBAR_EDGE + seg_group_w(1) / 2.0, rect.center().y);
+            self.menu_button(ui, t, Rect::from_center_size(centre, vec2(seg_group_w(1), 28.0)));
+        }
         ui.scope_builder(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(0.0, 5.0))), |ui| {
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = GROUP_GAP;
-                // The groups are centred in the window (the Preferences button is pinned right).
+                // After the lead (unified), or centred in the window (split).
                 ui.add_space(toolbar_cluster_left(rect.width(), fit));
                 if let Some(i) = tool_group(
                     ui,
@@ -1426,11 +1443,11 @@ impl App {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(TOOLBAR_EDGE);
-                    // Windows and Linux: Preferences ends the bar, and its tooltip names the command
-                    // table's shortcut (Ctrl+,). macOS has the cells there, as the reference app
-                    // does; Preferences is in the menu bar icon menu and on ⌘,.
+                    // Split: Preferences ends the bar, and its tooltip names the command table's
+                    // shortcut (Ctrl+,). The unified bar has the cells there, as the reference app
+                    // does; Preferences is in the menus and on its shortcut.
                     #[cfg(not(target_os = "macos"))]
-                    if tool_group(ui, &[(Icon::Gear, &PREFERENCES.tooltip(), false)], t, SEG_W).is_some() {
+                    if !UNIFIED && tool_group(ui, &[(Icon::Gear, &PREFERENCES.tooltip(), false)], t, SEG_W).is_some() {
                         self.open_prefs();
                     }
                     if UNIFIED {
@@ -1443,64 +1460,71 @@ impl App {
         });
     }
 
-    /// Windows and Linux: the macOS menu bar's menus (`commands::MENU_BAR`), in a menu bar across
-    /// the top of the editor.
+    /// The rows of one of the editor's menus (`commands::MENU_BAR`). A row that is clicked leaves
+    /// its action in `picked`.
+    #[cfg(not(target_os = "macos"))]
+    fn menu_rows(&self, ui: &mut Ui, t: &Th, items: &[crate::commands::Item], picked: &std::cell::Cell<Option<Action>>) {
+        use crate::commands::{Item, DRAW};
+        ui.set_width(MENU_W);
+        ui.spacing_mut().item_spacing.y = 1.0;
+        for item in items {
+            match item {
+                Item::Cmd(c) => {
+                    let row = MenuRow {
+                        icon: c.icon,
+                        label: &crate::commands::session_label(c),
+                        keys: &c.shown_keys(&self.settings),
+                        checked: c.checked.map(|on| on(&self.settings)),
+                        enabled: (c.enabled)(self),
+                    };
+                    if bar_row(ui, t, row) {
+                        picked.set(Some((c.action)()));
+                    }
+                }
+                Item::Separator => {
+                    ui.separator();
+                }
+                Item::Tools => {
+                    for tool in DRAW {
+                        let (label, keys) = crate::commands::tool_name_and_key(tool);
+                        let row = MenuRow {
+                            icon: Some(Icon::for_tool(tool)),
+                            label,
+                            keys,
+                            checked: (self.ed.tool == tool).then_some(true),
+                            enabled: self.doc.is_some(),
+                        };
+                        if bar_row(ui, t, row) {
+                            picked.set(Some(Action::Tool(tool)));
+                        }
+                    }
+                }
+                // Only the tray has submenus (a test in `commands` holds the menu bar to that).
+                Item::Sub(..) => {}
+            }
+        }
+    }
+
+    /// Test hook: SHOTCRAFT_MENU=<name> opens that menu so --screenshot can show it.
+    #[cfg(not(target_os = "macos"))]
+    fn menu_open_for_shot(&self) -> Option<String> {
+        self.screenshot.as_ref().and_then(|_| std::env::var("SHOTCRAFT_MENU").ok())
+    }
+
+    /// Linux: the macOS menu bar's menus (`commands::MENU_BAR`), in a menu bar across the top of
+    /// the editor.
     #[cfg(not(target_os = "macos"))]
     fn menu_bar(&mut self, ui: &mut Ui, t: &Th) {
-        use crate::commands::{Item, DRAW, MENU_BAR};
         let rect = ui.max_rect();
         ui.painter().line_segment(
             [rect.left_bottom(), rect.right_bottom()],
             Stroke::new(1.0, t.line),
         );
-        // Test hook: SHOTCRAFT_MENU=<name> opens that menu so --screenshot can show it.
-        let open_for_shot = self
-            .screenshot
-            .as_ref()
-            .and_then(|_| std::env::var("SHOTCRAFT_MENU").ok());
+        let open_for_shot = self.menu_open_for_shot();
         let picked: std::cell::Cell<Option<Action>> = std::cell::Cell::new(None);
         let th = *t;
         let app: &App = self;
-        let has_doc = app.doc.is_some();
-        let items = |ui: &mut Ui, items: &[Item]| {
-            for item in items {
-                match item {
-                    Item::Cmd(c) => {
-                        let row = MenuRow {
-                            icon: c.icon,
-                            label: &crate::commands::session_label(c),
-                            keys: &c.shown_keys(&app.settings),
-                            checked: c.checked.map(|on| on(&app.settings)),
-                            enabled: (c.enabled)(app),
-                        };
-                        if bar_row(ui, &th, row) {
-                            picked.set(Some((c.action)()));
-                        }
-                    }
-                    Item::Separator => {
-                        ui.separator();
-                    }
-                    Item::Tools => {
-                        for tool in DRAW {
-                            let (label, keys) = crate::commands::tool_name_and_key(tool);
-                            let row = MenuRow {
-                                icon: Some(Icon::for_tool(tool)),
-                                label,
-                                keys,
-                                checked: (app.ed.tool == tool).then_some(true),
-                                enabled: has_doc,
-                            };
-                            if bar_row(ui, &th, row) {
-                                picked.set(Some(Action::Tool(tool)));
-                            }
-                        }
-                    }
-                    // Only the tray has submenus (a test in `commands` holds the menu bar to that).
-                    Item::Sub(..) => {}
-                }
-            }
-        };
-        let top = |ui: &mut Ui, name: &str, contents: &[Item]| {
+        let top = |ui: &mut Ui, name: &str, contents: &[crate::commands::Item]| {
             // egui doesn't light up a menu's title while it's open; the button is marked selected
             // here (its popup id is the button's id with "popup", as Popup::menu makes it).
             let popup_id = ui.next_auto_id().with("popup");
@@ -1508,11 +1532,7 @@ impl App {
             let (response, _) = egui::containers::menu::MenuButton::from_button(
                 egui::Button::new(name).selected(open),
             )
-            .ui(ui, |ui| {
-                ui.set_width(MENU_W);
-                ui.spacing_mut().item_spacing.y = 1.0;
-                items(ui, contents)
-            });
+            .ui(ui, |ui| app.menu_rows(ui, &th, contents, &picked));
             if open_for_shot.as_deref() == Some(name) {
                 egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&response));
             }
@@ -1523,8 +1543,46 @@ impl App {
             .style(bar_style)
             .config(egui::containers::menu::MenuConfig::new().style(popup_style))
             .ui(ui, |ui| {
-                for (name, contents) in MENU_BAR {
+                for (name, contents) in crate::commands::MENU_BAR {
                     top(ui, name, contents);
+                }
+            });
+        if let Some(a) = picked.into_inner() {
+            self.push(a);
+        }
+    }
+
+    /// Windows: the same menus behind one button of the unified bar, each one a submenu. `at` is
+    /// where the button goes.
+    #[cfg(not(target_os = "macos"))]
+    fn menu_button(&mut self, ui: &mut Ui, t: &Th, at: Rect) {
+        use egui::containers::menu::MenuConfig;
+        let open_for_shot = self.menu_open_for_shot();
+        let picked: std::cell::Cell<Option<Action>> = std::cell::Cell::new(None);
+        let th = *t;
+        let resp = ui.interact(at, ui.id().with("menu-button"), Sense::click());
+        let popup_id = egui::Popup::default_response_id(&resp);
+        if open_for_shot.is_some() {
+            egui::Popup::open_id(ui.ctx(), popup_id);
+        }
+        let open = egui::Popup::is_id_open(ui.ctx(), popup_id);
+        let (tile, ink) = button_colours(t, open, resp.hovered());
+        ui.painter().rect_filled(at.shrink(2.0), 5.0, tile);
+        icons::draw(ui.painter(), Rect::from_center_size(at.center(), vec2(17.0, 17.0)), Icon::Menu, ink);
+        let resp = resp.on_hover_text("Menu");
+        // Tagged like the menus of egui's own menu bar, so that the submenus take this style too.
+        let config = MenuConfig::new().style(move |s: &mut egui::Style| menu_popup_style(s, &th));
+        let app: &App = self;
+        egui::Popup::menu(&resp)
+            .close_behavior(config.close_behavior)
+            .style(config.style.clone())
+            .info(egui::UiStackInfo::new(egui::UiKind::Menu).with_tag_value(MenuConfig::MENU_CONFIG_TAG, config))
+            .show(|ui| {
+                ui.set_width(TOP_MENU_W);
+                ui.spacing_mut().item_spacing.y = 1.0;
+                for (name, contents) in crate::commands::MENU_BAR {
+                    let forced = open_for_shot.as_deref() == Some(*name);
+                    submenu_row(ui, &th, name, forced, |ui| app.menu_rows(ui, &th, contents, &picked));
                 }
             });
         if let Some(a) = picked.into_inner() {
@@ -2447,22 +2505,22 @@ impl App {
             Key::PageDown => -page,
             Key::PageUp => page,
             // The top (bottom) of the picture to the top (bottom) of the window, with the fit's margin.
-            Key::Home => rect.top() + 24.0 - view.top(),
-            Key::End => rect.bottom() - 24.0 - view.bottom(),
+            Key::Home => rect.top() + SCROLL_MARGIN - view.top(),
+            Key::End => rect.bottom() - SCROLL_MARGIN - view.bottom(),
             _ => return,
         };
         self.scroll_by(vec2(0.0, dy));
     }
 
     /// Windows and Linux: moves the picture by `d` (points on screen), never past its own top, bottom
-    /// and sides: an edge stops at the window's 24 point margin (`scroll_limit`).
+    /// and sides: an edge stops at the window's margin (`scroll_limit`).
     #[cfg(not(target_os = "macos"))]
     fn scroll_by(&mut self, d: Vec2) {
         let Some(doc) = &self.doc else { return };
         let content = self.ed.rect_screen(&self.ed.view_area(doc));
         let rect = self.ed.canvas;
-        let dx = scroll_limit(rect.left(), rect.right(), content.left(), content.right(), d.x);
-        let dy = scroll_limit(rect.top(), rect.bottom(), content.top(), content.bottom(), d.y);
+        let dx = scroll_limit(rect.left(), rect.right(), content.left(), content.right(), d.x, SCROLL_MARGIN, SCROLL_SLACK);
+        let dy = scroll_limit(rect.top(), rect.bottom(), content.top(), content.bottom(), d.y, SCROLL_MARGIN, SCROLL_SLACK);
         if dx != 0.0 || dy != 0.0 {
             self.ed.pan += vec2(dx, dy);
             self.ed.fit = false;
@@ -3288,7 +3346,7 @@ impl App {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = t;
-            self.about_open = crate::dialog::show(ctx, "about", "About ShotCraft", ABOUT_SIZE, self.about_open, &self.about_dialog, about_body);
+            self.about_open = crate::dialog::show(ctx, "about", "About ShotCraft", ABOUT_SIZE, self.about_open, &self.about_dialog, |ui, t| about_body(ui, t, env!("CARGO_PKG_VERSION")));
             let rows = self.shortcuts_open.then(|| crate::commands::shortcut_rows(&self.settings));
             self.shortcuts_open = crate::dialog::show(ctx, "shortcuts", "Keyboard Shortcuts", SHORTCUTS_SIZE, self.shortcuts_open, &self.shortcuts_dialog, move |ui, t| {
                 if let Some(rows) = &rows {
@@ -3299,8 +3357,10 @@ impl App {
     }
 }
 
+/// The About window's contents. `version` is the app's, except in the picture the visual tests
+/// compare, which must not change with every release.
 #[cfg(not(target_os = "macos"))]
-fn about_body(ui: &mut Ui, t: &Th) {
+fn about_body(ui: &mut Ui, t: &Th, version: &str) {
     ui.horizontal(|ui| {
         let (r, _) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::hover());
         icons::draw(ui.painter(), r, Icon::Ocr, t.accent);
@@ -3312,7 +3372,7 @@ fn about_body(ui: &mut Ui, t: &Th) {
                     .family(FontFamily::Name("medium".into()))
                     .color(t.text),
             );
-            ui.label(egui::RichText::new(concat!("Version ", env!("CARGO_PKG_VERSION"))).color(t.dim));
+            ui.label(egui::RichText::new(format!("Version {version}")).color(t.dim));
         });
     });
     ui.add_space(10.0);
@@ -3402,9 +3462,12 @@ pub const SHORTCUTS_SIZE: [f32; 2] = [860.0, 600.0];
 #[cfg(not(target_os = "macos"))]
 const SHORTCUTS_LEFT_W: f32 = 290.0;
 
-/// Width of the menus under the menu bar (Windows and Linux).
+/// Width of the editor's menus (Windows and Linux).
 #[cfg(not(target_os = "macos"))]
 const MENU_W: f32 = 290.0;
+/// Width of the list of menus under the unified bar's menu button (Windows).
+#[cfg(not(target_os = "macos"))]
+const TOP_MENU_W: f32 = 168.0;
 
 /// One item of the editor's menus.
 #[cfg(not(target_os = "macos"))]
@@ -3483,6 +3546,31 @@ fn bar_row(ui: &mut Ui, t: &Th, row: MenuRow) -> bool {
     false
 }
 
+/// A row that opens one of the editor's menus beside it: its name and a chevron. `forced` holds
+/// the menu open (the screenshot test hook).
+#[cfg(not(target_os = "macos"))]
+fn submenu_row(ui: &mut Ui, t: &Th, label: &str, forced: bool, contents: impl FnOnce(&mut Ui)) {
+    use egui::containers::menu::{MenuState, SubMenu};
+    let sub = SubMenu::id_from_widget_id(ui.next_auto_id());
+    if forced {
+        // egui closes a submenu that was not shown on the pass before: say it was.
+        MenuState::mark_shown(ui.ctx(), sub);
+        MenuState::from_ui(ui, |state, _| state.open_item = Some(sub));
+    }
+    let open = MenuState::from_ui(ui, |state, _| state.open_item == Some(sub));
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width().max(TOP_MENU_W - 12.0), 26.0), Sense::click());
+    let hot = open || resp.hovered() || resp.has_focus();
+    let painter = ui.painter();
+    if hot {
+        painter.rect_filled(rect, 5.0, t.accent);
+    }
+    let fg = if hot { Color32::WHITE } else { t.text };
+    painter.text(pos2(rect.left() + 12.0, rect.center().y), Align2::LEFT_CENTER, label, FontId::new(13.0, FontFamily::Proportional), fg);
+    let tip = pos2(rect.right() - 11.0, rect.center().y);
+    painter.line(vec![tip + vec2(-4.0, -4.0), tip, tip + vec2(-4.0, 4.0)], Stroke::new(1.5, fg));
+    SubMenu::new().show(ui, &resp, contents);
+}
+
 /// The menu bar's titles: plain text that lights up under the pointer and while its menu is open.
 #[cfg(not(target_os = "macos"))]
 fn menu_bar_style(s: &mut egui::Style, t: &Th) {
@@ -3536,7 +3624,7 @@ pub fn dialog_preview(ui: &mut Ui, which: &str, settings: &crate::settings::Sett
             if which == "shortcuts" {
                 shortcuts_body(ui, &t, &crate::commands::shortcut_rows(settings))
             } else {
-                about_body(ui, &t)
+                about_body(ui, &t, "0.0.0")
             }
         });
 }
@@ -4047,12 +4135,12 @@ mod key_tests {
         let top = |t: &Rig| t.app.ed.to_screen(p(0.0, 0.0)).y;
         assert!(bottom(&t) > t.app.ed.canvas.bottom(), "starts at the top, the rest below the window");
         t.key(Key::End, NONE);
-        assert!((bottom(&t) - (t.app.ed.canvas.bottom() - 24.0)).abs() < 1.0, "End: {}", bottom(&t));
+        assert!((bottom(&t) - (t.app.ed.canvas.bottom() - SCROLL_MARGIN)).abs() < 1.0, "End: {}", bottom(&t));
         let before = top(&t);
         t.key(Key::PageUp, NONE);
         assert!((top(&t) - before - t.app.ed.canvas.height() * 0.9).abs() < 1.0, "Page Up moves most of a window");
         t.key(Key::Home, NONE);
-        assert!((top(&t) - (t.app.ed.canvas.top() + 24.0)).abs() < 1.0, "Home: {}", top(&t));
+        assert!((top(&t) - (t.app.ed.canvas.top() + SCROLL_MARGIN)).abs() < 1.0, "Home: {}", top(&t));
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -4085,11 +4173,11 @@ mod key_tests {
         for _ in 0..6 {
             wheel(&mut t, -60.0, NONE);
         }
-        assert!((bottom(&t) - (t.app.ed.canvas.bottom() - 24.0)).abs() < 1.0, "stops at the bottom: {}", bottom(&t));
+        assert!((bottom(&t) - (t.app.ed.canvas.bottom() - SCROLL_MARGIN)).abs() < 1.0, "stops at the bottom: {}", bottom(&t));
         for _ in 0..6 {
             wheel(&mut t, 60.0, NONE);
         }
-        assert!((top(&t) - (t.app.ed.canvas.top() + 24.0)).abs() < 1.0, "stops at the top: {}", top(&t));
+        assert!((top(&t) - (t.app.ed.canvas.top() + SCROLL_MARGIN)).abs() < 1.0, "stops at the top: {}", top(&t));
         // Dragging the bar far past its end, and Page Down at the end, go no further.
         let rect = t.app.ed.canvas;
         let bar = scrollbar(rect, t.app.ed.rect_screen(&R { x0: 0.0, y0: 0.0, x1: 400.0, y1: 4000.0 }), true).expect("bar");
@@ -4099,9 +4187,9 @@ mod key_tests {
         t.frame(vec![Event::PointerMoved(from + vec2(0.0, 60.0))], NONE);
         t.frame(vec![Event::PointerMoved(to)], NONE);
         t.frame(vec![Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: NONE }, Event::PointerGone], NONE);
-        assert!((bottom(&t) - (rect.bottom() - 24.0)).abs() < 1.0, "the bar stops at the bottom: {}", bottom(&t));
+        assert!((bottom(&t) - (rect.bottom() - SCROLL_MARGIN)).abs() < 1.0, "the bar stops at the bottom: {}", bottom(&t));
         t.key(Key::PageDown, NONE);
-        assert!((bottom(&t) - (rect.bottom() - 24.0)).abs() < 1.0, "Page Down at the end: {}", bottom(&t));
+        assert!((bottom(&t) - (rect.bottom() - SCROLL_MARGIN)).abs() < 1.0, "Page Down at the end: {}", bottom(&t));
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -4611,14 +4699,63 @@ mod toolbar_look_tests {
         crate::headless::save_png(&img, &std::path::Path::new(&dir).join("after-480-more-menu.png"));
     }
 
-    /// Where the drag handle sits in a toolbar of this width.
-    #[cfg(target_os = "macos")]
-    fn drag_handle_center(width: f32) -> egui::Pos2 {
-        let left = toolbar_cluster_left(width, toolbar_fit(width)) + seg_group_w(crate::sizing::TOOLBAR_COPY_ITEMS) + GROUP_GAP;
-        egui::pos2(left + TOOLBAR_DRAG_W / 2.0, TOOLBAR_H / 2.0)
+    /// Windows: a click on the menu button shows the menus, pointing at one opens it beside the
+    /// list, and a click on one of its rows runs the command and closes everything.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_menu_button_opens_the_menus_and_a_row_runs_its_command() {
+        use egui::{Event, Modifiers, PointerButton};
+        let size = (900.0, 612.0);
+        let click = |at: egui::Pos2| {
+            vec![
+                Event::PointerMoved(at),
+                Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE },
+                Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE },
+            ]
+        };
+        // Where `tests/reference/ui-windows/menu-draw.png` shows them: the button at the left end
+        // of the bar, Draw as the fifth menu of the list, Arrow as the first row of its menu.
+        let button = egui::pos2(TOOLBAR_EDGE + seg_group_w(1) / 2.0, TOOLBAR_H / 2.0);
+        let (draw, arrow) = (egui::pos2(100.0, 168.0), egui::pos2(340.0, 168.0));
+        crate::headless::with_rig(|rig| {
+            let mut app = rig.app();
+            app.doc = Some(Doc::new(picture(), 2.0));
+            rig.render_window(size, 2.0, vec![], |ui| app.editor_ui(ui));
+            assert!(!egui::Popup::is_any_open(&rig.ctx), "nothing is open before the click");
+            rig.render_window(size, 2.0, click(button), |ui| app.editor_ui(ui));
+            assert!(egui::Popup::is_any_open(&rig.ctx), "the button opens the list of menus");
+            rig.render_window(size, 2.0, vec![Event::PointerMoved(draw)], |ui| app.editor_ui(ui));
+            rig.render_window(size, 2.0, vec![Event::PointerMoved(arrow)], |ui| app.editor_ui(ui));
+            assert!(app.queue.lock().unwrap().is_empty(), "pointing runs nothing");
+            rig.render_window(size, 2.0, click(arrow), |ui| app.editor_ui(ui));
+            let picked = app.queue.lock().unwrap().iter().any(|a| matches!(a, Action::Tool(Tool::Arrow)));
+            assert!(picked, "the Arrow row of the Draw menu picks the Arrow tool");
+            rig.render_window(size, 2.0, vec![Event::PointerGone], |ui| app.editor_ui(ui));
+            assert!(!egui::Popup::is_any_open(&rig.ctx), "the menus close after a command");
+        });
     }
-    /// Windows and Linux: under the menu bar.
-    #[cfg(not(target_os = "macos"))]
+
+    /// The toolbar's tooltips name their keys the way the system writes them, in both
+    /// arrangements: ⌘ on macOS, Ctrl on Windows and Linux.
+    #[test]
+    fn toolbar_tooltips_name_the_keys_of_this_system() {
+        let tips = ["Copy (Esc or ⌘C)", "Save (⌘S)", "Pin to Screen (⌘P)", Tool::Ocr.tooltip(), Tool::Arrow.tooltip()];
+        for tip in tips {
+            let shown = tip_text(tip);
+            if cfg!(target_os = "macos") {
+                assert_eq!(shown, tip);
+            } else {
+                assert!(!shown.contains('⌘'), "{shown}");
+            }
+        }
+        if cfg!(not(target_os = "macos")) {
+            assert_eq!(tip_text("Save (⌘S)"), "Save (Ctrl+S)");
+            assert_eq!(tip_text("Copy (Esc or ⌘C)"), "Copy (Esc or Ctrl+C)");
+        }
+        assert_eq!(tip_text("Arrow (A)"), "Arrow (A)");
+    }
+
+    /// Where the drag handle sits in a toolbar of this width (under the menu bar, where there is one).
     fn drag_handle_center(width: f32) -> egui::Pos2 {
         let left = toolbar_cluster_left(width, toolbar_fit(width)) + seg_group_w(crate::sizing::TOOLBAR_COPY_ITEMS) + GROUP_GAP;
         egui::pos2(left + TOOLBAR_DRAG_W / 2.0, MENUBAR_H + TOOLBAR_H / 2.0)
@@ -4751,16 +4888,24 @@ mod scrollbar_tests {
 
     #[test]
     fn a_scroll_stops_at_the_ends_of_the_picture() {
-        // A window 0..600 and a picture 0..6000 tall, its top at the margin (24).
-        assert_eq!(scroll_limit(0.0, 600.0, 24.0, 6024.0, 100.0), 0.0, "nothing above the top");
-        assert_eq!(scroll_limit(0.0, 600.0, 24.0, 6024.0, -100.0), -100.0);
+        // A window 0..600 with a margin of 24, as the split arrangement has, and a picture 0..6000
+        // tall, its top at the margin.
+        let limit = |c_lo: f32, c_hi: f32, d: f32| scroll_limit(0.0, 600.0, c_lo, c_hi, d, 24.0, 48.0);
+        assert_eq!(limit(24.0, 6024.0, 100.0), 0.0, "nothing above the top");
+        assert_eq!(limit(24.0, 6024.0, -100.0), -100.0);
         // Near the end: only as far as the bottom edge at 576.
-        assert_eq!(scroll_limit(0.0, 600.0, -5300.0, 700.0, -500.0), -124.0);
+        assert_eq!(limit(-5300.0, 700.0, -500.0), -124.0);
         // A picture that fits doesn't move.
-        assert_eq!(scroll_limit(0.0, 600.0, 100.0, 400.0, -50.0), 0.0);
+        assert_eq!(limit(100.0, 400.0, -50.0), 0.0);
         // Already past the end (dragged there): it may come back, not go further.
-        assert_eq!(scroll_limit(0.0, 600.0, -5600.0, 400.0, -10.0), 0.0);
-        assert_eq!(scroll_limit(0.0, 600.0, -5600.0, 400.0, 50.0), 50.0);
+        assert_eq!(limit(-5600.0, 400.0, -10.0), 0.0);
+        assert_eq!(limit(-5600.0, 400.0, 50.0), 50.0);
+        // The unified arrangement: a picture that fills the window stays put, and a longer one
+        // stops 9 points from the window's edges.
+        let unified = |c_lo: f32, c_hi: f32, d: f32| scroll_limit(0.0, 600.0, c_lo, c_hi, d, 9.0, 0.0);
+        assert_eq!(unified(0.0, 600.0, -50.0), 0.0, "as tall as the window");
+        assert_eq!(unified(9.0, 591.0, 50.0), 0.0, "shrunk to fit");
+        assert_eq!(unified(9.0, 6009.0, -6000.0), -5418.0);
     }
     #[test]
     fn a_picture_that_fits_has_no_bars() {
@@ -4789,19 +4934,29 @@ mod scrollbar_tests {
     }
 }
 
-/// How far a scroll of `d` may move a picture spanning `c_lo..c_hi` on screen, in a window
-/// spanning `lo..hi`, along one axis. A picture longer than the window stops with its edge at the
-/// window's margin; one that fits doesn't scroll. A picture already past a stop (moved with
-/// Space+drag, or zoomed) may come back but never go further.
+/// Windows and Linux: how far from the window's edge a scrolled picture's edge stops. It is what
+/// the fit leaves on each side of a picture too large for the window, so a long capture opens
+/// at its first stop.
 #[cfg(not(target_os = "macos"))]
-fn scroll_limit(lo: f32, hi: f32, c_lo: f32, c_hi: f32, d: f32) -> f32 {
-    const MARGIN: f32 = 24.0;
+const SCROLL_MARGIN: f32 = CHROME.fit_margin(false) / 2.0;
+/// ... and how much shorter than the window a picture is, at most, when the fit shows it whole at
+/// its own size. Such a picture does not scroll: in the unified arrangement it fills the window.
+#[cfg(not(target_os = "macos"))]
+const SCROLL_SLACK: f32 = CHROME.fit_margin(true);
+
+/// How far a scroll of `d` may move a picture spanning `c_lo..c_hi` on screen, in a window
+/// spanning `lo..hi`, along one axis. A picture no longer than the window less `slack` is whole
+/// in it and doesn't scroll. A longer one stops with its edge `margin` from the window's. A
+/// picture already past a stop (moved with Space+drag, or zoomed) may come back but never go
+/// further.
+#[cfg(not(target_os = "macos"))]
+fn scroll_limit(lo: f32, hi: f32, c_lo: f32, c_hi: f32, d: f32, margin: f32, slack: f32) -> f32 {
     let size = c_hi - c_lo;
-    if size <= hi - lo - 2.0 * MARGIN {
+    if size <= hi - lo - slack {
         return 0.0;
     }
     // Where the picture's first edge may be: from showing its end to showing its start.
-    let (first, last) = (hi - MARGIN - size, lo + MARGIN);
+    let (first, last) = (hi - margin - size, lo + margin);
     let to = (c_lo + d).clamp(first.min(c_lo), last.max(c_lo));
     to - c_lo
 }

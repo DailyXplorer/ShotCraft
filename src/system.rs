@@ -551,7 +551,7 @@ pub fn center_main_window(_ctx: &eframe::egui::Context, size: impl Fn(f32, f32) 
 /// can't get taller than its screen, one that would end below the screen moves up, and a window
 /// in full screen is left alone.
 #[cfg(target_os = "macos")]
-pub fn grow_main_window(dy: f32) -> f32 {
+pub fn grow_main_window(_ctx: &eframe::egui::Context, dy: f32) -> f32 {
     use objc2::MainThreadMarker;
     use objc2_app_kit::{NSApplication, NSWindowStyleMask};
     use objc2_foundation::{NSPoint, NSRect, NSSize};
@@ -570,9 +570,114 @@ pub fn grow_main_window(dy: f32) -> f32 {
     (height - frame.size.height) as f32
 }
 
-/// Sizes the editor for its screen and centres it there. The screen size includes the taskbar or
+/// Windows: the editor's window, noted when it is made. Sizing it through Win32 takes effect at
+/// once, as AppKit's calls do on macOS: egui's own commands wait for the end of the pass, and a
+/// window sized and then grown for the options bar in one pass kept its old size.
+#[cfg(target_os = "windows")]
+static EDITOR_WINDOW: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+#[cfg(target_os = "windows")]
+pub fn remember_editor_window(cc: &eframe::CreationContext<'_>) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    if let Ok(RawWindowHandle::Win32(handle)) = cc.window_handle().map(|h| h.as_raw()) {
+        EDITOR_WINDOW.store(handle.hwnd.get(), std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Windows: where the editor window is, in pixels.
+#[cfg(target_os = "windows")]
+struct Placed {
+    window: windows::Win32::Foundation::HWND,
+    /// The whole window, with the title bar and the borders Windows draws: left, top, width, height.
+    outer: (i32, i32, i32, i32),
+    /// What Windows adds around the editor's own area, both sides together.
+    frame: (i32, i32),
+    /// The part of the window's screen that windows may use (the screen without the taskbar), or
+    /// the main screen's for a window that is on none (parked out of sight before its first show).
+    free: (i32, i32, i32, i32),
+}
+
+#[cfg(target_os = "windows")]
+impl Placed {
+    /// The editor window in its normal state. A minimized or maximized one is restored first when
+    /// `restore` is set, and gives None otherwise; so does a window in full screen.
+    fn editor(ctx: &eframe::egui::Context, restore: bool) -> Option<Placed> {
+        use windows::Win32::Foundation::{HWND, RECT};
+        use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTOPRIMARY};
+        use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, GetWindowRect, IsIconic, IsZoomed, ShowWindow, SW_RESTORE};
+        let handle = EDITOR_WINDOW.load(std::sync::atomic::Ordering::Relaxed);
+        if handle == 0 || ctx.input(|i| i.viewport().fullscreen) == Some(true) {
+            return None;
+        }
+        let window = HWND(handle as *mut std::ffi::c_void);
+        let (mut outer, mut client) = (RECT::default(), RECT::default());
+        let mut screen = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        // SAFETY: `window` is the editor's window, which lives as long as the app; the calls read
+        // its state, or restore it, and write only into the structures they are given.
+        unsafe {
+            // A minimized window that was maximized takes two steps back to its normal state.
+            for _ in 0..2 {
+                if !(IsIconic(window).as_bool() || IsZoomed(window).as_bool()) {
+                    break;
+                }
+                if !restore {
+                    return None;
+                }
+                let _ = ShowWindow(window, SW_RESTORE);
+            }
+            GetWindowRect(window, &mut outer).ok()?;
+            GetClientRect(window, &mut client).ok()?;
+            GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTOPRIMARY), &mut screen).ok().ok()?;
+        }
+        let (width, height) = (outer.right - outer.left, outer.bottom - outer.top);
+        let free = screen.rcWork;
+        Some(Placed {
+            window,
+            outer: (outer.left, outer.top, width, height),
+            frame: ((width - client.right).max(0), (height - client.bottom).max(0)),
+            free: (free.left, free.top, free.right - free.left, free.bottom - free.top),
+        })
+    }
+
+    fn move_to(&self, left: i32, top: i32, width: i32, height: i32) {
+        use windows::Win32::UI::WindowsAndMessaging::{SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER};
+        // SAFETY: moves and sizes the editor's own window; no memory is involved.
+        let _ = unsafe { SetWindowPos(self.window, None, left, top, width, height, SWP_NOZORDER | SWP_NOACTIVATE) };
+    }
+}
+
+/// Windows: sizes the editor for its screen and puts it there, centred and a little above the
+/// middle, as on macOS. `size` gets what the screen has free for the editor's own area: the
+/// screen without the taskbar, less the window's title bar and borders. A window in full screen
+/// is left as it is.
+#[cfg(target_os = "windows")]
+pub fn center_main_window(ctx: &eframe::egui::Context, size: impl Fn(f32, f32) -> (f32, f32)) {
+    let Some(at) = Placed::editor(ctx, true) else { return };
+    let ppp = ctx.pixels_per_point().max(0.5);
+    let (w, h) = size((at.free.2 - at.frame.0).max(1) as f32 / ppp, (at.free.3 - at.frame.1).max(1) as f32 / ppp);
+    let outer = ((w * ppp).round() + at.frame.0 as f32, (h * ppp).round() + at.frame.1 as f32);
+    let (left, top) = crate::sizing::open_origin((at.free.0 as f32, at.free.1 as f32), (at.free.2 as f32, at.free.3 as f32), outer);
+    at.move_to(left.round() as i32, top.round() as i32, outer.0 as i32, outer.1 as i32);
+}
+
+/// Windows: makes the editor window `dy` points taller at its bottom edge (shorter for a negative
+/// `dy`), so that what it shows stays where it is on screen. Returns the points really added: a
+/// window can't get taller than its screen has room, one that would end below the taskbar moves
+/// up, and a maximized, minimized or full-screen window is left alone.
+#[cfg(target_os = "windows")]
+pub fn grow_main_window(ctx: &eframe::egui::Context, dy: f32) -> f32 {
+    let Some(at) = Placed::editor(ctx, false) else { return 0.0 };
+    let ppp = ctx.pixels_per_point().max(0.5);
+    let (left, top, width, height) = at.outer;
+    let smallest = (crate::sizing::EDITOR_MIN_SIZE.1 * ppp).round() + at.frame.1 as f32;
+    let (new_top, new_height) = crate::sizing::grow_at_bottom(top as f32, height as f32, (dy * ppp).round(), smallest, at.free.1 as f32, at.free.3 as f32);
+    at.move_to(left, new_top as i32, width, new_height as i32);
+    (new_height - height as f32) / ppp
+}
+
+/// Linux: sizes the editor for its screen and centres it there. The screen size includes the
 /// panel and the window's own title bar, so `CHROME` is kept free for them.
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 pub fn center_main_window(ctx: &eframe::egui::Context, size: impl Fn(f32, f32) -> (f32, f32)) {
     use eframe::egui::{pos2, vec2, ViewportCommand};
     const CHROME: f32 = 90.0;

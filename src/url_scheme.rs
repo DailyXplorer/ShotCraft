@@ -263,11 +263,12 @@ pub fn take() -> Vec<Route> {
 }
 
 /// Files the system asked the app to open (Finder's Open With, a file dropped on the app's icon,
-/// `open -a ShotCraft file.png`). Unlike a link this is the user's own act: it waits for no permission.
+/// `open -a ShotCraft file.png`; on Windows and Linux, a launch with a file while a copy runs,
+/// which is what Explorer's Open with does). Unlike a link this is the user's own act: it waits
+/// for no permission.
 static FILES: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
 /// The system handed over a file to open (from any thread).
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn submit_file(path: PathBuf) {
     {
         let mut files = FILES.lock().unwrap();
