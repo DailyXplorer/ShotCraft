@@ -4687,6 +4687,42 @@ mod toolbar_look_tests {
         crate::headless::save_png(&img, &std::path::Path::new(&dir).join("after-480-more-menu.png"));
     }
 
+    /// Windows: a click on the menu button shows the menus, pointing at one opens it beside the
+    /// list, and a click on one of its rows runs the command and closes everything.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_menu_button_opens_the_menus_and_a_row_runs_its_command() {
+        use egui::{Event, Modifiers, PointerButton};
+        let size = (900.0, 612.0);
+        let click = |at: egui::Pos2| {
+            vec![
+                Event::PointerMoved(at),
+                Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE },
+                Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE },
+            ]
+        };
+        // Where `tests/reference/ui-windows/menu-draw.png` shows them: the button at the left end
+        // of the bar, Draw as the fifth menu of the list, Arrow as the first row of its menu.
+        let button = egui::pos2(TOOLBAR_EDGE + seg_group_w(1) / 2.0, TOOLBAR_H / 2.0);
+        let (draw, arrow) = (egui::pos2(100.0, 168.0), egui::pos2(340.0, 168.0));
+        crate::headless::with_rig(|rig| {
+            let mut app = rig.app();
+            app.doc = Some(Doc::new(picture(), 2.0));
+            rig.render_window(size, 2.0, vec![], |ui| app.editor_ui(ui));
+            assert!(!egui::Popup::is_any_open(&rig.ctx), "nothing is open before the click");
+            rig.render_window(size, 2.0, click(button), |ui| app.editor_ui(ui));
+            assert!(egui::Popup::is_any_open(&rig.ctx), "the button opens the list of menus");
+            rig.render_window(size, 2.0, vec![Event::PointerMoved(draw)], |ui| app.editor_ui(ui));
+            rig.render_window(size, 2.0, vec![Event::PointerMoved(arrow)], |ui| app.editor_ui(ui));
+            assert!(app.queue.lock().unwrap().is_empty(), "pointing runs nothing");
+            rig.render_window(size, 2.0, click(arrow), |ui| app.editor_ui(ui));
+            let picked = app.queue.lock().unwrap().iter().any(|a| matches!(a, Action::Tool(Tool::Arrow)));
+            assert!(picked, "the Arrow row of the Draw menu picks the Arrow tool");
+            rig.render_window(size, 2.0, vec![Event::PointerGone], |ui| app.editor_ui(ui));
+            assert!(!egui::Popup::is_any_open(&rig.ctx), "the menus close after a command");
+        });
+    }
+
     /// Where the drag handle sits in a toolbar of this width (under the menu bar, where there is one).
     fn drag_handle_center(width: f32) -> egui::Pos2 {
         let left = toolbar_cluster_left(width, toolbar_fit(width)) + seg_group_w(crate::sizing::TOOLBAR_COPY_ITEMS) + GROUP_GAP;
