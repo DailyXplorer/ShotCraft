@@ -3334,7 +3334,7 @@ impl App {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = t;
-            self.about_open = crate::dialog::show(ctx, "about", "About ShotCraft", ABOUT_SIZE, self.about_open, &self.about_dialog, about_body);
+            self.about_open = crate::dialog::show(ctx, "about", "About ShotCraft", ABOUT_SIZE, self.about_open, &self.about_dialog, |ui, t| about_body(ui, t, env!("CARGO_PKG_VERSION")));
             let rows = self.shortcuts_open.then(|| crate::commands::shortcut_rows(&self.settings));
             self.shortcuts_open = crate::dialog::show(ctx, "shortcuts", "Keyboard Shortcuts", SHORTCUTS_SIZE, self.shortcuts_open, &self.shortcuts_dialog, move |ui, t| {
                 if let Some(rows) = &rows {
@@ -3345,8 +3345,10 @@ impl App {
     }
 }
 
+/// The About window's contents. `version` is the app's, except in the picture the visual tests
+/// compare, which must not change with every release.
 #[cfg(not(target_os = "macos"))]
-fn about_body(ui: &mut Ui, t: &Th) {
+fn about_body(ui: &mut Ui, t: &Th, version: &str) {
     ui.horizontal(|ui| {
         let (r, _) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::hover());
         icons::draw(ui.painter(), r, Icon::Ocr, t.accent);
@@ -3358,7 +3360,7 @@ fn about_body(ui: &mut Ui, t: &Th) {
                     .family(FontFamily::Name("medium".into()))
                     .color(t.text),
             );
-            ui.label(egui::RichText::new(concat!("Version ", env!("CARGO_PKG_VERSION"))).color(t.dim));
+            ui.label(egui::RichText::new(format!("Version {version}")).color(t.dim));
         });
     });
     ui.add_space(10.0);
@@ -3610,7 +3612,7 @@ pub fn dialog_preview(ui: &mut Ui, which: &str, settings: &crate::settings::Sett
             if which == "shortcuts" {
                 shortcuts_body(ui, &t, &crate::commands::shortcut_rows(settings))
             } else {
-                about_body(ui, &t)
+                about_body(ui, &t, "0.0.0")
             }
         });
 }
