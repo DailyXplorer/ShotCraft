@@ -13,6 +13,7 @@ using System;
 using System.Runtime.InteropServices;
 public static class Front {
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);
+    [DllImport("user32.dll")] public static extern IntPtr GetLastActivePopup(IntPtr window);
 }
 '@
 if (-not $Setup -or -not (Test-Path $Setup)) { throw 'No installer: run scripts\windows\make-installer.ps1 first.' }
@@ -28,7 +29,8 @@ function Page([string]$name, [int]$seconds = 3) {
 }
 function Press([string]$keys) {
     $window = Wizard
-    if ($window) { [void][Front]::SetForegroundWindow($window.MainWindowHandle) }
+    # A question the wizard asks is a window of its own, and the wizard takes no keys meanwhile.
+    if ($window) { [void][Front]::SetForegroundWindow([Front]::GetLastActivePopup($window.MainWindowHandle)) }
     Start-Sleep -Milliseconds 400
     [System.Windows.Forms.SendKeys]::SendWait($keys)
 }
