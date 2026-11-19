@@ -1,0 +1,47 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ShotCraft scrolling test page</title>
+<!--
+  A page whose stitched capture can be checked by a program (see `live_scroll` in src/scroll.rs).
+  Every row carries its number as a strip of cells: red, twelve black (0) or white (1) cells with
+  the highest bit first, then blue. Any pixel row of a capture therefore says which page row it
+  shows. ?rows=N sets the number of rows, ?sticky=0 lets the header scroll away with the page.
+-->
+<style>
+  html, body { margin: 0; background: #fff; color: #111827; font: 14px/1 -apple-system, "Helvetica Neue", Arial, sans-serif; }
+  header { position: sticky; top: 0; z-index: 2; height: 60px; box-sizing: border-box; padding: 0 16px; display: flex; align-items: center; gap: 12px; background: #1f2937; color: #f9fafb; font-weight: 600; }
+  header.loose { position: static; }
+  header span { font-weight: 400; color: #9ca3af; }
+  .row { height: 40px; display: flex; align-items: center; white-space: nowrap; overflow: hidden; }
+  .row:nth-child(even) { background: #f3f4f6; }
+  .strip { display: flex; flex: none; margin: 0 12px 0 8px; }
+  .strip i { display: block; width: 12px; height: 40px; background: #000; }
+  .strip i.on { background: #fff; }
+  .strip i.first { background: #f00; }
+  .strip i.last { background: #00f; }
+  .row b { flex: none; width: 76px; font-variant-numeric: tabular-nums; }
+  .row em { font-style: normal; color: #4b5563; }
+  footer { height: 120px; display: flex; align-items: center; justify-content: center; background: #065f46; color: #ecfdf5; font-weight: 600; }
+</style>
+<header id="head">ShotCraft scrolling test page <span id="info"></span></header>
+<main id="rows"></main>
+<footer>End of the page</footer>
+<script>
+  const query = new URLSearchParams(location.search);
+  const count = Math.min(4000, Math.max(1, parseInt(query.get('rows') || '220', 10)));
+  if (query.get('sticky') === '0') document.getElementById('head').className = 'loose';
+  const words = ['window', 'capture', 'pixel', 'margin', 'scroll', 'header', 'canvas', 'arrow', 'layer', 'shadow', 'border', 'cursor', 'button', 'screen', 'colour', 'ruler', 'offset', 'frame', 'stitch', 'export'];
+  let seed = 12345;
+  const next = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) >> 8;
+  let html = '';
+  for (let i = 0; i < count; i++) {
+    let cells = '<i class="first"></i>';
+    for (let bit = 11; bit >= 0; bit--) cells += (i >> bit) & 1 ? '<i class="on"></i>' : '<i></i>';
+    cells += '<i class="last"></i>';
+    let text = '';
+    for (let n = 3 + (next() % 9); n > 0; n--) text += words[next() % words.length] + ' ';
+    html += `<div class="row"><span class="strip">${cells}</span><b>Row ${i}</b><em>${text}</em></div>`;
+  }
+  document.getElementById('rows').innerHTML = html;
+  document.getElementById('info').textContent = `${count} rows of 40 px`;
+</script>

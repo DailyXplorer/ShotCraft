@@ -1544,4 +1544,30 @@ mod real_screen {
             Started::Done(Ok(None)) => panic!("active window: cancelled"),
         }
     }
+
+    /// How long one look of a scrolling capture takes on this computer:
+    ///
+    ///   cargo test how_long_a_look_takes -- --ignored --nocapture
+    #[test]
+    #[ignore = "reads this computer's real screens"]
+    fn how_long_a_look_takes() {
+        let &(x, y, w, h) = backend::screens().first().expect("a screen");
+        let rect = crate::scroll::GrabRect { x, y, w: w.min(900), h: h.min(600) };
+        grab_area(&rect).expect("grab");
+        let mut ms: Vec<f64> = (0..40)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                grab_area(&rect).expect("grab");
+                started.elapsed().as_secs_f64() * 1000.0
+            })
+            .collect();
+        ms.sort_by(f64::total_cmp);
+        println!("a look at {} x {} px: median {:.1} ms, fastest {:.1} ms, slowest {:.1} ms, {} looks", rect.w, rect.h, ms[ms.len() / 2], ms[0], ms[ms.len() - 1], ms.len());
+        // A look also reads where the screens are, twice: what one such reading costs.
+        let started = std::time::Instant::now();
+        for _ in 0..40 {
+            backend::screens();
+        }
+        println!("reading where the {} screen(s) are: {:.2} ms each time", backend::screens().len(), started.elapsed().as_secs_f64() * 1000.0 / 40.0);
+    }
 }

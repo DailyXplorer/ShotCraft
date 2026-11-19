@@ -1,0 +1,7 @@
+# Windows: the C runtime is linked into shotcraft.exe, so it starts on a PC that never had the
+# Visual C++ redistributable installed. scripts/windows/make-installer.ps1 checks it.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

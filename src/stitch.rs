@@ -9,6 +9,9 @@
 //!   row difference over the rows both frames show (a coarse search on a subset of rows, then a check
 //!   on all of them). A shift is only accepted when it clearly beats every unrelated shift, so flat or
 //!   repetitive content gives "lost track" and never a wrong seam.
+//! * A frame that fits no shift as a whole can still have most of its width moving together: a side
+//!   panel that scrolls with the page for a few rows and then sticks moves by another amount. The
+//!   shift most of the textured columns agree on is then taken, and checked on those columns.
 //! * Rows that are identical in the first two distinct frames at the top and the bottom are a fixed
 //!   header and footer. They are kept once: the header stays on top, the footer goes at the very end.
 //! * Only rows below everything already stitched are appended, so frames that do not move, or that
@@ -45,6 +48,14 @@ const MOVING_COLUMN_PERCENT: usize = 90;
 /// Columns are only blanked when at least this many are fixed and at least this many move.
 const MIN_FIXED_COLUMNS: usize = 2;
 const MIN_MOVING_COLUMNS: usize = 4;
+
+/// A shift the frame as a whole does not fit is still taken when more than half of the textured
+/// columns, and at least this many, stand behind it...
+const MIN_MAJORITY_COLUMNS: usize = 6;
+/// ... and when it has this many times the columns of the next shift.
+const MAJORITY_LEAD: usize = 2;
+/// The cheapest shifts of the whole frame that are put to the columns.
+const MAJORITY_CANDIDATES: usize = 6;
 
 /// A hint narrows the search to this fraction of the body height (1/n) on each side, at least `HINT_MIN_TOLERANCE` rows.
 const HINT_TOLERANCE_DIV: usize = 20;
@@ -197,24 +208,20 @@ fn without_fixed_columns(prev: &Sig, cur: &Sig, top: usize, bot: usize) -> Optio
 
 /// Finds how far the page moved between `prev` and `cur`, looking only at rows `top..bot`.
 fn estimate(prev: &Sig, cur: &Sig, top: usize, bot: usize, hint: Option<i32>) -> Estimate {
-    if bot.saturating_sub(top) >= MIN_BODY {
-        if let Some((p, c)) = without_fixed_columns(prev, cur, top, bot) {
-            return estimate_columns(&p, &c, top, bot, hint);
-        }
+    let narrowed = if bot.saturating_sub(top) >= MIN_BODY { without_fixed_columns(prev, cur, top, bot) } else { None };
+    let (prev, cur) = narrowed.as_ref().map_or((prev, cur), |(p, c)| (p, c));
+    match estimate_columns(prev, cur, top, bot, hint) {
+        Estimate::Lost => estimate_by_majority(prev, cur, top, bot).unwrap_or(Estimate::Lost),
+        found => found,
     }
-    estimate_columns(prev, cur, top, bot, hint)
 }
 
-fn estimate_columns(prev: &Sig, cur: &Sig, top: usize, bot: usize, hint: Option<i32>) -> Estimate {
-    let body = bot.saturating_sub(top);
-    if body < MIN_BODY {
-        return Estimate::Lost;
-    }
-    let blocks = cur.blocks;
-    let mismatches = (top..bot).filter(|&y| !cur.same_row(y, prev, y)).count();
-    if mismatches * 200 <= body {
-        return Estimate::Same;
-    }
+/// How well every shift of `cur` against `prev` fits over rows `top..bot`: the mean block
+/// difference on a subset of the rows, `f32::MAX` for a shift whose overlap has too little to match
+/// on. Entry `i` is the shift `i - dmax`; `dmax` is returned with the costs. The body must be at
+/// least `MIN_BODY` rows.
+fn shift_costs(prev: &Sig, cur: &Sig, top: usize, bot: usize) -> (Vec<f32>, i32) {
+    let (blocks, body) = (cur.blocks, bot - top);
     let min_overlap = (body / 8).max(24).min(body - 1);
     let dmax = (body - min_overlap) as i32;
     let step = (body / 160).max(1);
@@ -235,6 +242,76 @@ fn estimate_columns(prev: &Sig, cur: &Sig, top: usize, bot: usize, hint: Option<
         }
         costs.push(if evidence >= MIN_INFORMATIVE_ROWS { sum as f32 / (n.max(1) * blocks as u64) as f32 } else { f32::MAX });
     }
+    (costs, dmax)
+}
+
+/// The shift most of the frame's width agrees on, for a frame that fits no shift as a whole: part
+/// of its width moved by another amount (a side panel that scrolls with the page and then sticks,
+/// a pane with its own scrolling). The cheapest shifts of the whole frame are the candidates; for
+/// each, the textured columns say whether it fits them. The one most of them stand behind, well
+/// ahead of the next, is then checked row by row on the columns that agree. `None` when no shift
+/// has such a majority.
+fn estimate_by_majority(prev: &Sig, cur: &Sig, top: usize, bot: usize) -> Option<Estimate> {
+    let body = bot.saturating_sub(top);
+    if body < MIN_BODY {
+        return None;
+    }
+    let blocks = cur.blocks;
+    let col = |s: &Sig, y: usize, b: usize| s.rows[y * blocks + b];
+    let textured: Vec<usize> = (0..blocks)
+        .filter(|&b| {
+            let (lo, hi) = (top..bot).fold((255u8, 0u8), |(lo, hi), y| (lo.min(col(cur, y, b)), hi.max(col(cur, y, b))));
+            hi - lo >= TEXTURE_RANGE
+        })
+        .collect();
+    if textured.len() < MIN_MAJORITY_COLUMNS {
+        return None;
+    }
+    let (costs, dmax) = shift_costs(prev, cur, top, bot);
+    let mut cheapest: Vec<usize> = (0..costs.len()).filter(|&i| costs[i] < f32::MAX).collect();
+    cheapest.sort_by(|&a, &b| costs[a].total_cmp(&costs[b]));
+    let mut candidates: Vec<i32> = Vec::with_capacity(MAJORITY_CANDIDATES);
+    for d in cheapest.into_iter().map(|i| i as i32 - dmax) {
+        if candidates.len() < MAJORITY_CANDIDATES && candidates.iter().all(|c| (c - d).abs() > NEIGHBOURHOOD) {
+            candidates.push(d);
+        }
+    }
+    // The columns a shift fits: their own mean difference over the overlap is within the tolerance.
+    let behind = |d: i32| -> Vec<usize> {
+        let (lo, hi) = (top + (-d).max(0) as usize, bot - d.max(0) as usize);
+        textured
+            .iter()
+            .copied()
+            .filter(|&b| {
+                let sum: u32 = (lo..hi).map(|y| col(cur, y, b).abs_diff(col(prev, (y as i32 + d) as usize, b)) as u32).sum();
+                sum <= ROW_TOLERANCE * (hi - lo) as u32
+            })
+            .collect()
+    };
+    let mut standing: Vec<(i32, Vec<usize>)> = candidates.into_iter().filter(|&d| d != 0).map(|d| (d, behind(d))).collect();
+    standing.sort_by_key(|(_, columns)| std::cmp::Reverse(columns.len()));
+    let (d, agreeing) = standing.first()?;
+    let next = standing.get(1).map_or(0, |(_, columns)| columns.len());
+    if agreeing.len() < MIN_MAJORITY_COLUMNS || agreeing.len() * 2 <= textured.len() || agreeing.len() < next * MAJORITY_LEAD {
+        return None;
+    }
+    let mut leave_out = vec![false; blocks];
+    for &b in &textured {
+        leave_out[b] = !agreeing.contains(&b);
+    }
+    verify(&prev.blanked(&leave_out), &cur.blanked(&leave_out), top, bot, *d)
+}
+
+fn estimate_columns(prev: &Sig, cur: &Sig, top: usize, bot: usize, hint: Option<i32>) -> Estimate {
+    let body = bot.saturating_sub(top);
+    if body < MIN_BODY {
+        return Estimate::Lost;
+    }
+    let mismatches = (top..bot).filter(|&y| !cur.same_row(y, prev, y)).count();
+    if mismatches * 200 <= body {
+        return Estimate::Same;
+    }
+    let (costs, dmax) = shift_costs(prev, cur, top, bot);
     let at = |i: usize| i as i32 - dmax;
     // With a hint (the scroll the caller asked for), only shifts near it are candidates, and among the
     // ones that fit equally well the closest to the hint wins: that is what tells the right row of a
@@ -775,6 +852,45 @@ mod tests {
             assert!(got[1..].iter().all(|p| matches!(p, Push::Appended { offset, .. } if *offset == step as i32)), "step {step}: {:?}", got.iter().map(label).collect::<Vec<_>>());
             assert_eq!(s.frames_used(), 7);
         }
+    }
+
+    /// A side panel that scrolls with the page for a few rows and then sticks to the top of the
+    /// window, as the panels of an encyclopedia article do: its columns fit neither the shift of
+    /// the article nor no shift at all.
+    #[test]
+    fn a_side_panel_that_sticks_after_a_few_rows_does_not_lose_the_page() {
+        let (w, fh, panel_w, step) = (1000u32, 900u32, 160u32, 200u32);
+        let page = text_page(w, 4000, 3);
+        let panel = text_page(panel_w, 2000, 8);
+        let frame = |k: u32| {
+            let mut f = crop(&page, k * step, fh);
+            image::imageops::replace(&mut f, &crop(&panel, (k * step).min(20), fh), (w - panel_w) as i64, 0);
+            f
+        };
+        let mut s = Stitcher::new();
+        let got: Vec<Push> = (0..6).map(|k| if k == 0 { s.push(&frame(k)) } else { s.push_hinted(&frame(k), Some(step as i32)) }).collect();
+        assert!(got[1..].iter().all(|p| matches!(p, Push::Appended { offset, .. } if *offset == step as i32)), "{:?}", got.iter().map(label).collect::<Vec<_>>());
+        let out = s.finish().unwrap();
+        assert_eq!(out.height(), fh + 5 * step);
+        let article = |img: &RgbaImage| image::imageops::crop_imm(img, 0, 0, w - panel_w, fh + 5 * step).to_image();
+        assert!(article(&out) == article(&page), "the article is stitched as the page has it");
+    }
+
+    /// Two halves of the frame that move by different amounts: no shift has most of the columns
+    /// behind it, so none is taken.
+    #[test]
+    fn two_panes_scrolling_by_different_amounts_are_not_guessed() {
+        let (w, fh) = (1000u32, 900u32);
+        let (left, right) = (text_page(w / 2, 4000, 3), text_page(w / 2, 4000, 8));
+        let frame = |k: u32| {
+            let mut f = RgbaImage::new(w, fh);
+            image::imageops::replace(&mut f, &crop(&left, k * 200, fh), 0, 0);
+            image::imageops::replace(&mut f, &crop(&right, k * 120, fh), (w / 2) as i64, 0);
+            f
+        };
+        let mut s = Stitcher::new();
+        assert_eq!(s.push(&frame(0)), Push::First);
+        assert_eq!(s.push(&frame(1)), Push::Lost);
     }
 
     /// Retina frames, as `screencapture` writes them: twice as many pixel rows as points.

@@ -1,6 +1,6 @@
 [package]
 name = "shotcraft"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 license = "MIT"
 
@@ -29,6 +29,7 @@ rxing = { version = "0.9", default-features = false, features = ["decoders", "mu
 
 [target.'cfg(target_os = "windows")'.dependencies]
 tray-icon = "0.25"
+raw-window-handle = "0.6"
 xcap = { version = "0.9", default-features = false }
 winreg = "0.55"
 windows = { version = "0.62", features = ["Foundation", "Foundation_Collections", "Globalization", "Graphics_Imaging", "Media_Ocr", "Storage_Streams", "Win32_System_WinRT", "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_Xps", "Win32_System_Com", "Win32_System_Memory", "Win32_System_Ole", "Win32_UI_Controls_Dialogs", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }

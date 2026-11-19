@@ -2,7 +2,7 @@
 
 A simple, private screenshot tool for macOS. Capture an area, a window or the full screen, then annotate, blur, measure, read text (OCR) and pin the result on screen. Everything stays on your Mac: no account, no upload, no telemetry. The only network access is the update check in release builds, which the app asks about first.
 
-ShotCraft is written in Rust. It is an early version (0.2.2).
+ShotCraft is written in Rust. It is an early version (0.2.3).
 
 ## Features
 
@@ -11,7 +11,7 @@ ShotCraft is written in Rust. It is an early version (0.2.2).
 * Area, any window, repeat the last area, and full-screen captures. Fullscreen captures the display the mouse pointer is on, and All Displays puts every display in one picture laid out like your desk.
 * Active Window captures the frontmost window of the app you are using, without clicking. Use it from a hotkey, or from the menu bar icon menu, which targets the app that was in front before you opened it. When that app has no capturable window, you pick a window instead.
 * A delayed capture (3 seconds by default, 5 or 10 in Preferences) of the display the mouse was on when you started it. The menu entry tells the wait. Preferences also has an option to put the mouse pointer in Fullscreen, Active Window, Delayed and Repeat Area screenshots; screenshots where you select an area or a window by hand never include it.
-* Scrolling capture: pick an area and ShotCraft scrolls it for you, grabs it again and again and stitches what the area showed into one tall image that opens in the editor. No ShotCraft window is on screen while it runs: press `Esc` to finish at any time and keep what was captured; it opens like any other capture. Scrolling for you needs the Accessibility permission, which macOS asks for the first time; without it a notification tells you to scroll by hand and press `Esc`, and the capture also ends by itself 3 seconds after the page stops moving. Fixed headers, footers and side panels are kept once, scrolling back up adds nothing, and the image stops at 20,000 px (Preferences changes this, and the speed). Start it from the menu bar icon or with its hotkey (not set by default); pressing the hotkey again acts like `Esc`. Scrolling Capture (Up) is for pages that grow upwards, like a chat: scroll to the bottom of the page first, select the area, and ShotCraft scrolls up and stitches upwards.
+* Scrolling capture: pick an area and ShotCraft scrolls it for you, grabs it again and again and stitches what the area showed into one tall image that opens in the editor. No ShotCraft window is on screen while it runs: press `Esc` to finish at any time and keep what was captured; it opens like any other capture. Scrolling for you needs the Accessibility permission, which macOS asks for the first time; without it a notification tells you to scroll by hand and press `Esc`, and the capture also ends by itself 3 seconds after the page stops moving. Fixed headers, footers and side panels are kept once, a side panel that scrolls a little and then sticks does not stop the capture, scrolling back up adds nothing, and the image stops at 20,000 px (Preferences changes this, and the speed). Start it from the menu bar icon or with its hotkey (not set by default); pressing the hotkey again acts like `Esc`. Scrolling Capture (Up) is for pages that grow upwards, like a chat: scroll to the bottom of the page first, select the area, and ShotCraft scrolls up and stitches upwards.
 * Active Window and Any Window captures have four looks (Preferences → General → Window Screenshot Background): **Transparent** (the default: the window with its shadow, rounded corners and see-through background), **Trim shadow** (cut tight without the shadow, corners stay rounded), **Solid Color** and **Wallpaper** (the window and its shadow laid on a color, or on your desktop picture, as an opaque rectangle; the padding is the shadow's own margin, so the window sits in the middle). If the wallpaper can't be read, Wallpaper falls back to the solid color. Area, Fullscreen and All Displays captures are never changed.
 * Instant text and QR recognition: select an area and the recognized text goes straight to the clipboard, with no editor.
 * Open an existing image from a file or from the clipboard. The file picker and the command line open PNG, JPEG, GIF, BMP, TIFF and WebP files; saving writes PNG or JPEG. Animated GIFs open as their first frame.
@@ -19,7 +19,7 @@ ShotCraft is written in Rust. It is an early version (0.2.2).
 
 Scrolling capture limits:
 
-* Automatic scrolling moves the mouse pointer into the area and sends wheel events, so do not touch the mouse or keyboard until it stops. It stops at the end of the page, at the height limit, or on `Esc`, which always keeps the result (if nothing was captured yet it just ends). Some apps ignore synthetic wheel events (terminals, some sandboxed windows); then a notification says the page did not move and you scroll by hand. The permission has to be granted again after an update if macOS forgets the app's signature.
+* Automatic scrolling moves the mouse pointer into the area and sends wheel events, so do not touch the mouse or keyboard until it stops. It stops at the end of the page, at the height limit, or on `Esc`, which always keeps the result (if nothing was captured yet it just ends). Some apps ignore synthetic wheel events (terminals, some sandboxed windows); then a notification says the page did not move and you scroll by hand. A page that has not moved at all after 10 seconds ends the capture: what the area showed opens like any other capture. The permission has to be granted again after an update if macOS forgets the app's signature.
 * By hand, scroll steadily: if the page jumps further than about 90% of the area between two grabs, or the content is blank or strongly repetitive, that step is dropped and the control says "Scroll a bit slower".
 * Content that animates inside the area (video, ads, a blinking cursor beside the text) can confuse the match; small changes are tolerated.
 * The image only grows in the direction of the capture (down, or up for Scrolling Capture (Up)): content on the other side of the point where you started is not added (a notification says so), and scrolling back over what is already captured changes nothing. A blank band at the very top of the page is treated like a fixed header, which is harmless. Esc is taken from other apps while a capture runs (it only ends the capture, it never starts one), and given back when it ends; if another ShotCraft hotkey already uses Esc, press the Scrolling Capture hotkey again, or choose Scrolling Capture in the menu bar icon menu, to finish. Warnings (scroll slower, the page did not move, no Accessibility permission) come as one notification per capture, at most.
@@ -167,11 +167,12 @@ ShotCraft makes no network connections of its own: the source contains no networ
 ## Requirements
 
 * macOS 12 or later (`LSMinimumSystemVersion` in `packaging/Info.plist`).
-* The [Rust](https://rustup.rs) toolchain to build from source.
+* On Windows: Windows 10 version 1809 or later, or Windows 11, 64-bit. Nothing else has to be installed.
+* The [Rust](https://rustup.rs) toolchain to build from source. ShotCraft itself needs no Rust on the computer that runs it.
 
 ## Install
 
-Download `ShotCraft-0.2.2.zip` from the [Releases page](https://github.com/DailyXplorer/ShotCraft/releases/latest), unzip it and move `ShotCraft.app` to `/Applications`. The app is universal (Apple Silicon and Intel).
+Download `ShotCraft-0.2.3.zip` from the [Releases page](https://github.com/DailyXplorer/ShotCraft/releases/latest), unzip it and move `ShotCraft.app` to `/Applications`. The app is universal (Apple Silicon and Intel). Finder then lists ShotCraft under Open With for PNG, JPEG, GIF, BMP, TIFF and WebP pictures; it does not become the default app for them.
 
 ShotCraft is signed with its own certificate, not an Apple Developer ID, and it is not notarized, so macOS refuses to open it the first time (`spctl` reports "rejected"). To open it anyway:
 
@@ -180,9 +181,23 @@ ShotCraft is signed with its own certificate, not an Apple Developer ID, and it 
 
 You only need to do this the first time.
 
+### Install on Windows
+
+Download `ShotCraft-<version>-Setup.exe` from the [Releases page](https://github.com/DailyXplorer/ShotCraft/releases/latest) and run it. Releases after 0.2.3 have it.
+
+* The installer asks for no administrator rights: it installs ShotCraft for your Windows account, in `%LOCALAPPDATA%\Programs\ShotCraft`. To install it for every account, run it with `/ALLUSERS`: Windows then asks for administrator rights.
+* Nothing else has to be installed first. `shotcraft.exe` is a native Windows program: it needs no Rust, no .NET and no Visual C++ runtime.
+* ShotCraft reads text in pictures with Windows' own text recognition. If Windows has none for your language, the installer says so and offers to install it. Windows then asks for administrator rights and downloads it. The installer waits up to five minutes. When Windows needs longer, the installer finishes and Windows carries on by itself. If you answer no, everything else works, and you can add it later in Settings > Time & language > Language & region.
+* Explorer then lists ShotCraft under Open with for PNG, JPEG, GIF, BMP, TIFF and WebP pictures. It does not become the default app for them.
+* The installer is not signed with a code signing certificate, so Windows SmartScreen may stop it the first time with "Windows protected your PC". Click More info, then Run anyway.
+
+To update, run the installer of the newer version: it asks before it closes ShotCraft, replaces it and keeps your settings. To remove ShotCraft, use Settings > Apps > Installed apps. The uninstaller asks whether to remove your settings too.
+
 ## Windows and Linux
 
-ShotCraft also runs on Windows 10 and 11 and on Linux (X11; Wayland with limits, below). It lives in the system tray instead of the menu bar: start `shotcraft.exe` (Windows) or `shotcraft` (Linux) and its icon appears there, with every command in its menu. Starting it again while it runs changes nothing, as on macOS.
+ShotCraft also runs on Windows 10 and 11 and on Linux (X11; Wayland with limits, below). It lives in the system tray instead of the menu bar: start ShotCraft from the Start menu (Windows) or run `shotcraft` (Linux) and its icon appears there, with every command in its menu. Starting it again while it runs changes nothing, as on macOS.
+
+**The editor.** On Windows the editor has the same single bar as on macOS, and its window opens at the size of the picture. The button at the left end of the bar opens the menus (ShotCraft, Capture, File, Edit, Draw, Zoom, Help). On Linux the editor has a menu bar, the tools centred under it and a status bar at the bottom.
 
 **Keep the tray icon in sight (Windows 11).** Windows puts every new tray icon in the hidden overflow, the ^ next to the clock, and lets no app pin itself. To see ShotCraft's icon, and the check mark it shows for a moment after a copy or a save, turn it on in Settings > Personalization > Taskbar > Other system tray icons > ShotCraft ("Taskbar corner overflow" on older versions of Windows 11), or drag the icon from the ^ panel onto the taskbar. On Windows 10 the setting is Settings > Personalization > Taskbar > Select which icons appear on the taskbar.
 
@@ -201,6 +216,12 @@ ShotCraft also runs on Windows 10 and 11 and on Linux (X11; Wayland with limits,
 
 The script runs `cargo build --release`, assembles the app bundle and signs it ad hoc (no developer certificate).
 
+On Windows, `cargo build --release` builds `target\release\shotcraft.exe`, which runs as it is. To build the installer too, install [Inno Setup 6](https://jrsoftware.org/isinfo.php) (`winget install JRSoftware.InnoSetup`) and run:
+
+```powershell
+scripts\windows\make-installer.ps1   # builds target\dist\ShotCraft-<version>-Setup.exe
+```
+
 The app icon, window icon and menu bar icon are drawn in `assets/logo/*.svg`. After changing them, run `node scripts/make-icons.mjs` on a Mac (it needs Playwright and `iconutil`) to rewrite `assets/AppIcon.icns`, `assets/window-icon.png`, `assets/menubar.png` and `assets/shotcraft.ico` (the Windows exe icon). On Windows or Linux it writes all of them except `assets/AppIcon.icns`, and prints the `iconutil` command to finish that one on a Mac.
 
 ## Permissions
@@ -217,9 +238,11 @@ Releases are signed with a ShotCraft certificate rather than an Apple Developer 
 
 Updates come through [Sparkle](https://sparkle-project.org), which installs a new version only if its Ed25519 signature matches the key inside the app. On the second launch the app asks whether to check automatically. A check tells GitHub your IP address and the app version, and sends nothing else. Change your choice with Check for Updates Automatically in the menu bar icon menu, or use Check for Updates there at any time. Builds from `make-app.sh` do not include Sparkle.
 
+The Windows and Linux versions have no updater and connect to nothing. On Windows, run the installer of the newer version.
+
 ## Releasing
 
-Set the version in `Cargo.toml`, then push a tag such as `v0.2.2`. The Release workflow tests, signs and publishes the app. The tag must match the version.
+Set the version in `Cargo.toml`, then push a tag such as `v0.2.3`. The Release workflow tests on macOS and on Windows, signs the macOS app, builds the Windows installer and publishes both. The tag must match the version.
 
 ## Credits
 
