@@ -2,7 +2,7 @@
 
 A simple, private screenshot tool for macOS. Capture an area, a window or the full screen, then annotate, blur, measure, read text (OCR) and pin the result on screen. Everything stays on your Mac: no account, no upload, no telemetry. The only network access is the update check in release builds, which the app asks about first.
 
-ShotCraft is written in Rust. It is an early version (0.2.3).
+ShotCraft is written in Rust. It is an early version (0.2.4).
 
 ## Features
 
@@ -172,7 +172,7 @@ ShotCraft makes no network connections of its own: the source contains no networ
 
 ## Install
 
-Download `ShotCraft-0.2.3.zip` from the [Releases page](https://github.com/DailyXplorer/ShotCraft/releases/latest), unzip it and move `ShotCraft.app` to `/Applications`. The app is universal (Apple Silicon and Intel). Finder then lists ShotCraft under Open With for PNG, JPEG, GIF, BMP, TIFF and WebP pictures; it does not become the default app for them.
+Download `ShotCraft-0.2.4.zip` from the [Releases page](https://github.com/DailyXplorer/ShotCraft/releases/latest), unzip it and move `ShotCraft.app` to `/Applications`. The app is universal (Apple Silicon and Intel). Finder then lists ShotCraft under Open With for PNG, JPEG, GIF, BMP, TIFF and WebP pictures; it does not become the default app for them.
 
 ShotCraft is signed with its own certificate, not an Apple Developer ID, and it is not notarized, so macOS refuses to open it the first time (`spctl` reports "rejected"). To open it anyway:
 
@@ -183,7 +183,7 @@ You only need to do this the first time.
 
 ### Install on Windows
 
-Download `ShotCraft-<version>-Setup.exe` from the [Releases page](https://github.com/DailyXplorer/ShotCraft/releases/latest) and run it. Releases after 0.2.3 have it.
+Download `ShotCraft-0.2.4-Setup.exe` from the [Releases page](https://github.com/DailyXplorer/ShotCraft/releases/latest) and run it.
 
 * The installer asks for no administrator rights: it installs ShotCraft for your Windows account, in `%LOCALAPPDATA%\Programs\ShotCraft`. To install it for every account, run it with `/ALLUSERS`: Windows then asks for administrator rights.
 * Nothing else has to be installed first. `shotcraft.exe` is a native Windows program: it needs no Rust, no .NET and no Visual C++ runtime.
@@ -242,7 +242,7 @@ The Windows and Linux versions have no updater and connect to nothing. On Window
 
 ## Releasing
 
-Set the version in `Cargo.toml`, then push a tag such as `v0.2.3`. The Release workflow tests on macOS and on Windows, signs the macOS app, builds the Windows installer and publishes both. The tag must match the version.
+Set the version in `Cargo.toml`, then push a tag such as `v0.2.4`. The Release workflow tests on macOS and on Windows, signs the macOS app, builds the Windows installer and publishes both. The tag must match the version.
 
 ## Credits
 
