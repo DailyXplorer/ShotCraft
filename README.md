@@ -222,7 +222,7 @@ On Windows, `cargo build --release` builds `target\release\shotcraft.exe`, which
 scripts\windows\make-installer.ps1   # builds target\dist\ShotCraft-<version>-Setup.exe
 ```
 
-The app icon, window icon and menu bar icon are drawn in `assets/logo/*.svg`. After changing them, run `node scripts/make-icons.mjs` on a Mac (it needs Playwright and `iconutil`) to rewrite `assets/AppIcon.icns`, `assets/window-icon.png` and `assets/menubar.png`.
+The app icon, window icon and menu bar icon are drawn in `assets/logo/*.svg`. After changing them, run `node scripts/make-icons.mjs` on a Mac (it needs Playwright and `iconutil`) to rewrite `assets/AppIcon.icns`, `assets/window-icon.png`, `assets/menubar.png` and `assets/shotcraft.ico` (the Windows exe icon). On Windows or Linux it writes all of them except `assets/AppIcon.icns`, and prints the `iconutil` command to finish that one on a Mac.
 
 ## Permissions
 
